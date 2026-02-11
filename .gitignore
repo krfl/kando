@@ -1,0 +1,16 @@
+# Build
+/target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kando board data (per-project, not part of the tool's source)
+.kando/
