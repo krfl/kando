@@ -5,7 +5,7 @@ mod input;
 mod ui;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::Path;
 
 use clap::{Parser, Subcommand};
 
@@ -116,7 +116,7 @@ fn main() -> color_eyre::Result<()> {
     }
 }
 
-fn cmd_init(cwd: &PathBuf, name: &str, branch: Option<String>) -> color_eyre::Result<()> {
+fn cmd_init(cwd: &Path, name: &str, branch: Option<String>) -> color_eyre::Result<()> {
     // If board already exists, only allow --branch to enable/update sync
     if cwd.join(".kando").exists() {
         if let Some(ref branch) = branch {
@@ -158,7 +158,7 @@ fn cmd_init(cwd: &PathBuf, name: &str, branch: Option<String>) -> color_eyre::Re
 
 /// Ensure cwd is inside a git repo; prompt to create one if not.
 /// Returns Some(branch) if sync should be enabled, None if user declined.
-fn ensure_git_repo<'a>(cwd: &PathBuf, branch: &'a str) -> color_eyre::Result<Option<&'a str>> {
+fn ensure_git_repo<'a>(cwd: &Path, branch: &'a str) -> color_eyre::Result<Option<&'a str>> {
     use board::sync::find_git_root;
     use std::io::{self, Write};
     use std::process::Command;
@@ -192,7 +192,7 @@ fn ensure_git_repo<'a>(cwd: &PathBuf, branch: &'a str) -> color_eyre::Result<Opt
 }
 
 fn cmd_add(
-    cwd: &PathBuf,
+    cwd: &Path,
     title: &str,
     tags: Vec<String>,
     priority: &str,
@@ -230,7 +230,7 @@ fn cmd_add(
     Ok(())
 }
 
-fn cmd_list(cwd: &PathBuf, tag: Option<&str>, column: Option<&str>) -> color_eyre::Result<()> {
+fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let board = load_board(&kando_dir)?;
     let now = chrono::Utc::now();
@@ -279,7 +279,7 @@ fn cmd_list(cwd: &PathBuf, tag: Option<&str>, column: Option<&str>) -> color_eyr
     Ok(())
 }
 
-fn cmd_move(cwd: &PathBuf, card_id: &str, target: &str) -> color_eyre::Result<()> {
+fn cmd_move(cwd: &Path, card_id: &str, target: &str) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let mut board = load_board(&kando_dir)?;
 
@@ -304,7 +304,7 @@ fn cmd_move(cwd: &PathBuf, card_id: &str, target: &str) -> color_eyre::Result<()
     Ok(())
 }
 
-fn cmd_tags(cwd: &PathBuf) -> color_eyre::Result<()> {
+fn cmd_tags(cwd: &Path) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let board = load_board(&kando_dir)?;
     let tags = board.all_tags();
@@ -326,7 +326,7 @@ fn cmd_tags(cwd: &PathBuf) -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn cmd_sync(cwd: &PathBuf) -> color_eyre::Result<()> {
+fn cmd_sync(cwd: &Path) -> color_eyre::Result<()> {
     use board::sync;
     use std::io::{self, Write};
 
@@ -380,7 +380,7 @@ fn cmd_sync(cwd: &PathBuf) -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn cmd_config_wip(cwd: &PathBuf, column: &str, limit: u32) -> color_eyre::Result<()> {
+fn cmd_config_wip(cwd: &Path, column: &str, limit: u32) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let mut board = load_board(&kando_dir)?;
 
@@ -402,7 +402,7 @@ fn cmd_config_wip(cwd: &PathBuf, column: &str, limit: u32) -> color_eyre::Result
     Ok(())
 }
 
-fn cmd_sync_status(cwd: &PathBuf) -> color_eyre::Result<()> {
+fn cmd_sync_status(cwd: &Path) -> color_eyre::Result<()> {
     use board::sync;
 
     let kando_dir = find_kando_dir(cwd)?;
@@ -468,7 +468,7 @@ fn cmd_sync_status(cwd: &PathBuf) -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn cmd_doctor(cwd: &PathBuf) -> color_eyre::Result<()> {
+fn cmd_doctor(cwd: &Path) -> color_eyre::Result<()> {
     use board::sync;
 
     let mut errors = 0u32;
@@ -611,7 +611,7 @@ fn cmd_doctor(cwd: &PathBuf) -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn cmd_tui(cwd: &PathBuf) -> color_eyre::Result<()> {
+fn cmd_tui(cwd: &Path) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
     let result = app::run(&mut terminal, cwd);
     ratatui::restore();

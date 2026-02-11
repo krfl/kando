@@ -355,17 +355,12 @@ fn process_action(
                     let max = board.columns.len();
                     let mut target = state.focused_column + 1;
                     while target < max {
-                        if state.show_hidden_columns || !board.columns[target].hidden {
-                            if !board.columns[target].cards.is_empty() {
-                                state.focused_column = target;
-                                state.selected_card = 0;
-                                break;
-                            }
-                            // Skip empty columns
-                            target += 1;
-                        } else {
-                            target += 1;
+                        if (state.show_hidden_columns || !board.columns[target].hidden) && !board.columns[target].cards.is_empty() {
+                            state.focused_column = target;
+                            state.selected_card = 0;
+                            break;
                         }
+                        target += 1;
                     }
                 }
             }
@@ -382,13 +377,10 @@ fn process_action(
                 let mut target = state.focused_column;
                 while target > 0 {
                     target -= 1;
-                    if state.show_hidden_columns || !board.columns[target].hidden {
-                        if !board.columns[target].cards.is_empty() {
-                            state.focused_column = target;
-                            state.selected_card = board.columns[target].cards.len() - 1;
-                            break;
-                        }
-                        // Skip empty columns
+                    if (state.show_hidden_columns || !board.columns[target].hidden) && !board.columns[target].cards.is_empty() {
+                        state.focused_column = target;
+                        state.selected_card = board.columns[target].cards.len() - 1;
+                        break;
                     }
                 }
             }
