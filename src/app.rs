@@ -245,6 +245,27 @@ fn next_visible_column(board: &Board, from: usize, forward: bool, show_hidden: b
     }
 }
 
+/// Run auto-close, save if any cards were closed, sync, and notify.
+fn handle_auto_close(
+    board: &mut Board,
+    state: &mut AppState,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<()> {
+    let closed = run_auto_close(board, Utc::now());
+    if !closed.is_empty() {
+        save_board(kando_dir, board)?;
+        if let Some(ref mut sync_state) = state.sync_state {
+            sync::commit_and_push(sync_state, kando_dir, "Auto-close stale cards");
+        }
+        state.notify(format!(
+            "{} card{} auto-closed to Archive",
+            closed.len(),
+            if closed.len() == 1 { "" } else { "s" }
+        ));
+    }
+    Ok(())
+}
+
 /// Try to move the selected card to an adjacent visible column.
 /// Returns `Ok(Some(sync_msg))` if the card was moved, `Ok(None)` if WIP confirmation
 /// was triggered or no move was possible.
@@ -307,18 +328,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color
     }
 
     // Run auto-close on startup
-    let closed = run_auto_close(&mut board, Utc::now());
-    if !closed.is_empty() {
-        save_board(&kando_dir, &board)?;
-        if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, &kando_dir, "Auto-close stale cards");
-        }
-        state.notify(format!(
-            "{} card{} auto-closed to Archive",
-            closed.len(),
-            if closed.len() == 1 { "" } else { "s" }
-        ));
-    }
+    handle_auto_close(&mut board, &mut state, &kando_dir)?;
 
     state.clamp_selection(&board);
 
@@ -338,18 +348,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color
 
         // Periodic auto-close
         if last_auto_close.elapsed() >= auto_close_interval {
-            let closed = run_auto_close(&mut board, Utc::now());
-            if !closed.is_empty() {
-                save_board(&kando_dir, &board)?;
-                if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, &kando_dir, "Auto-close stale cards");
-        }
-                state.notify(format!(
-                    "{} card{} auto-closed to Archive",
-                    closed.len(),
-                    if closed.len() == 1 { "" } else { "s" }
-                ));
-            }
+            handle_auto_close(&mut board, &mut state, &kando_dir)?;
             last_auto_close = Instant::now();
         }
 
