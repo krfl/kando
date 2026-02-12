@@ -6,20 +6,21 @@ pub mod status_bar;
 pub mod theme;
 pub mod tutorial;
 
+use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
 
 use crate::app::AppState;
 use crate::board::Board;
 
-pub fn render(f: &mut Frame, board: &Board, state: &AppState) {
+pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
 
     // Main board area
-    board_view::render_board(f, chunks[0], board, state);
+    board_view::render_board(f, chunks[0], board, state, now);
 
     // Status bar
     status_bar::render_status_bar(f, chunks[1], state, &board.name);
@@ -35,7 +36,7 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState) {
         crate::app::Mode::CardDetail { scroll } => {
             // Show card detail overlay
             if let Some(card) = state.selected_card_ref(board) {
-                card_detail::render_card_detail(f, f.area(), card, &board.policies, *scroll);
+                card_detail::render_card_detail(f, f.area(), card, &board.policies, *scroll, now);
             }
         }
         crate::app::Mode::Tutorial => {

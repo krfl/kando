@@ -7,10 +7,9 @@ use ratatui::Frame;
 use super::theme::Theme;
 use crate::board::age::{format_age, staleness, Staleness};
 use crate::board::{Card, Policies};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
-pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: u16) {
-    let now = Utc::now();
+pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: u16, now: DateTime<Utc>) {
 
     // Center the detail panel (60% width, 80% height)
     let width = (area.width * 60 / 100).max(40).min(area.width);

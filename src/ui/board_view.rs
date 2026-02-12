@@ -12,10 +12,9 @@ use super::theme::Theme;
 use crate::app::AppState;
 use crate::board::age::{format_age, staleness, Staleness};
 use crate::board::{Board, Card, Priority};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
-pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState) {
-    let now = Utc::now();
+pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, now: DateTime<Utc>) {
 
     // Filter visible columns
     let visible_columns: Vec<(usize, &crate::board::Column)> = board

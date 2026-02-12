@@ -372,7 +372,8 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color
         }
 
         // Render
-        terminal.draw(|f| crate::ui::render(f, &board, &state))?;
+        let now = Utc::now();
+        terminal.draw(|f| crate::ui::render(f, &board, &state, now))?;
 
         // Handle input
         if event::poll(Duration::from_millis(100))? {
