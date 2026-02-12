@@ -7,11 +7,20 @@ pub mod theme;
 pub mod tutorial;
 
 use chrono::{DateTime, Utc};
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
 use crate::app::AppState;
 use crate::board::Board;
+
+/// Create a centered rect within `area` using percentage-based sizing with minimums.
+pub fn centered_rect(area: Rect, w_pct: u16, h_pct: u16, min_w: u16, min_h: u16) -> Rect {
+    let width = (area.width * w_pct / 100).max(min_w).min(area.width);
+    let height = (area.height * h_pct / 100).max(min_h).min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    Rect::new(x, y, width, height)
+}
 
 pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>) {
     let chunks = Layout::default()

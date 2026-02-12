@@ -7,12 +7,7 @@ use ratatui::Frame;
 use super::theme::Theme;
 
 pub fn render_help(f: &mut Frame, area: Rect) {
-    // Center the panel (70% width, 85% height)
-    let width = (area.width * 70 / 100).max(60).min(area.width);
-    let height = (area.height * 85 / 100).max(24).min(area.height);
-    let x = area.x + (area.width - width) / 2;
-    let y = area.y + (area.height - height) / 2;
-    let panel_area = Rect::new(x, y, width, height);
+    let panel_area = super::centered_rect(area, 70, 85, 60, 24);
 
     f.render_widget(Clear, panel_area);
 

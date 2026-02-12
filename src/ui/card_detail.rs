@@ -11,12 +11,7 @@ use chrono::{DateTime, Utc};
 
 pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: u16, now: DateTime<Utc>) {
 
-    // Center the detail panel (60% width, 80% height)
-    let width = (area.width * 60 / 100).max(40).min(area.width);
-    let height = (area.height * 80 / 100).max(10).min(area.height);
-    let x = area.x + (area.width - width) / 2;
-    let y = area.y + (area.height - height) / 2;
-    let panel_area = Rect::new(x, y, width, height);
+    let panel_area = super::centered_rect(area, 60, 80, 40, 10);
 
     // Clear background
     f.render_widget(Clear, panel_area);
