@@ -864,7 +864,8 @@ fn process_action(
             }
         }
         Action::InputConfirm => {
-            match state.mode.clone() {
+            let old_mode = std::mem::replace(&mut state.mode, Mode::Normal);
+            match old_mode {
                 Mode::Input {
                     buf,
                     on_confirm: InputTarget::NewCardTitle,
@@ -883,7 +884,6 @@ fn process_action(
                         sync_message = Some("Create card".into());
                         state.notify("Card created");
                     }
-                    state.mode = Mode::Normal;
                 }
                 Mode::Input {
                     buf,
@@ -906,7 +906,6 @@ fn process_action(
                     sync_message = Some("Update tags".into());
                     state.clamp_selection(board);
                     state.notify("Tags updated");
-                    state.mode = Mode::Normal;
                 }
                 Mode::Filter { buf } => {
                     if buf.input.trim().is_empty() {
@@ -914,13 +913,11 @@ fn process_action(
                     } else {
                         state.active_filter = Some(buf.input);
                     }
-                    state.mode = Mode::Normal;
                 }
-                Mode::Picker { items, selected, target, .. } => {
+                Mode::Picker { mut items, selected, target, title } => {
                     match target {
                         PickerTarget::TagFilter => {
-                            let sel = selected;
-                            if let Some((tag, _)) = items.get(sel) {
+                            if let Some((tag, _)) = items.get(selected) {
                                 let tag = tag.clone();
                                 if state.active_tag_filters.contains(&tag) {
                                     state.active_tag_filters.retain(|t| *t != tag);
@@ -929,12 +926,11 @@ fn process_action(
                                 }
                             }
                             // Rebuild picker items with updated active states
-                            if let Mode::Picker { items, .. } = &mut state.mode {
-                                for (tag, active) in items.iter_mut() {
-                                    *active = state.active_tag_filters.contains(tag);
-                                }
+                            for (tag, active) in items.iter_mut() {
+                                *active = state.active_tag_filters.contains(tag);
                             }
-                            // Stay in picker mode
+                            // Put picker back — stay in picker mode
+                            state.mode = Mode::Picker { title, items, selected, target: PickerTarget::TagFilter };
                         }
                         PickerTarget::Priority => {
                             use crate::board::Priority;
@@ -952,7 +948,6 @@ fn process_action(
                                     state.notify(priority_str);
                                 }
                             }
-                            state.mode = Mode::Normal;
                         }
                         PickerTarget::MoveToColumn => {
                             if let Some((col_name, _)) = items.get(selected) {
@@ -975,7 +970,6 @@ fn process_action(
                                     state.notify(format!("Moved to {col_name}"));
                                 }
                             }
-                            state.mode = Mode::Normal;
                         }
                     }
                 }
