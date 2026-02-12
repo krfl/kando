@@ -657,11 +657,11 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
 // Handler: Card actions (CRUD, priority, tags, movement, detail view)
 // ---------------------------------------------------------------------------
 
-fn handle_card_action(
+fn handle_card_action<B: ratatui::backend::Backend>(
     board: &mut Board,
     state: &mut AppState,
     action: Action,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut ratatui::Terminal<B>,
     kando_dir: &std::path::Path,
     was_minor_mode: bool,
 ) -> color_eyre::Result<Option<String>> {
@@ -1189,4 +1189,615 @@ fn handle_confirm(
     }
 
     Ok(sync_message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, Card, Column, Policies, Priority};
+
+    /// Create a test board with the given column names, each with the given card titles.
+    fn test_board(columns: &[(&str, &[&str])]) -> Board {
+        let cols = columns
+            .iter()
+            .enumerate()
+            .map(|(i, (name, cards))| {
+                let slug = name.to_lowercase().replace(' ', "-");
+                Column {
+                    slug,
+                    name: name.to_string(),
+                    order: i as u32,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: cards
+                        .iter()
+                        .enumerate()
+                        .map(|(j, title)| Card::new(format!("{i:02}{j:02}"), title.to_string()))
+                        .collect(),
+                }
+            })
+            .collect();
+        Board {
+            name: "Test".into(),
+            next_card_id: 100,
+            policies: Policies::default(),
+            sync_branch: None,
+            tutorial_shown: true,
+            columns: cols,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Navigation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_focus_next_column() {
+        let board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        let mut state = AppState::new();
+        handle_navigation(&board, &mut state, Action::FocusNextColumn, false);
+        assert_eq!(state.focused_column, 1);
+        handle_navigation(&board, &mut state, Action::FocusNextColumn, false);
+        assert_eq!(state.focused_column, 2);
+        // At last column — stays
+        handle_navigation(&board, &mut state, Action::FocusNextColumn, false);
+        assert_eq!(state.focused_column, 2);
+    }
+
+    #[test]
+    fn test_focus_prev_column() {
+        let board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        let mut state = AppState::new();
+        state.focused_column = 2;
+        handle_navigation(&board, &mut state, Action::FocusPrevColumn, false);
+        assert_eq!(state.focused_column, 1);
+        handle_navigation(&board, &mut state, Action::FocusPrevColumn, false);
+        assert_eq!(state.focused_column, 0);
+        // At first column — stays
+        handle_navigation(&board, &mut state, Action::FocusPrevColumn, false);
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn test_focus_skips_hidden_columns() {
+        let mut board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        board.columns[1].hidden = true;
+        let mut state = AppState::new();
+        handle_navigation(&board, &mut state, Action::FocusNextColumn, false);
+        assert_eq!(state.focused_column, 2);
+    }
+
+    #[test]
+    fn test_select_next_prev_card() {
+        let board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        handle_navigation(&board, &mut state, Action::SelectNextCard, false);
+        assert_eq!(state.selected_card, 1);
+        handle_navigation(&board, &mut state, Action::SelectNextCard, false);
+        assert_eq!(state.selected_card, 2);
+        // At last card — stays
+        handle_navigation(&board, &mut state, Action::SelectNextCard, false);
+        assert_eq!(state.selected_card, 2);
+        // Go back
+        handle_navigation(&board, &mut state, Action::SelectPrevCard, false);
+        assert_eq!(state.selected_card, 1);
+    }
+
+    #[test]
+    fn test_select_in_picker_mode() {
+        let board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Picker {
+            title: "test",
+            items: vec![("a".into(), false), ("b".into(), false), ("c".into(), false)],
+            selected: 0,
+            target: PickerTarget::Priority,
+        };
+        handle_navigation(&board, &mut state, Action::SelectNextCard, false);
+        if let Mode::Picker { selected, .. } = &state.mode {
+            assert_eq!(*selected, 1);
+        } else {
+            panic!("Expected Picker mode");
+        }
+    }
+
+    #[test]
+    fn test_cycle_next_wraps_to_next_column() {
+        let board = test_board(&[("A", &["c1"]), ("B", &["c2", "c3"])]);
+        let mut state = AppState::new();
+        // Card 0 of column 0 — cycling forward should jump to column 1, card 0
+        handle_navigation(&board, &mut state, Action::CycleNextCard, false);
+        assert_eq!(state.focused_column, 1);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn test_cycle_prev_wraps_to_prev_column() {
+        let board = test_board(&[("A", &["c1", "c2"]), ("B", &["c3"])]);
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        state.selected_card = 0;
+        handle_navigation(&board, &mut state, Action::CyclePrevCard, false);
+        assert_eq!(state.focused_column, 0);
+        assert_eq!(state.selected_card, 1); // last card of prev column
+    }
+
+    #[test]
+    fn test_navigation_clears_minor_mode() {
+        let board = test_board(&[("A", &[]), ("B", &[])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Goto;
+        handle_navigation(&board, &mut state, Action::FocusNextColumn, true);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    // -----------------------------------------------------------------------
+    // Goto / Jump tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_jump_to_column() {
+        let board = test_board(&[("A", &["c1"]), ("B", &["c2"]), ("C", &["c3"])]);
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToColumn(2));
+        assert_eq!(state.focused_column, 2);
+        assert_eq!(state.selected_card, 0);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn test_jump_to_column_skips_hidden() {
+        let mut board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        board.columns[1].hidden = true;
+        let mut state = AppState::new();
+        // Jump to visible index 1 — should skip hidden B and land on C (index 2)
+        handle_goto(&board, &mut state, Action::JumpToColumn(1));
+        assert_eq!(state.focused_column, 2);
+    }
+
+    #[test]
+    fn test_jump_to_first_last_card() {
+        let board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        state.selected_card = 1;
+        handle_goto(&board, &mut state, Action::JumpToLastCard);
+        assert_eq!(state.selected_card, 2);
+        handle_goto(&board, &mut state, Action::JumpToFirstCard);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn test_jump_to_backlog() {
+        let mut board = test_board(&[("Todo", &[]), ("Backlog", &["c1"])]);
+        board.columns[1].slug = "backlog".to_string();
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToBacklog);
+        assert_eq!(state.focused_column, 1);
+    }
+
+    #[test]
+    fn test_jump_to_done() {
+        let mut board = test_board(&[("Todo", &[]), ("Done", &["c1"])]);
+        board.columns[1].slug = "done".to_string();
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToDone);
+        assert_eq!(state.focused_column, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // View toggle tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_toggle_hidden_columns() {
+        let board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        assert!(!state.show_hidden_columns);
+        handle_view_toggle(&board, &mut state, Action::ToggleHiddenColumns);
+        assert!(state.show_hidden_columns);
+        assert_eq!(state.notification.as_deref(), Some("Showing hidden columns"));
+        handle_view_toggle(&board, &mut state, Action::ToggleHiddenColumns);
+        assert!(!state.show_hidden_columns);
+        assert_eq!(state.notification.as_deref(), Some("Hiding hidden columns"));
+    }
+
+    #[test]
+    fn test_toggle_hidden_refocuses_if_on_hidden() {
+        let mut board = test_board(&[("A", &[]), ("B", &[])]);
+        board.columns[1].hidden = true;
+        let mut state = AppState::new();
+        state.show_hidden_columns = true;
+        state.focused_column = 1;
+        handle_view_toggle(&board, &mut state, Action::ToggleHiddenColumns);
+        assert_eq!(state.focused_column, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Filter start tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_start_filter() {
+        let board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        handle_filter_start(&board, &mut state, Action::StartFilter);
+        assert!(matches!(state.mode, Mode::Filter { .. }));
+    }
+
+    #[test]
+    fn test_start_tag_filter_no_tags() {
+        let board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        handle_filter_start(&board, &mut state, Action::StartTagFilter);
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(state.notification.as_deref(), Some("No tags on the board"));
+    }
+
+    #[test]
+    fn test_start_tag_filter_with_tags() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+        let mut state = AppState::new();
+        handle_filter_start(&board, &mut state, Action::StartTagFilter);
+        assert!(matches!(state.mode, Mode::Picker { target: PickerTarget::TagFilter, .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Input handler tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_input_char_in_input_mode() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "test",
+            buf: TextBuffer::empty(),
+            on_confirm: InputTarget::NewCardTitle,
+        };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input(&mut board, &mut state, Action::InputChar('h'), kando_dir).unwrap();
+        handle_input(&mut board, &mut state, Action::InputChar('i'), kando_dir).unwrap();
+        if let Mode::Input { buf, .. } = &state.mode {
+            assert_eq!(buf.input, "hi");
+            assert_eq!(buf.cursor, 2);
+        } else {
+            panic!("Expected Input mode");
+        }
+    }
+
+    #[test]
+    fn test_input_char_in_filter_syncs() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Filter { buf: TextBuffer::empty() };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input(&mut board, &mut state, Action::InputChar('x'), kando_dir).unwrap();
+        assert_eq!(state.active_filter.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn test_input_backspace() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "test",
+            buf: TextBuffer::new("abc".into()),
+            on_confirm: InputTarget::NewCardTitle,
+        };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input(&mut board, &mut state, Action::InputBackspace, kando_dir).unwrap();
+        if let Mode::Input { buf, .. } = &state.mode {
+            assert_eq!(buf.input, "ab");
+        } else {
+            panic!("Expected Input mode");
+        }
+    }
+
+    #[test]
+    fn test_input_cursor_movement() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "test",
+            buf: TextBuffer::new("hello".into()),
+            on_confirm: InputTarget::NewCardTitle,
+        };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input(&mut board, &mut state, Action::InputLeft, kando_dir).unwrap();
+        if let Mode::Input { buf, .. } = &state.mode { assert_eq!(buf.cursor, 4); }
+        handle_input(&mut board, &mut state, Action::InputHome, kando_dir).unwrap();
+        if let Mode::Input { buf, .. } = &state.mode { assert_eq!(buf.cursor, 0); }
+        handle_input(&mut board, &mut state, Action::InputRight, kando_dir).unwrap();
+        if let Mode::Input { buf, .. } = &state.mode { assert_eq!(buf.cursor, 1); }
+        handle_input(&mut board, &mut state, Action::InputEnd, kando_dir).unwrap();
+        if let Mode::Input { buf, .. } = &state.mode { assert_eq!(buf.cursor, 5); }
+    }
+
+    #[test]
+    fn test_input_cancel_clears_filter() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.active_filter = Some("test".into());
+        state.mode = Mode::Filter { buf: TextBuffer::new("test".into()) };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input(&mut board, &mut state, Action::InputCancel, kando_dir).unwrap();
+        assert!(state.active_filter.is_none());
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn test_input_cancel_picker_keeps_tag_filters() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["bug".into()];
+        state.mode = Mode::Picker {
+            title: "test",
+            items: vec![("bug".into(), true)],
+            selected: 0,
+            target: PickerTarget::TagFilter,
+        };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input(&mut board, &mut state, Action::InputCancel, kando_dir).unwrap();
+        assert_eq!(state.active_tag_filters, vec!["bug".to_string()]);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    // -----------------------------------------------------------------------
+    // InputConfirm tests (filter confirm — no I/O needed)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_filter_confirm_sets_active_filter() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Filter { buf: TextBuffer::new("search".into()) };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        let sync = handle_input_confirm(&mut board, &mut state, kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.active_filter.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn test_filter_confirm_empty_clears() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.active_filter = Some("old".into());
+        state.mode = Mode::Filter { buf: TextBuffer::new("  ".into()) };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input_confirm(&mut board, &mut state, kando_dir).unwrap();
+        assert!(state.active_filter.is_none());
+    }
+
+    #[test]
+    fn test_tag_filter_toggle() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Picker {
+            title: "filter by tag",
+            items: vec![("bug".into(), false), ("ui".into(), false)],
+            selected: 0,
+            target: PickerTarget::TagFilter,
+        };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        // Toggle "bug" on
+        handle_input_confirm(&mut board, &mut state, kando_dir).unwrap();
+        assert_eq!(state.active_tag_filters, vec!["bug".to_string()]);
+        // Should stay in Picker mode
+        assert!(matches!(state.mode, Mode::Picker { .. }));
+        // Toggle "bug" off
+        handle_input_confirm(&mut board, &mut state, kando_dir).unwrap();
+        assert!(state.active_tag_filters.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Card action + confirm tests (with temp filesystem)
+    // -----------------------------------------------------------------------
+
+    fn setup_kando_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        (dir, kando_dir)
+    }
+
+    #[test]
+    fn test_new_card_confirm() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "New card",
+            buf: TextBuffer::new("My task".into()),
+            on_confirm: InputTarget::NewCardTitle,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(sync.as_deref(), Some("Create card"));
+        assert_eq!(board.columns[0].cards.len(), 1);
+        assert_eq!(board.columns[0].cards[0].title, "My task");
+        assert_eq!(state.notification.as_deref(), Some("Card created"));
+    }
+
+    #[test]
+    fn test_new_card_confirm_empty_title() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "New card",
+            buf: TextBuffer::new("  ".into()),
+            on_confirm: InputTarget::NewCardTitle,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(board.columns[0].cards.is_empty());
+    }
+
+    #[test]
+    fn test_edit_tags_confirm() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("Bug, UI, feature".into()),
+            on_confirm: InputTarget::EditTags,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(sync.as_deref(), Some("Update tags"));
+        assert_eq!(board.columns[0].cards[0].tags, vec!["bug", "ui", "feature"]);
+    }
+
+    #[test]
+    fn test_delete_card_confirm() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Doomed".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Confirm {
+            prompt: "Delete card?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        let sync = handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert_eq!(sync.as_deref(), Some("Delete card"));
+        assert!(board.columns[0].cards.is_empty());
+        assert_eq!(state.notification.as_deref(), Some("Card deleted"));
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn test_deny_returns_to_normal() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("0000".into()),
+        };
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        let sync = handle_confirm(&mut board, &mut state, Action::Deny, kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(board.columns[0].cards.len(), 1);
+    }
+
+    #[test]
+    fn test_wip_limit_confirm() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Card".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Confirm {
+            prompt: "Over WIP limit",
+            on_confirm: ConfirmTarget::WipLimitMove { from_col: 0, card_idx: 0, to_col: 1 },
+        };
+        let sync = handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert_eq!(sync.as_deref(), Some("Move card"));
+        assert!(board.columns[0].cards.is_empty());
+        assert_eq!(board.columns[1].cards.len(), 1);
+        assert_eq!(state.focused_column, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Card action mode entry tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_card_enters_input_mode() {
+        let mut board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::NewCard, &mut terminal, kando_dir, false).unwrap();
+        assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::NewCardTitle, .. }));
+    }
+
+    #[test]
+    fn test_delete_card_enters_confirm_mode() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::DeleteCard, &mut terminal, kando_dir, false).unwrap();
+        assert!(matches!(state.mode, Mode::Confirm { on_confirm: ConfirmTarget::DeleteCard(_), .. }));
+    }
+
+    #[test]
+    fn test_open_card_detail() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::OpenCardDetail, &mut terminal, kando_dir, false).unwrap();
+        assert!(matches!(state.mode, Mode::CardDetail { scroll: 0 }));
+    }
+
+    #[test]
+    fn test_detail_scroll() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::CardDetail { scroll: 0 };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::DetailScrollDown, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::CardDetail { scroll } = state.mode { assert_eq!(scroll, 1); }
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::CardDetail { scroll } = state.mode { assert_eq!(scroll, 0); }
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::CardDetail { scroll } = state.mode { assert_eq!(scroll, 0); }
+    }
+
+    #[test]
+    fn test_close_panel() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::CardDetail { scroll: 5 };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::ClosePanel, &mut terminal, kando_dir, false).unwrap();
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn test_cycle_priority() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let sync = handle_card_action(
+            &mut board, &mut state, Action::CyclePriority,
+            &mut terminal, &kando_dir, false,
+        ).unwrap();
+        assert_eq!(sync.as_deref(), Some("Change priority"));
+        assert_eq!(board.columns[0].cards[0].priority, Priority::High);
+    }
+
+    #[test]
+    fn test_toggle_blocker() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let sync = handle_card_action(
+            &mut board, &mut state, Action::ToggleBlocker,
+            &mut terminal, &kando_dir, false,
+        ).unwrap();
+        assert_eq!(sync.as_deref(), Some("Toggle blocker"));
+        assert!(board.columns[0].cards[0].blocked);
+        assert_eq!(state.notification.as_deref(), Some("Card blocked"));
+    }
 }
