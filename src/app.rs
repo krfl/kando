@@ -1001,12 +1001,20 @@ fn process_action(
                             .join("columns")
                             .join(&board.columns[col_idx].slug)
                             .join(format!("{id}.md"));
-                        let _ = std::fs::remove_file(card_path);
+                        let file_err = match std::fs::remove_file(&card_path) {
+                            Ok(()) => None,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(e) => Some(e),
+                        };
                         board.columns[col_idx].cards.remove(card_idx);
                         save_board(&kando_dir, board)?;
                         sync_message = Some("Delete card".into());
                         state.clamp_selection(board);
-                        state.notify("Card deleted");
+                        if let Some(e) = file_err {
+                            state.notify(format!("Deleted (file removal failed: {e})"));
+                        } else {
+                            state.notify("Card deleted");
+                        }
                     }
                 }
                 Mode::Confirm {
