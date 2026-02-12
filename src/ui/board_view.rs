@@ -1,6 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use ratatui::widgets::{
     Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -299,13 +300,23 @@ fn render_card(
     ];
     line1_spans.extend(right_glyphs);
 
-    // Line 2: title
-    let max_title_len = inner.width as usize;
-    let title = if card.title.len() > max_title_len {
-        format!(
-            "  {}…",
-            &card.title[..max_title_len.saturating_sub(3)]
-        )
+    // Line 2: title (unicode-safe truncation using grapheme clusters)
+    let max_title_width = inner.width as usize;
+    let title_display_width = card.title.width() + 2; // 2 for leading spaces
+    let title = if title_display_width > max_title_width {
+        let avail = max_title_width.saturating_sub(3); // 2 spaces + 1 for '…'
+        let truncated: String = card
+            .title
+            .graphemes(true)
+            .scan(0, |w, g| {
+                let gw = g.width();
+                (*w + gw <= avail).then(|| {
+                    *w += gw;
+                    g
+                })
+            })
+            .collect();
+        format!("  {truncated}…")
     } else {
         format!("  {}", card.title)
     };
