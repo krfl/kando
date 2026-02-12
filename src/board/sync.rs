@@ -327,20 +327,48 @@ pub fn commit_and_push(state: &mut SyncState, kando_dir: &Path, message: &str) {
 }
 
 /// Recursively copy directory contents from src to dst.
+///
+/// Skips symlinks and removes files/dirs in dst that don't exist in src,
+/// so that deletions are propagated correctly.
 fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     if !dst.exists() {
         std::fs::create_dir_all(dst)?;
     }
 
+    // Collect source entry names for stale-file cleanup
+    let mut src_names = std::collections::HashSet::new();
+
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
 
-        if src_path.is_dir() {
+        // Skip symlinks
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        src_names.insert(name.clone());
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+
+        if file_type.is_dir() {
             copy_dir_contents(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+
+    // Remove stale entries in dst that no longer exist in src
+    for entry in std::fs::read_dir(dst)? {
+        let entry = entry?;
+        if !src_names.contains(&entry.file_name()) {
+            let path = entry.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
         }
     }
 
