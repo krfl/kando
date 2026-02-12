@@ -377,3 +377,260 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    // -----------------------------------------------------------------------
+    // find_git_root tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_git_root_at_root() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        let result = find_git_root(dir.path());
+        assert_eq!(result, Some(dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn test_find_git_root_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        let nested = dir.path().join("src/deep/nested");
+        fs::create_dir_all(&nested).unwrap();
+        let result = find_git_root(&nested);
+        assert_eq!(result, Some(dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn test_find_git_root_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        // No .git directory created
+        let result = find_git_root(dir.path());
+        assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // djb2 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_djb2_deterministic() {
+        let url = "git@github.com:user/repo.git";
+        assert_eq!(djb2(url), djb2(url));
+    }
+
+    #[test]
+    fn test_djb2_different_inputs() {
+        assert_ne!(djb2("repo-a"), djb2("repo-b"));
+    }
+
+    #[test]
+    fn test_djb2_empty_string() {
+        // Should not panic, returns the initial value
+        assert_eq!(djb2(""), 5381);
+    }
+
+    #[test]
+    fn test_djb2_known_value() {
+        // Pin a known value to catch accidental algorithm changes
+        assert_eq!(djb2("git@github.com:user/repo.git"), 5107748758901446025);
+    }
+
+    // -----------------------------------------------------------------------
+    // shadow_dir_for tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_shadow_dir_deterministic() {
+        let url = "git@github.com:user/repo.git";
+        assert_eq!(shadow_dir_for(url), shadow_dir_for(url));
+    }
+
+    #[test]
+    fn test_shadow_dir_different_urls() {
+        let a = shadow_dir_for("git@github.com:user/repo-a.git");
+        let b = shadow_dir_for("git@github.com:user/repo-b.git");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_shadow_dir_uses_kando_subdir() {
+        let path = shadow_dir_for("git@github.com:user/repo.git");
+        // Should be under <cache_dir>/.kando/<hash>
+        let parent = path.parent().unwrap();
+        assert_eq!(parent.file_name().unwrap(), ".kando");
+    }
+
+    // -----------------------------------------------------------------------
+    // check_ssh_agent tests (URL classification only)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_check_ssh_agent_https_url() {
+        // HTTPS URLs should never warn
+        assert!(!check_ssh_agent("https://github.com/user/repo.git"));
+    }
+
+    #[test]
+    fn test_check_ssh_agent_http_url() {
+        assert!(!check_ssh_agent("http://github.com/user/repo.git"));
+    }
+
+    // Note: SSH URL tests depend on the environment (SSH_AUTH_SOCK),
+    // so we only test the URL classification above.
+
+    // -----------------------------------------------------------------------
+    // copy_dir_contents tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_copy_basic_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir(&src).unwrap();
+
+        fs::write(src.join("a.txt"), "hello").unwrap();
+        fs::write(src.join("b.txt"), "world").unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "hello");
+        assert_eq!(fs::read_to_string(dst.join("b.txt")).unwrap(), "world");
+    }
+
+    #[test]
+    fn test_copy_nested_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        let sub = src.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        fs::write(src.join("top.txt"), "top").unwrap();
+        fs::write(sub.join("deep.txt"), "deep").unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert_eq!(fs::read_to_string(dst.join("top.txt")).unwrap(), "top");
+        assert_eq!(fs::read_to_string(dst.join("sub/deep.txt")).unwrap(), "deep");
+    }
+
+    #[test]
+    fn test_copy_creates_dst_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("nonexistent/deep/dst");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f.txt"), "data").unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert!(dst.exists());
+        assert_eq!(fs::read_to_string(dst.join("f.txt")).unwrap(), "data");
+    }
+
+    #[test]
+    fn test_copy_removes_stale_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        // Put a file in src and dst
+        fs::write(src.join("keep.txt"), "keep").unwrap();
+        // Put a stale file only in dst
+        fs::write(dst.join("stale.txt"), "old").unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert!(dst.join("keep.txt").exists());
+        assert!(!dst.join("stale.txt").exists(), "stale file should be removed");
+    }
+
+    #[test]
+    fn test_copy_removes_stale_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(dst.join("stale_dir")).unwrap();
+        fs::write(dst.join("stale_dir/f.txt"), "old").unwrap();
+
+        fs::write(src.join("keep.txt"), "keep").unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert!(dst.join("keep.txt").exists());
+        assert!(!dst.join("stale_dir").exists(), "stale dir should be removed");
+    }
+
+    #[test]
+    fn test_copy_overwrites_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        fs::write(src.join("f.txt"), "new content").unwrap();
+        fs::write(dst.join("f.txt"), "old content").unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert_eq!(fs::read_to_string(dst.join("f.txt")).unwrap(), "new content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_skips_symlinks() {
+        use std::os::unix::fs as unix_fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir(&src).unwrap();
+
+        fs::write(src.join("real.txt"), "real").unwrap();
+        unix_fs::symlink(src.join("real.txt"), src.join("link.txt")).unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert!(dst.join("real.txt").exists());
+        assert!(!dst.join("link.txt").exists(), "symlink should be skipped");
+    }
+
+    #[test]
+    fn test_copy_empty_src() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir(&src).unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert!(dst.exists());
+        // dst should be empty
+        let entries: Vec<_> = fs::read_dir(&dst).unwrap().collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_copy_cleans_dst_fully_when_src_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("leftover.txt"), "old").unwrap();
+
+        copy_dir_contents(&src, &dst).unwrap();
+
+        assert!(!dst.join("leftover.txt").exists(), "leftover should be cleaned");
+    }
+}
