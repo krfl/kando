@@ -98,7 +98,7 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board_name
     }
 
     spans.push(Span::styled(
-        hints.to_string(),
+        hints,
         Style::default().fg(Theme::STATUS_HINT),
     ));
 

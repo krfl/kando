@@ -53,11 +53,17 @@ pub fn should_auto_close(card: &Card, policies: &Policies, now: DateTime<Utc>) -
 
 /// Run auto-close on the board. Returns the IDs of cards that were moved.
 pub fn run_auto_close(board: &mut Board, now: DateTime<Utc>) -> Vec<String> {
-    let policies = board.policies.clone();
-    let target_slug = policies.auto_close_target.clone();
+    let auto_close_days = board.policies.auto_close_days;
+    if auto_close_days == 0 {
+        return Vec::new();
+    }
 
     // Find the target column index
-    let target_col = match board.columns.iter().position(|c| c.slug == target_slug) {
+    let target_col = match board
+        .columns
+        .iter()
+        .position(|c| c.slug == board.policies.auto_close_target)
+    {
         Some(idx) => idx,
         None => return Vec::new(),
     };
@@ -69,7 +75,7 @@ pub fn run_auto_close(board: &mut Board, now: DateTime<Utc>) -> Vec<String> {
             continue;
         }
         for (card_idx, card) in col.cards.iter().enumerate() {
-            if should_auto_close(card, &policies, now) {
+            if should_auto_close(card, &board.policies, now) {
                 to_move.push((col_idx, card_idx));
             }
         }

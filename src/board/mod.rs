@@ -205,23 +205,16 @@ impl Board {
     }
 
     /// Move a card from one column to another.
-    pub fn move_card(
-        &mut self,
-        from_col: usize,
-        card_idx: usize,
-        to_col: usize,
-    ) -> Option<&Card> {
+    pub fn move_card(&mut self, from_col: usize, card_idx: usize, to_col: usize) {
         if from_col >= self.columns.len() || to_col >= self.columns.len() {
-            return None;
+            return;
         }
         if card_idx >= self.columns[from_col].cards.len() {
-            return None;
+            return;
         }
         let mut card = self.columns[from_col].cards.remove(card_idx);
         card.touch();
         self.columns[to_col].cards.push(card);
-        let last = self.columns[to_col].cards.len() - 1;
-        Some(&self.columns[to_col].cards[last])
     }
 
     /// Collect all unique tags across the board with counts.

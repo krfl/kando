@@ -551,12 +551,12 @@ fn process_action(
 
         // Card movement
         Action::MoveCardPrevColumn => {
-            if let Some(msg) = try_move_card(board, state, false, &kando_dir)? {
+            if let Some(msg) = try_move_card(board, state, false, kando_dir)? {
                 sync_message = Some(msg);
             }
         }
         Action::MoveCardNextColumn => {
-            if let Some(msg) = try_move_card(board, state, true, &kando_dir)? {
+            if let Some(msg) = try_move_card(board, state, true, kando_dir)? {
                 sync_message = Some(msg);
             }
         }
@@ -584,7 +584,7 @@ fn process_action(
             if let Some((card_id, col_slug)) = card_info {
                 let card_path = kando_dir.join("columns").join(&col_slug).join(format!("{card_id}.md"));
 
-                save_board(&kando_dir, board)?;
+                save_board(kando_dir, board)?;
 
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
 
@@ -602,11 +602,11 @@ fn process_action(
                 // Force ratatui to fully repaint on the next draw()
                 terminal.clear()?;
 
-                *board = load_board(&kando_dir)?;
+                *board = load_board(kando_dir)?;
                 if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
                     board.columns[col_idx].cards[card_idx].touch();
                     board.columns[col_idx].sort_cards();
-                    save_board(&kando_dir, board)?;
+                    save_board(kando_dir, board)?;
                     sync_message = Some("Edit card".into());
                 }
                 state.clamp_selection(board);
@@ -624,7 +624,7 @@ fn process_action(
                 card.touch();
                 let priority_str = format!("Priority: {}", card.priority);
                 board.columns[col_idx].sort_cards();
-                save_board(&kando_dir, board)?;
+                save_board(kando_dir, board)?;
                 sync_message = Some("Change priority".into());
                 state.clamp_selection(board);
                 state.notify(priority_str);
@@ -681,7 +681,7 @@ fn process_action(
                 card.touch();
                 let msg = if card.blocked { "Card blocked" } else { "Blocker removed" };
                 board.columns[col_idx].sort_cards();
-                save_board(&kando_dir, board)?;
+                save_board(kando_dir, board)?;
                 sync_message = Some("Toggle blocker".into());
                 state.clamp_selection(board);
                 state.notify(msg);
@@ -872,7 +872,7 @@ fn process_action(
                             col.cards.push(card);
                             col.sort_cards();
                         }
-                        save_board(&kando_dir, board)?;
+                        save_board(kando_dir, board)?;
                         sync_message = Some("Create card".into());
                         state.notify("Card created");
                     }
@@ -894,7 +894,7 @@ fn process_action(
                         }
                         col.sort_cards();
                     }
-                    save_board(&kando_dir, board)?;
+                    save_board(kando_dir, board)?;
                     sync_message = Some("Update tags".into());
                     state.clamp_selection(board);
                     state.notify("Tags updated");
@@ -934,7 +934,7 @@ fn process_action(
                                     card.touch();
                                     let priority_str = format!("Priority: {}", card.priority);
                                     board.columns[col_idx].sort_cards();
-                                    save_board(&kando_dir, board)?;
+                                    save_board(kando_dir, board)?;
                                     sync_message = Some("Change priority".into());
                                     state.clamp_selection(board);
                                     state.notify(priority_str);
@@ -957,7 +957,7 @@ fn process_action(
                                     board.columns[to].sort_cards();
                                     state.focused_column = to;
                                     state.clamp_selection(board);
-                                    save_board(&kando_dir, board)?;
+                                    save_board(kando_dir, board)?;
                                     sync_message = Some("Move card".into());
                                     state.notify(format!("Moved to {col_name}"));
                                 }
@@ -1001,7 +1001,7 @@ fn process_action(
                             Err(e) => Some(e),
                         };
                         board.columns[col_idx].cards.remove(card_idx);
-                        save_board(&kando_dir, board)?;
+                        save_board(kando_dir, board)?;
                         sync_message = Some("Delete card".into());
                         state.clamp_selection(board);
                         if let Some(e) = file_err {
@@ -1020,7 +1020,7 @@ fn process_action(
                     board.columns[to].sort_cards();
                     state.focused_column = to;
                     state.clamp_selection(board);
-                    save_board(&kando_dir, board)?;
+                    save_board(kando_dir, board)?;
                     sync_message = Some("Move card".into());
                     state.notify("Card moved");
                 }
@@ -1046,7 +1046,7 @@ fn process_action(
         // Board
         Action::ReloadBoard => {
             state.mode = Mode::Normal;
-            *board = load_board(&kando_dir)?;
+            *board = load_board(kando_dir)?;
             state.clamp_selection(board);
             state.notify("Board reloaded");
         }
@@ -1056,7 +1056,7 @@ fn process_action(
         Action::DismissTutorial => {
             state.mode = Mode::Normal;
             board.tutorial_shown = true;
-            save_board(&kando_dir, board)?;
+            save_board(kando_dir, board)?;
         }
         Action::Quit => {
             match &state.mode {
@@ -1077,7 +1077,7 @@ fn process_action(
     // Sync to remote if any mutation was saved
     if let Some(msg) = sync_message {
         if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, &kando_dir, &msg);
+            sync::commit_and_push(sync_state, kando_dir, &msg);
         }
     }
 
