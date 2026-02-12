@@ -77,13 +77,7 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
         let col_dir = columns_dir.join(&col.slug);
         fs::create_dir_all(&col_dir)?;
 
-        let meta = ColumnMeta {
-            name: col.name.clone(),
-            order: col.order,
-            wip_limit: col.wip_limit,
-            hidden: col.hidden,
-        };
-        let meta_str = toml::to_string_pretty(&meta)?;
+        let meta_str = toml::to_string_pretty(col)?;
         fs::write(col_dir.join("_meta.toml"), meta_str)?;
     }
 
@@ -117,14 +111,9 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
         let col_dir = columns_dir.join(&col_config.slug);
         let meta = if col_dir.join("_meta.toml").exists() {
             let meta_str = fs::read_to_string(col_dir.join("_meta.toml"))?;
-            toml::from_str::<ColumnMeta>(&meta_str)?
+            toml::from_str::<ColumnConfig>(&meta_str)?
         } else {
-            ColumnMeta {
-                name: col_config.name.clone(),
-                order: col_config.order,
-                wip_limit: col_config.wip_limit,
-                hidden: col_config.hidden,
-            }
+            col_config.clone()
         };
 
         // Load cards
@@ -204,7 +193,8 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
         fs::create_dir_all(&col_dir)?;
 
         // Write _meta.toml
-        let meta = ColumnMeta {
+        let meta = ColumnConfig {
+            slug: col.slug.clone(),
             name: col.name.clone(),
             order: col.order,
             wip_limit: col.wip_limit,
@@ -336,19 +326,10 @@ pub struct BoardSection {
     pub tutorial_shown: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnConfig {
+    #[serde(default)]
     pub slug: String,
-    pub name: String,
-    pub order: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wip_limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hidden: Option<bool>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ColumnMeta {
     pub name: String,
     pub order: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
