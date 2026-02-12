@@ -44,7 +44,6 @@ pub enum Action {
     // Search & filter
     StartFilter,
     StartTagFilter,
-    StartSearch,
     ClearFilters,
     // Board
     ReloadBoard,

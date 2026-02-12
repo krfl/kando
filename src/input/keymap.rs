@@ -79,7 +79,7 @@ fn map_space(key: KeyEvent) -> Action {
         KeyCode::Char('p') => Action::PickPriority,
         KeyCode::Char('m') => Action::MoveToColumn,
         KeyCode::Char('b') => Action::ToggleBlocker,
-        KeyCode::Char('/') => Action::StartSearch,
+        KeyCode::Char('/') => Action::StartFilter,
         KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Char('r') => Action::ReloadBoard,
         KeyCode::Esc => Action::None,

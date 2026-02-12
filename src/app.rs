@@ -353,7 +353,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color
         }
 
         // Periodic sync pull
-        if state.sync_state.is_some() && last_sync.elapsed() >= sync_interval {
+        if last_sync.elapsed() >= sync_interval {
             if let Some(ref mut sync_state) = state.sync_state {
                 let status = sync::pull(sync_state, &kando_dir);
                 if status == sync::SyncStatus::Updated {
@@ -799,11 +799,6 @@ fn process_action(
                 };
             }
         }
-        Action::StartSearch => {
-            state.mode = Mode::Filter {
-                buf: TextBuffer::empty(),
-            };
-        }
 
         // Input handling — delegate to TextBuffer
         Action::InputChar(c) => {
@@ -1066,7 +1061,6 @@ fn process_action(
         Action::Quit => {
             match &state.mode {
                 Mode::Normal => state.should_quit = true,
-                Mode::CardDetail { .. } => state.mode = Mode::Normal,
                 _ => state.mode = Mode::Normal,
             }
         }
