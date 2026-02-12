@@ -394,7 +394,6 @@ fn process_action(
     terminal: &mut DefaultTerminal,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
-    // For minor modes, return to normal after processing (unless entering a new mode)
     let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::View);
     let mut sync_message: Option<String> = None;
 
@@ -406,19 +405,134 @@ fn process_action(
         }
 
         // Navigation
-        Action::FocusPrevColumn => {
-            if was_minor_mode {
-                state.mode = Mode::Normal;
+        Action::FocusPrevColumn
+        | Action::FocusNextColumn
+        | Action::SelectPrevCard
+        | Action::SelectNextCard
+        | Action::CycleNextCard
+        | Action::CyclePrevCard => {
+            handle_navigation(board, state, action, was_minor_mode);
+        }
+
+        // Goto / Jump
+        Action::JumpToColumn(_)
+        | Action::JumpToFirstCard
+        | Action::JumpToLastCard
+        | Action::JumpToBacklog
+        | Action::JumpToDone => {
+            handle_goto(board, state, action);
+        }
+
+        // Card movement & actions
+        Action::MoveCardPrevColumn
+        | Action::MoveCardNextColumn
+        | Action::NewCard
+        | Action::DeleteCard
+        | Action::EditCardExternal
+        | Action::CyclePriority
+        | Action::PickPriority
+        | Action::MoveToColumn
+        | Action::ToggleBlocker
+        | Action::EditTags
+        | Action::OpenCardDetail
+        | Action::ClosePanel
+        | Action::DetailScrollDown
+        | Action::DetailScrollUp
+        | Action::DetailNextCard
+        | Action::DetailPrevCard => {
+            sync_message = handle_card_action(board, state, action, terminal, kando_dir, was_minor_mode)?;
+        }
+
+        // View toggles
+        Action::ToggleHiddenColumns
+        | Action::ToggleCollapseColumn
+        | Action::ToggleCollapseAll
+        | Action::ToggleWipDisplay
+        | Action::CenterOnCard => {
+            handle_view_toggle(board, state, action);
+        }
+
+        // Filter / tag filter
+        Action::StartFilter | Action::StartTagFilter => {
+            handle_filter_start(board, state, action);
+        }
+
+        // Text input delegation
+        Action::InputChar(_)
+        | Action::InputBackspace
+        | Action::InputLeft
+        | Action::InputRight
+        | Action::InputHome
+        | Action::InputEnd
+        | Action::InputDeleteWord
+        | Action::InputConfirm
+        | Action::InputCancel => {
+            sync_message = handle_input(board, state, action, kando_dir)?;
+        }
+
+        // Confirmation
+        Action::Confirm | Action::Deny => {
+            sync_message = handle_confirm(board, state, action, kando_dir)?;
+        }
+
+        // Mode entry
+        Action::EnterGotoMode => state.mode = Mode::Goto,
+        Action::EnterSpaceMode => state.mode = Mode::Space,
+        Action::EnterViewMode => state.mode = Mode::View,
+
+        // Board-level actions
+        Action::ReloadBoard => {
+            state.mode = Mode::Normal;
+            *board = load_board(kando_dir)?;
+            state.clamp_selection(board);
+            state.notify("Board reloaded");
+        }
+        Action::ShowHelp => state.mode = Mode::Help,
+        Action::DismissTutorial => {
+            state.mode = Mode::Normal;
+            board.tutorial_shown = true;
+            save_board(kando_dir, board)?;
+        }
+        Action::Quit => {
+            match &state.mode {
+                Mode::Normal => state.should_quit = true,
+                _ => state.mode = Mode::Normal,
             }
+        }
+        Action::ClearFilters => {
+            if state.active_filter.is_some() || !state.active_tag_filters.is_empty() {
+                state.active_filter = None;
+                state.active_tag_filters.clear();
+                state.notify("Filters cleared");
+            }
+        }
+    }
+
+    // Sync to remote if any mutation was saved
+    if let Some(msg) = sync_message {
+        if let Some(ref mut sync_state) = state.sync_state {
+            sync::commit_and_push(sync_state, kando_dir, &msg);
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Handler: Navigation (column focus, card selection, cycling)
+// ---------------------------------------------------------------------------
+
+fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_minor_mode: bool) {
+    match action {
+        Action::FocusPrevColumn => {
+            if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = next_visible_column(board, state.focused_column, false, state.show_hidden_columns) {
                 state.focused_column = col;
                 state.clamp_selection(board);
             }
         }
         Action::FocusNextColumn => {
-            if was_minor_mode {
-                state.mode = Mode::Normal;
-            }
+            if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = next_visible_column(board, state.focused_column, true, state.show_hidden_columns) {
                 state.focused_column = col;
                 state.clamp_selection(board);
@@ -427,31 +541,21 @@ fn process_action(
         Action::SelectPrevCard => {
             match &mut state.mode {
                 Mode::Picker { selected, .. } => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
+                    if *selected > 0 { *selected -= 1; }
                 }
                 _ => {
-                    if was_minor_mode {
-                        state.mode = Mode::Normal;
-                    }
-                    if state.selected_card > 0 {
-                        state.selected_card -= 1;
-                    }
+                    if was_minor_mode { state.mode = Mode::Normal; }
+                    if state.selected_card > 0 { state.selected_card -= 1; }
                 }
             }
         }
         Action::SelectNextCard => {
             match &mut state.mode {
                 Mode::Picker { selected, items, .. } => {
-                    if *selected + 1 < items.len() {
-                        *selected += 1;
-                    }
+                    if *selected + 1 < items.len() { *selected += 1; }
                 }
                 _ => {
-                    if was_minor_mode {
-                        state.mode = Mode::Normal;
-                    }
+                    if was_minor_mode { state.mode = Mode::Normal; }
                     if let Some(col) = board.columns.get(state.focused_column) {
                         if state.selected_card + 1 < col.cards.len() {
                             state.selected_card += 1;
@@ -460,16 +564,12 @@ fn process_action(
                 }
             }
         }
-
         Action::CycleNextCard => {
-            if was_minor_mode {
-                state.mode = Mode::Normal;
-            }
+            if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = board.columns.get(state.focused_column) {
                 if state.selected_card + 1 < col.cards.len() {
                     state.selected_card += 1;
                 } else {
-                    // Jump to next visible non-empty column
                     let mut from = state.focused_column;
                     while let Some(next) = next_visible_column(board, from, true, state.show_hidden_columns) {
                         if !board.columns[next].cards.is_empty() {
@@ -483,13 +583,10 @@ fn process_action(
             }
         }
         Action::CyclePrevCard => {
-            if was_minor_mode {
-                state.mode = Mode::Normal;
-            }
+            if was_minor_mode { state.mode = Mode::Normal; }
             if state.selected_card > 0 {
                 state.selected_card -= 1;
             } else {
-                // Jump to previous visible non-empty column
                 let mut from = state.focused_column;
                 while let Some(prev) = next_visible_column(board, from, false, state.show_hidden_columns) {
                     if !board.columns[prev].cards.is_empty() {
@@ -501,10 +598,18 @@ fn process_action(
                 }
             }
         }
+        _ => unreachable!(),
+    }
+}
 
-        // Goto
+// ---------------------------------------------------------------------------
+// Handler: Goto / Jump actions
+// ---------------------------------------------------------------------------
+
+fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
+    state.mode = Mode::Normal;
+    match action {
         Action::JumpToColumn(idx) => {
-            state.mode = Mode::Normal;
             let visible: Vec<usize> = board
                 .columns
                 .iter()
@@ -519,17 +624,14 @@ fn process_action(
             }
         }
         Action::JumpToFirstCard => {
-            state.mode = Mode::Normal;
             state.selected_card = 0;
         }
         Action::JumpToLastCard => {
-            state.mode = Mode::Normal;
             if let Some(col) = board.columns.get(state.focused_column) {
                 state.selected_card = col.cards.len().saturating_sub(1);
             }
         }
         Action::JumpToBacklog => {
-            state.mode = Mode::Normal;
             if let Some(idx) = board.columns.iter().position(|c| {
                 c.slug == "backlog" && (state.show_hidden_columns || !c.hidden)
             }) {
@@ -539,7 +641,6 @@ fn process_action(
             }
         }
         Action::JumpToDone => {
-            state.mode = Mode::Normal;
             if let Some(idx) = board.columns.iter().position(|c| {
                 c.slug == "done" && (state.show_hidden_columns || !c.hidden)
             }) {
@@ -548,19 +649,31 @@ fn process_action(
                 state.clamp_selection(board);
             }
         }
+        _ => unreachable!(),
+    }
+}
 
-        // Card movement
+// ---------------------------------------------------------------------------
+// Handler: Card actions (CRUD, priority, tags, movement, detail view)
+// ---------------------------------------------------------------------------
+
+fn handle_card_action(
+    board: &mut Board,
+    state: &mut AppState,
+    action: Action,
+    terminal: &mut DefaultTerminal,
+    kando_dir: &std::path::Path,
+    was_minor_mode: bool,
+) -> color_eyre::Result<Option<String>> {
+    let mut sync_message = None;
+
+    match action {
         Action::MoveCardPrevColumn => {
-            if let Some(msg) = try_move_card(board, state, false, kando_dir)? {
-                sync_message = Some(msg);
-            }
+            sync_message = try_move_card(board, state, false, kando_dir)?;
         }
         Action::MoveCardNextColumn => {
-            if let Some(msg) = try_move_card(board, state, true, kando_dir)? {
-                sync_message = Some(msg);
-            }
+            sync_message = try_move_card(board, state, true, kando_dir)?;
         }
-        // Card actions
         Action::NewCard => {
             state.mode = Mode::Input {
                 prompt: "New card",
@@ -579,8 +692,9 @@ fn process_action(
         }
         Action::EditCardExternal => {
             state.mode = Mode::Normal;
-            // Collect what we need before borrowing board mutably
-            let card_info = state.selected_card_ref(board).map(|c| (c.id.clone(), board.columns[state.focused_column].slug.clone()));
+            let card_info = state.selected_card_ref(board).map(|c| {
+                (c.id.clone(), board.columns[state.focused_column].slug.clone())
+            });
             if let Some((card_id, col_slug)) = card_info {
                 let card_path = kando_dir.join("columns").join(&col_slug).join(format!("{card_id}.md"));
 
@@ -599,7 +713,6 @@ fn process_action(
                 )?;
                 crossterm::terminal::enable_raw_mode()?;
 
-                // Force ratatui to fully repaint on the next draw()
                 terminal.clear()?;
 
                 *board = load_board(kando_dir)?;
@@ -614,9 +727,7 @@ fn process_action(
             }
         }
         Action::CyclePriority => {
-            if was_minor_mode {
-                state.mode = Mode::Normal;
-            }
+            if was_minor_mode { state.mode = Mode::Normal; }
             let col_idx = state.focused_column;
             let card_idx = state.selected_card;
             if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
@@ -671,9 +782,7 @@ fn process_action(
             }
         }
         Action::ToggleBlocker => {
-            if was_minor_mode {
-                state.mode = Mode::Normal;
-            }
+            if was_minor_mode { state.mode = Mode::Normal; }
             let col_idx = state.focused_column;
             let card_idx = state.selected_card;
             if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
@@ -731,16 +840,24 @@ fn process_action(
                 state.mode = Mode::CardDetail { scroll: 0 };
             }
         }
+        _ => unreachable!(),
+    }
 
-        // View toggles
+    Ok(sync_message)
+}
+
+// ---------------------------------------------------------------------------
+// Handler: View toggles
+// ---------------------------------------------------------------------------
+
+fn handle_view_toggle(board: &Board, state: &mut AppState, action: Action) {
+    state.mode = Mode::Normal;
+    match action {
         Action::ToggleHiddenColumns => {
-            state.mode = Mode::Normal;
             state.show_hidden_columns = !state.show_hidden_columns;
-            // If focused column is now hidden, move to nearest visible column
             if !state.show_hidden_columns {
                 if let Some(col) = board.columns.get(state.focused_column) {
                     if col.hidden {
-                        // Find first visible column
                         if let Some(idx) = board.columns.iter().position(|c| !c.hidden) {
                             state.focused_column = idx;
                             state.clamp_selection(board);
@@ -755,24 +872,27 @@ fn process_action(
             });
         }
         Action::ToggleCollapseColumn => {
-            state.mode = Mode::Normal;
-            // TODO: implement column collapsing
             state.notify("Column collapse not yet implemented");
         }
         Action::ToggleCollapseAll => {
-            state.mode = Mode::Normal;
             state.notify("Collapse all not yet implemented");
         }
         Action::ToggleWipDisplay => {
-            state.mode = Mode::Normal;
             state.notify("WIP display toggle not yet implemented");
         }
         Action::CenterOnCard => {
-            state.mode = Mode::Normal;
             // Scroll is handled automatically
         }
+        _ => unreachable!(),
+    }
+}
 
-        // Filter
+// ---------------------------------------------------------------------------
+// Handler: Filter / tag filter start
+// ---------------------------------------------------------------------------
+
+fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
+    match action {
         Action::StartFilter => {
             state.mode = Mode::Filter {
                 buf: TextBuffer::empty(),
@@ -799,17 +919,30 @@ fn process_action(
                 };
             }
         }
+        _ => unreachable!(),
+    }
+}
 
-        // Input handling — delegate to TextBuffer
+// ---------------------------------------------------------------------------
+// Handler: Text input (char entry, cursor movement, confirm, cancel)
+// ---------------------------------------------------------------------------
+
+fn handle_input(
+    board: &mut Board,
+    state: &mut AppState,
+    action: Action,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let mut sync_message = None;
+
+    match action {
         Action::InputChar(c) => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.insert(c),
                 _ => {}
             }
-            if is_filter {
-                sync_filter(state);
-            }
+            if is_filter { sync_filter(state); }
         }
         Action::InputBackspace => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
@@ -817,9 +950,7 @@ fn process_action(
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.backspace(),
                 _ => {}
             }
-            if is_filter {
-                sync_filter(state);
-            }
+            if is_filter { sync_filter(state); }
         }
         Action::InputLeft => {
             match &mut state.mode {
@@ -851,122 +982,10 @@ fn process_action(
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.delete_word(),
                 _ => {}
             }
-            if is_filter {
-                sync_filter(state);
-            }
+            if is_filter { sync_filter(state); }
         }
         Action::InputConfirm => {
-            let old_mode = std::mem::replace(&mut state.mode, Mode::Normal);
-            match old_mode {
-                Mode::Input {
-                    buf,
-                    on_confirm: InputTarget::NewCardTitle,
-                    ..
-                } => {
-                    let title = buf.input.trim().to_string();
-                    if !title.is_empty() {
-                        let id = board.next_card_id();
-                        let card = Card::new(id, title);
-                        // Add to focused column
-                        if let Some(col) = board.columns.get_mut(state.focused_column) {
-                            col.cards.push(card);
-                            col.sort_cards();
-                        }
-                        save_board(kando_dir, board)?;
-                        sync_message = Some("Create card".into());
-                        state.notify("Card created");
-                    }
-                }
-                Mode::Input {
-                    buf,
-                    on_confirm: InputTarget::EditTags,
-                    ..
-                } => {
-                    let tags: Vec<String> = buf.input
-                        .split(',')
-                        .map(|t| t.trim().to_lowercase())
-                        .filter(|t| !t.is_empty())
-                        .collect();
-                    if let Some(col) = board.columns.get_mut(state.focused_column) {
-                        if let Some(card) = col.cards.get_mut(state.selected_card) {
-                            card.tags = tags;
-                            card.touch();
-                        }
-                        col.sort_cards();
-                    }
-                    save_board(kando_dir, board)?;
-                    sync_message = Some("Update tags".into());
-                    state.clamp_selection(board);
-                    state.notify("Tags updated");
-                }
-                Mode::Filter { buf } => {
-                    if buf.input.trim().is_empty() {
-                        state.active_filter = None;
-                    } else {
-                        state.active_filter = Some(buf.input);
-                    }
-                }
-                Mode::Picker { mut items, selected, target, title } => {
-                    match target {
-                        PickerTarget::TagFilter => {
-                            if let Some((tag, _)) = items.get(selected) {
-                                let tag = tag.clone();
-                                if state.active_tag_filters.contains(&tag) {
-                                    state.active_tag_filters.retain(|t| *t != tag);
-                                } else {
-                                    state.active_tag_filters.push(tag);
-                                }
-                            }
-                            // Rebuild picker items with updated active states
-                            for (tag, active) in items.iter_mut() {
-                                *active = state.active_tag_filters.contains(tag);
-                            }
-                            // Put picker back — stay in picker mode
-                            state.mode = Mode::Picker { title, items, selected, target: PickerTarget::TagFilter };
-                        }
-                        PickerTarget::Priority => {
-                            use crate::board::Priority;
-                            if let Some(priority) = Priority::ALL.get(selected) {
-                                let col_idx = state.focused_column;
-                                let card_idx = state.selected_card;
-                                if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
-                                    card.priority = *priority;
-                                    card.touch();
-                                    let priority_str = format!("Priority: {}", card.priority);
-                                    board.columns[col_idx].sort_cards();
-                                    save_board(kando_dir, board)?;
-                                    sync_message = Some("Change priority".into());
-                                    state.clamp_selection(board);
-                                    state.notify(priority_str);
-                                }
-                            }
-                        }
-                        PickerTarget::MoveToColumn => {
-                            if let Some((col_name, _)) = items.get(selected) {
-                                // Find target column index by name (skipping current)
-                                let target_col = board.columns.iter().enumerate()
-                                    .filter(|(i, _)| *i != state.focused_column)
-                                    .find(|(_, c)| c.name == *col_name)
-                                    .map(|(i, _)| i);
-                                if let Some(to) = target_col {
-                                    let from = state.focused_column;
-                                    let card_idx = state.selected_card.min(
-                                        board.columns[from].cards.len().saturating_sub(1)
-                                    );
-                                    board.move_card(from, card_idx, to);
-                                    board.columns[to].sort_cards();
-                                    state.focused_column = to;
-                                    state.clamp_selection(board);
-                                    save_board(kando_dir, board)?;
-                                    sync_message = Some("Move card".into());
-                                    state.notify(format!("Moved to {col_name}"));
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+            sync_message = handle_input_confirm(board, state, kando_dir)?;
         }
         Action::InputCancel => {
             match &state.mode {
@@ -980,8 +999,144 @@ fn process_action(
             }
             state.mode = Mode::Normal;
         }
+        _ => unreachable!(),
+    }
 
-        // Confirmation
+    Ok(sync_message)
+}
+
+/// Process InputConfirm for Input, Filter, and Picker modes.
+fn handle_input_confirm(
+    board: &mut Board,
+    state: &mut AppState,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let mut sync_message = None;
+    let old_mode = std::mem::replace(&mut state.mode, Mode::Normal);
+
+    match old_mode {
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::NewCardTitle,
+            ..
+        } => {
+            let title = buf.input.trim().to_string();
+            if !title.is_empty() {
+                let id = board.next_card_id();
+                let card = Card::new(id, title);
+                if let Some(col) = board.columns.get_mut(state.focused_column) {
+                    col.cards.push(card);
+                    col.sort_cards();
+                }
+                save_board(kando_dir, board)?;
+                sync_message = Some("Create card".into());
+                state.notify("Card created");
+            }
+        }
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::EditTags,
+            ..
+        } => {
+            let tags: Vec<String> = buf.input
+                .split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if let Some(col) = board.columns.get_mut(state.focused_column) {
+                if let Some(card) = col.cards.get_mut(state.selected_card) {
+                    card.tags = tags;
+                    card.touch();
+                }
+                col.sort_cards();
+            }
+            save_board(kando_dir, board)?;
+            sync_message = Some("Update tags".into());
+            state.clamp_selection(board);
+            state.notify("Tags updated");
+        }
+        Mode::Filter { buf } => {
+            if buf.input.trim().is_empty() {
+                state.active_filter = None;
+            } else {
+                state.active_filter = Some(buf.input);
+            }
+        }
+        Mode::Picker { mut items, selected, target, title } => {
+            match target {
+                PickerTarget::TagFilter => {
+                    if let Some((tag, _)) = items.get(selected) {
+                        let tag = tag.clone();
+                        if state.active_tag_filters.contains(&tag) {
+                            state.active_tag_filters.retain(|t| *t != tag);
+                        } else {
+                            state.active_tag_filters.push(tag);
+                        }
+                    }
+                    for (tag, active) in items.iter_mut() {
+                        *active = state.active_tag_filters.contains(tag);
+                    }
+                    state.mode = Mode::Picker { title, items, selected, target: PickerTarget::TagFilter };
+                }
+                PickerTarget::Priority => {
+                    use crate::board::Priority;
+                    if let Some(priority) = Priority::ALL.get(selected) {
+                        let col_idx = state.focused_column;
+                        let card_idx = state.selected_card;
+                        if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                            card.priority = *priority;
+                            card.touch();
+                            let priority_str = format!("Priority: {}", card.priority);
+                            board.columns[col_idx].sort_cards();
+                            save_board(kando_dir, board)?;
+                            sync_message = Some("Change priority".into());
+                            state.clamp_selection(board);
+                            state.notify(priority_str);
+                        }
+                    }
+                }
+                PickerTarget::MoveToColumn => {
+                    if let Some((col_name, _)) = items.get(selected) {
+                        let target_col = board.columns.iter().enumerate()
+                            .filter(|(i, _)| *i != state.focused_column)
+                            .find(|(_, c)| c.name == *col_name)
+                            .map(|(i, _)| i);
+                        if let Some(to) = target_col {
+                            let from = state.focused_column;
+                            let card_idx = state.selected_card.min(
+                                board.columns[from].cards.len().saturating_sub(1)
+                            );
+                            board.move_card(from, card_idx, to);
+                            board.columns[to].sort_cards();
+                            state.focused_column = to;
+                            state.clamp_selection(board);
+                            save_board(kando_dir, board)?;
+                            sync_message = Some("Move card".into());
+                            state.notify(format!("Moved to {col_name}"));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(sync_message)
+}
+
+// ---------------------------------------------------------------------------
+// Handler: Confirmation (delete card, WIP limit override)
+// ---------------------------------------------------------------------------
+
+fn handle_confirm(
+    board: &mut Board,
+    state: &mut AppState,
+    action: Action,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let mut sync_message = None;
+
+    match action {
         Action::Confirm => {
             match &state.mode {
                 Mode::Confirm {
@@ -990,7 +1145,6 @@ fn process_action(
                 } => {
                     let id = id.clone();
                     if let Some((col_idx, card_idx)) = board.find_card(&id) {
-                        // Remove the card file
                         let card_path = kando_dir
                             .join("columns")
                             .join(&board.columns[col_idx].slug)
@@ -1031,55 +1185,8 @@ fn process_action(
         Action::Deny => {
             state.mode = Mode::Normal;
         }
-
-        // Mode entry
-        Action::EnterGotoMode => {
-            state.mode = Mode::Goto;
-        }
-        Action::EnterSpaceMode => {
-            state.mode = Mode::Space;
-        }
-        Action::EnterViewMode => {
-            state.mode = Mode::View;
-        }
-
-        // Board
-        Action::ReloadBoard => {
-            state.mode = Mode::Normal;
-            *board = load_board(kando_dir)?;
-            state.clamp_selection(board);
-            state.notify("Board reloaded");
-        }
-        Action::ShowHelp => {
-            state.mode = Mode::Help;
-        }
-        Action::DismissTutorial => {
-            state.mode = Mode::Normal;
-            board.tutorial_shown = true;
-            save_board(kando_dir, board)?;
-        }
-        Action::Quit => {
-            match &state.mode {
-                Mode::Normal => state.should_quit = true,
-                _ => state.mode = Mode::Normal,
-            }
-        }
-        Action::ClearFilters => {
-            if state.active_filter.is_some() || !state.active_tag_filters.is_empty() {
-                state.active_filter = None;
-                state.active_tag_filters.clear();
-                state.notify("Filters cleared");
-            }
-            // Otherwise no-op — Esc does nothing in Normal mode
-        }
+        _ => unreachable!(),
     }
 
-    // Sync to remote if any mutation was saved
-    if let Some(msg) = sync_message {
-        if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, kando_dir, &msg);
-        }
-    }
-
-    Ok(())
+    Ok(sync_message)
 }
