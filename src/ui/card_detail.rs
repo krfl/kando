@@ -94,7 +94,7 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
                 tag_spans.push(Span::raw(" · "));
             }
             tag_spans.push(Span::styled(
-                tag.clone(),
+                tag.as_str(),
                 Style::default().fg(Theme::tag_color(tag)),
             ));
         }

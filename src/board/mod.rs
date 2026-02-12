@@ -226,15 +226,18 @@ impl Board {
 
     /// Collect all unique tags across the board with counts.
     pub fn all_tags(&self) -> Vec<(String, usize)> {
-        let mut counts = std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for col in &self.columns {
             for card in &col.cards {
                 for tag in &card.tags {
-                    *counts.entry(tag.clone()).or_insert(0) += 1;
+                    *counts.entry(tag.as_str()).or_insert(0) += 1;
                 }
             }
         }
-        let mut tags: Vec<_> = counts.into_iter().collect();
+        let mut tags: Vec<_> = counts
+            .into_iter()
+            .map(|(tag, count)| (tag.to_string(), count))
+            .collect();
         tags.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         tags
     }

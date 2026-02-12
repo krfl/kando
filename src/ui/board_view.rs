@@ -340,7 +340,7 @@ fn render_card(
                 spans.push(Span::styled(" · ", Theme::dim_style()));
             }
             spans.push(Span::styled(
-                tag.clone(),
+                tag.as_str(),
                 Style::default().fg(Theme::tag_color(tag)).add_modifier(selected_mod),
             ));
         }

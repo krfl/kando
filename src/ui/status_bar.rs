@@ -67,7 +67,7 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board_name
                 spans.push(Span::raw(", "));
             }
             spans.push(Span::styled(
-                tag.clone(),
+                tag.as_str(),
                 Style::default().fg(Theme::tag_color(tag)),
             ));
         }
