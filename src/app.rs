@@ -160,6 +160,43 @@ fn next_visible_column(board: &Board, from: usize, forward: bool, show_hidden: b
     }
 }
 
+/// Try to move the selected card to an adjacent visible column.
+/// Returns `Ok(Some(sync_msg))` if the card was moved, `Ok(None)` if WIP confirmation
+/// was triggered or no move was possible.
+fn try_move_card(
+    board: &mut Board,
+    state: &mut AppState,
+    forward: bool,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let to = match next_visible_column(board, state.focused_column, forward, state.show_hidden_columns) {
+        Some(to) => to,
+        None => return Ok(None),
+    };
+    let col = match board.columns.get(state.focused_column) {
+        Some(col) if !col.cards.is_empty() => col,
+        _ => return Ok(None),
+    };
+    let card_idx = state.selected_card.min(col.cards.len() - 1);
+    let from = state.focused_column;
+
+    if board.columns[to].is_over_wip_limit() {
+        state.mode = Mode::Confirm {
+            prompt: "Column over WIP limit, move anyway?",
+            on_confirm: ConfirmTarget::WipLimitMove { from_col: from, card_idx, to_col: to },
+        };
+        return Ok(None);
+    }
+
+    board.move_card(from, card_idx, to);
+    board.columns[to].sort_cards();
+    state.focused_column = to;
+    state.clamp_selection(board);
+    save_board(kando_dir, board)?;
+    state.notify("Card moved");
+    Ok(Some("Move card".into()))
+}
+
 /// Main TUI application loop.
 pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(start_dir)?;
@@ -429,55 +466,13 @@ fn process_action(
 
         // Card movement
         Action::MoveCardPrevColumn => {
-            let to = next_visible_column(board, state.focused_column, false, state.show_hidden_columns);
-            if let Some(to) = to {
-                if let Some(col) = board.columns.get(state.focused_column) {
-                    if !col.cards.is_empty() {
-                        let card_idx = state.selected_card.min(col.cards.len() - 1);
-                        let from = state.focused_column;
-                        // Check WIP limit
-                        if board.columns[to].is_over_wip_limit() {
-                            state.mode = Mode::Confirm {
-                                prompt: "Column over WIP limit, move anyway?",
-                                on_confirm: ConfirmTarget::WipLimitMove { from_col: from, card_idx, to_col: to },
-                            };
-                        } else {
-                            board.move_card(from, card_idx, to);
-                            board.columns[to].sort_cards();
-                            state.focused_column = to;
-                            state.clamp_selection(board);
-                            save_board(&kando_dir, board)?;
-                            sync_message = Some("Move card".into());
-                            state.notify("Card moved");
-                        }
-                    }
-                }
+            if let Some(msg) = try_move_card(board, state, false, &kando_dir)? {
+                sync_message = Some(msg);
             }
         }
         Action::MoveCardNextColumn => {
-            let to = next_visible_column(board, state.focused_column, true, state.show_hidden_columns);
-            if let Some(to) = to {
-                if let Some(col) = board.columns.get(state.focused_column) {
-                    if !col.cards.is_empty() {
-                        let card_idx = state.selected_card.min(col.cards.len() - 1);
-                        let from = state.focused_column;
-                        // Check WIP limit
-                        if board.columns[to].is_over_wip_limit() {
-                            state.mode = Mode::Confirm {
-                                prompt: "Column over WIP limit, move anyway?",
-                                on_confirm: ConfirmTarget::WipLimitMove { from_col: from, card_idx, to_col: to },
-                            };
-                        } else {
-                            board.move_card(from, card_idx, to);
-                            board.columns[to].sort_cards();
-                            state.focused_column = to;
-                            state.clamp_selection(board);
-                            save_board(&kando_dir, board)?;
-                            sync_message = Some("Move card".into());
-                            state.notify("Card moved");
-                        }
-                    }
-                }
+            if let Some(msg) = try_move_card(board, state, true, &kando_dir)? {
+                sync_message = Some(msg);
             }
         }
         // Card actions
