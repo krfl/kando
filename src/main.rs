@@ -7,6 +7,8 @@ mod ui;
 use std::env;
 use std::path::Path;
 
+use color_eyre::eyre::bail;
+
 use clap::{Parser, Subcommand};
 
 use board::storage::{find_kando_dir, init_board, load_board, save_board};
@@ -130,9 +132,7 @@ fn cmd_init(cwd: &Path, name: &str, branch: Option<String>) -> color_eyre::Resul
             }
             return Ok(());
         }
-        eprintln!("Board already exists in this directory.");
-        eprintln!("To enable sync, run: kando init --branch <branch>");
-        std::process::exit(1);
+        bail!("Board already exists in this directory. To enable sync, run: kando init --branch <branch>");
     }
 
     // If --branch is provided, ensure we're in a git repo (or create one).
@@ -177,11 +177,10 @@ fn ensure_git_repo<'a>(cwd: &Path, branch: &'a str) -> color_eyre::Result<Option
             .current_dir(cwd)
             .output()?;
         if !output.status.success() {
-            eprintln!(
+            bail!(
                 "Failed to initialize git repository: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            std::process::exit(1);
         }
         println!("Initialized git repository.");
         Ok(Some(branch))
@@ -206,8 +205,7 @@ fn cmd_add(
         "high" => Priority::High,
         "urgent" => Priority::Urgent,
         other => {
-            eprintln!("Unknown priority '{other}'. Use: low, normal, high, urgent");
-            std::process::exit(1);
+            bail!("Unknown priority '{other}'. Use: low, normal, high, urgent");
         }
     };
 
@@ -483,10 +481,7 @@ fn cmd_doctor(cwd: &Path) -> color_eyre::Result<()> {
             dir
         }
         _ => {
-            println!("  \u{2717} Board not found in {}", cwd.display());
-            println!("    \u{2192} Run: kando init");
-            println!();
-            std::process::exit(1);
+            bail!("Board not found in {}. Run: kando init", cwd.display());
         }
     };
 
