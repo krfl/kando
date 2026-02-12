@@ -1,6 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
 use std::env;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -85,9 +83,7 @@ fn git_cmd(shadow_path: &Path) -> Command {
 
     // Set up SSH ControlMaster for connection reuse.
     // Socket path must be short (< 104 bytes on macOS), so use /tmp.
-    let mut hasher = DefaultHasher::new();
-    shadow_path.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = djb2(&shadow_path.to_string_lossy());
     let ssh_cmd = format!(
         "ssh -o ControlMaster=auto -o ControlPath=/tmp/kando-ssh-{hash:016x} -o ControlPersist=600",
     );
@@ -110,12 +106,19 @@ pub fn get_remote_url(repo_root: &Path) -> Result<String, SyncError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// DJB2 hash — stable across Rust versions, unlike `DefaultHasher`.
+fn djb2(s: &str) -> u64 {
+    let mut hash: u64 = 5381;
+    for b in s.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(u64::from(b));
+    }
+    hash
+}
+
 /// Compute a stable shadow path for a given repo based on its remote URL.
 pub fn shadow_dir_for(remote_url: &str) -> PathBuf {
     let cache_dir = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    let mut hasher = DefaultHasher::new();
-    remote_url.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = djb2(remote_url);
     cache_dir.join(".kando").join(format!("{hash:016x}"))
 }
 
