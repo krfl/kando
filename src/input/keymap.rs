@@ -136,36 +136,121 @@ fn map_picker(key: KeyEvent) -> Action {
     }
 }
 
-/// Get hints for the current mode (for the popup panel).
-pub fn mode_hints(mode: &Mode) -> Vec<(&'static str, &'static str)> {
+// ---------------------------------------------------------------------------
+// Binding registry — single source of truth for keybinding documentation.
+// Used by help overlay, tutorial, status bar hints, and minor-mode popup.
+// ---------------------------------------------------------------------------
+
+/// A documented keybinding for display in help/tutorial/hints.
+pub struct Binding {
+    pub key: &'static str,
+    pub description: &'static str,
+    /// Include in the first-launch tutorial overlay?
+    pub tutorial: bool,
+}
+
+/// A group of related bindings (one section in help/tutorial).
+pub struct BindingGroup {
+    pub name: &'static str,
+    pub bindings: &'static [Binding],
+}
+
+pub const NORMAL_BINDINGS: &[Binding] = &[
+    Binding { key: "h / l", description: "Switch columns", tutorial: true },
+    Binding { key: "j / k", description: "Move between cards", tutorial: true },
+    Binding { key: "H / L", description: "Move card left/right", tutorial: true },
+    Binding { key: "Enter", description: "Open card detail", tutorial: true },
+    Binding { key: "/", description: "Search cards", tutorial: false },
+    Binding { key: "Esc", description: "Clear filters", tutorial: false },
+    Binding { key: "q", description: "Quit", tutorial: false },
+];
+
+pub const SPACE_BINDINGS: &[Binding] = &[
+    Binding { key: "n", description: "New card", tutorial: true },
+    Binding { key: "d", description: "Delete card", tutorial: true },
+    Binding { key: "e", description: "Edit in $EDITOR", tutorial: true },
+    Binding { key: "t", description: "Edit tags", tutorial: false },
+    Binding { key: "p", description: "Set priority", tutorial: true },
+    Binding { key: "m", description: "Move to column", tutorial: true },
+    Binding { key: "f", description: "Filter by tag", tutorial: true },
+    Binding { key: "b", description: "Toggle blocker", tutorial: false },
+    Binding { key: "r", description: "Reload board", tutorial: false },
+    Binding { key: "/", description: "Search all", tutorial: false },
+    Binding { key: "?", description: "This help", tutorial: false },
+];
+
+pub const GOTO_BINDINGS: &[Binding] = &[
+    Binding { key: "1-9", description: "Jump to column", tutorial: false },
+    Binding { key: "g", description: "First card", tutorial: false },
+    Binding { key: "e", description: "Last card", tutorial: false },
+    Binding { key: "b", description: "Backlog", tutorial: false },
+    Binding { key: "d", description: "Done", tutorial: false },
+];
+
+pub const VIEW_BINDINGS: &[Binding] = &[
+    Binding { key: "c", description: "Collapse empty column", tutorial: false },
+    Binding { key: "a", description: "Show all columns", tutorial: false },
+    Binding { key: "w", description: "Toggle WIP display", tutorial: false },
+    Binding { key: "z", description: "Center on selected card", tutorial: false },
+    Binding { key: "h", description: "Toggle hidden columns", tutorial: false },
+];
+
+pub const DETAIL_BINDINGS: &[Binding] = &[
+    Binding { key: "j / k", description: "Next/prev card", tutorial: false },
+    Binding { key: "J / K", description: "Scroll content", tutorial: false },
+    Binding { key: "e", description: "Edit in $EDITOR", tutorial: false },
+    Binding { key: "t", description: "Edit tags", tutorial: false },
+    Binding { key: "p", description: "Cycle priority", tutorial: false },
+    Binding { key: "b", description: "Toggle blocker", tutorial: false },
+    Binding { key: "Esc", description: "Close", tutorial: false },
+];
+
+/// Extra bindings shown only in the tutorial "More" section.
+const TUTORIAL_EXTRA: &[Binding] = &[
+    Binding { key: "g", description: "Goto mode (jump to columns)", tutorial: true },
+    Binding { key: "z", description: "View mode (collapse, hidden cols)", tutorial: true },
+    Binding { key: "/", description: "Search cards", tutorial: true },
+    Binding { key: "Space ?", description: "Full help", tutorial: true },
+    Binding { key: "q", description: "Quit", tutorial: true },
+];
+
+/// All binding groups for the help overlay.
+pub const HELP_GROUPS: &[BindingGroup] = &[
+    BindingGroup { name: "Normal Mode", bindings: NORMAL_BINDINGS },
+    BindingGroup { name: "Commands (Space)", bindings: SPACE_BINDINGS },
+    BindingGroup { name: "Goto (g)", bindings: GOTO_BINDINGS },
+    BindingGroup { name: "View (z)", bindings: VIEW_BINDINGS },
+    BindingGroup { name: "Card Detail", bindings: DETAIL_BINDINGS },
+];
+
+/// Binding groups for the first-launch tutorial (different organization).
+pub const TUTORIAL_GROUPS: &[BindingGroup] = &[
+    BindingGroup { name: "Navigation", bindings: NORMAL_BINDINGS },
+    BindingGroup { name: "Commands (Space)", bindings: SPACE_BINDINGS },
+    BindingGroup { name: "More", bindings: TUTORIAL_EXTRA },
+];
+
+/// Pre-computed compact hint strings for the status bar (avoids per-frame allocation).
+pub const GOTO_HINTS: &str = "1-9: Jump to column  g: First card  e: Last card  b: Backlog  d: Done";
+pub const SPACE_HINTS: &str = "n: New card  d: Delete card  e: Edit in $EDITOR  t: Edit tags  p: Set priority  m: Move to column  f: Filter by tag  b: Toggle blocker  r: Reload board  /: Search all  ?: This help";
+pub const VIEW_HINTS: &str = "c: Collapse empty column  a: Show all columns  w: Toggle WIP display  z: Center on selected card  h: Toggle hidden columns";
+
+/// Get bindings for a minor mode (for popup and status display).
+pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
     match mode {
-        Mode::Goto => vec![
-            ("1-9", "jump to column"),
-            ("g", "first card"),
-            ("e", "last card"),
-            ("b", "backlog"),
-            ("d", "done"),
-        ],
-        Mode::Space => vec![
-            ("n", "new card"),
-            ("d", "delete card"),
-            ("e", "edit in $EDITOR"),
-            ("t", "edit tags"),
-            ("f", "filter by tag"),
-            ("p", "priority"),
-            ("m", "move to column"),
-            ("b", "toggle blocker"),
-            ("r", "reload board"),
-            ("/", "search all"),
-            ("?", "help"),
-        ],
-        Mode::View => vec![
-            ("c", "collapse column"),
-            ("a", "collapse all"),
-            ("w", "toggle WIP"),
-            ("z", "center on card"),
-            ("h", "toggle hidden"),
-        ],
-        _ => vec![],
+        Mode::Goto => GOTO_BINDINGS,
+        Mode::Space => SPACE_BINDINGS,
+        Mode::View => VIEW_BINDINGS,
+        _ => &[],
+    }
+}
+
+/// Get compact hint string for a minor mode (for status bar display).
+pub fn mode_hints_str(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Goto => GOTO_HINTS,
+        Mode::Space => SPACE_HINTS,
+        Mode::View => VIEW_HINTS,
+        _ => "",
     }
 }

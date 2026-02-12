@@ -6,20 +6,20 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 use crate::app::Mode;
-use crate::input::keymap::mode_hints;
+use crate::input::keymap;
 
 /// Render the minor-mode hint popup (shown for g, space, z modes).
 pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
-    let hints = mode_hints(mode);
-    if hints.is_empty() {
+    let bindings = keymap::mode_bindings(mode);
+    if bindings.is_empty() {
         return;
     }
 
     // Calculate popup dimensions
-    let max_key_len = hints.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let max_desc_len = hints.iter().map(|(_, d)| d.len()).max().unwrap_or(0);
+    let max_key_len = bindings.iter().map(|b| b.key.len()).max().unwrap_or(0);
+    let max_desc_len = bindings.iter().map(|b| b.description.len()).max().unwrap_or(0);
     let popup_width = (max_key_len + max_desc_len + 7).min(area.width as usize) as u16;
-    let popup_height = (hints.len() as u16 + 2).min(area.height);
+    let popup_height = (bindings.len() as u16 + 2).min(area.height);
 
     let x = area.x + area.width.saturating_sub(popup_width);
     let y = area.y + area.height.saturating_sub(popup_height);
@@ -48,20 +48,20 @@ pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
-    for (i, (key, desc)) in hints.iter().enumerate() {
+    for (i, binding) in bindings.iter().enumerate() {
         if i >= inner.height as usize {
             break;
         }
         let line = Line::from(vec![
             Span::raw(" "),
             Span::styled(
-                format!("{key:>width$}", width = max_key_len),
+                format!("{:>width$}", binding.key, width = max_key_len),
                 Style::default()
                     .fg(Theme::HINT_KEY)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(*desc, Style::default().fg(Theme::HINT_DESC)),
+            Span::styled(binding.description, Style::default().fg(Theme::HINT_DESC)),
         ]);
         f.render_widget(
             Paragraph::new(line),

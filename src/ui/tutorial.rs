@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::theme::Theme;
+use crate::input::keymap;
 
 pub fn render_tutorial(f: &mut Frame, area: Rect) {
     let panel_area = super::centered_rect(area, 50, 80, 44, 20);
@@ -34,78 +35,21 @@ pub fn render_tutorial(f: &mut Frame, area: Rect) {
     let dim = Theme::dim_style();
     let heading = Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD);
 
-    let lines = vec![
-        Line::from(Span::styled("Navigation", heading)),
-        Line::from(vec![
-            Span::styled("  h / l       ", key_style),
-            Span::styled("Switch columns", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  j / k       ", key_style),
-            Span::styled("Move between cards", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  Enter       ", key_style),
-            Span::styled("Open card detail", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  H / L       ", key_style),
-            Span::styled("Move card left/right", dim),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("Commands (Space)", heading)),
-        Line::from(vec![
-            Span::styled("  n           ", key_style),
-            Span::styled("Create new card", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  d           ", key_style),
-            Span::styled("Delete card", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  e           ", key_style),
-            Span::styled("Edit in $EDITOR", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  p           ", key_style),
-            Span::styled("Set priority", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  m           ", key_style),
-            Span::styled("Move to column", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  f           ", key_style),
-            Span::styled("Filter by tag", dim),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("More", heading)),
-        Line::from(vec![
-            Span::styled("  g           ", key_style),
-            Span::styled("Goto mode (jump to columns)", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  z           ", key_style),
-            Span::styled("View mode (collapse, hidden cols)", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  /           ", key_style),
-            Span::styled("Search cards", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  Space ?     ", key_style),
-            Span::styled("Full help", dim),
-        ]),
-        Line::from(vec![
-            Span::styled("  q           ", key_style),
-            Span::styled("Quit", dim),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press any key to start",
-            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
-        )),
-    ];
+    let mut lines = Vec::new();
+    for group in keymap::TUTORIAL_GROUPS {
+        lines.push(Line::from(Span::styled(group.name, heading)));
+        for b in group.bindings.iter().filter(|b| b.tutorial) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<14}", b.key), key_style),
+                Span::styled(b.description, dim),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "Press any key to start",
+        Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+    )));
 
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);

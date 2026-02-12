@@ -6,6 +6,7 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 use crate::app::{AppState, Mode};
+use crate::input::keymap;
 
 pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board_name: &str) {
     let mode_str = match &state.mode {
@@ -22,11 +23,9 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board_name
         Mode::Help => "HELP",
     };
 
-    let hints = match &state.mode {
+    let hints: &str = match &state.mode {
         Mode::Normal => "h/l: column  j/k: card  H/L: move  space: commands  q: quit",
-        Mode::Goto => "1-9: column  g: first  e: last  b: backlog  d: done",
-        Mode::Space => "n: new  d: del  e: edit  t: tags  f: filter  p: priority  ?: help",
-        Mode::View => "c: collapse  a: all  w: wip  z: center  h: hidden",
+        Mode::Goto | Mode::Space | Mode::View => keymap::mode_hints_str(&state.mode),
         Mode::Input { .. } => "Enter: confirm  Esc: cancel",
         Mode::Confirm { .. } => "y: yes  n: no",
         Mode::Filter { .. } => "type to filter  Enter: confirm  Esc: clear",
