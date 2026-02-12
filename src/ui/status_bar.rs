@@ -104,7 +104,7 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board_name
 
     // Show input text if in filter/input mode
     match &state.mode {
-        Mode::Filter { input, .. } => {
+        Mode::Filter { buf } => {
             spans.clear();
             spans.push(Span::styled(
                 " / ",
@@ -112,10 +112,10 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board_name
                     .fg(Theme::FG)
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             ));
-            spans.push(Span::raw(format!(" {input}")));
+            spans.push(Span::raw(format!(" {}", buf.input)));
             spans.push(Span::raw("_"));
         }
-        Mode::Input { prompt, input, .. } => {
+        Mode::Input { prompt, buf, .. } => {
             spans.clear();
             spans.push(Span::styled(
                 format!(" {prompt} "),
@@ -123,7 +123,7 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board_name
                     .fg(Theme::FG)
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             ));
-            spans.push(Span::raw(format!(" {input}")));
+            spans.push(Span::raw(format!(" {}", buf.input)));
             spans.push(Span::raw("_"));
         }
         Mode::Confirm { prompt, .. } => {

@@ -12,6 +12,85 @@ use crate::board::{Board, Card};
 use crate::input::action::Action;
 use crate::input::keymap::map_key;
 
+/// Reusable text editing buffer with cursor.
+///
+/// `cursor` is a **char index** (not byte index), always in `0..=char_count`.
+#[derive(Debug, Clone)]
+pub struct TextBuffer {
+    pub input: String,
+    pub cursor: usize,
+}
+
+impl TextBuffer {
+    pub fn new(input: String) -> Self {
+        let cursor = input.chars().count();
+        Self { input, cursor }
+    }
+
+    pub fn empty() -> Self {
+        Self { input: String::new(), cursor: 0 }
+    }
+
+    /// Convert a char index to a byte index.
+    fn byte_offset(&self, char_idx: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len())
+    }
+
+    pub fn insert(&mut self, c: char) {
+        let byte_idx = self.byte_offset(self.cursor);
+        self.input.insert(byte_idx, c);
+        self.cursor += 1;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let byte_idx = self.byte_offset(self.cursor - 1);
+            self.input.remove(byte_idx);
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn delete_word(&mut self) {
+        let byte_pos = self.byte_offset(self.cursor);
+        let before = &self.input[..byte_pos];
+        let trimmed = before.trim_end();
+        let start_byte = trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8()) // byte after the whitespace char
+            .unwrap_or(0);
+        // Convert start_byte back to char index
+        let start_char = self.input[..start_byte].chars().count();
+        self.input.drain(start_byte..byte_pos);
+        self.cursor = start_char;
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor < self.input.chars().count() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.input.chars().count();
+    }
+}
+
 /// Current interaction mode.
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -21,8 +100,7 @@ pub enum Mode {
     View,
     Input {
         prompt: &'static str,
-        input: String,
-        cursor: usize,
+        buf: TextBuffer,
         on_confirm: InputTarget,
     },
     Confirm {
@@ -30,8 +108,7 @@ pub enum Mode {
         on_confirm: ConfirmTarget,
     },
     Filter {
-        input: String,
-        cursor: usize,
+        buf: TextBuffer,
     },
     Picker {
         title: &'static str,
@@ -144,6 +221,17 @@ impl AppState {
             .iter()
             .filter(|c| !c.hidden || self.show_hidden_columns)
             .count()
+    }
+}
+
+/// Sync `active_filter` from the current filter buffer.
+fn sync_filter(state: &mut AppState) {
+    if let Mode::Filter { buf } = &state.mode {
+        state.active_filter = if buf.input.is_empty() {
+            None
+        } else {
+            Some(buf.input.clone())
+        };
     }
 }
 
@@ -479,8 +567,7 @@ fn process_action(
         Action::NewCard => {
             state.mode = Mode::Input {
                 prompt: "New card",
-                input: String::new(),
-                cursor: 0,
+                buf: TextBuffer::empty(),
                 on_confirm: InputTarget::NewCardTitle,
             };
         }
@@ -608,8 +695,7 @@ fn process_action(
                 let current = card.tags.join(", ");
                 state.mode = Mode::Input {
                     prompt: "Tags (comma-separated)",
-                    input: current.clone(),
-                    cursor: current.len(),
+                    buf: TextBuffer::new(current),
                     on_confirm: InputTarget::EditTags,
                 };
             } else {
@@ -692,8 +778,7 @@ fn process_action(
         // Filter
         Action::StartFilter => {
             state.mode = Mode::Filter {
-                input: String::new(),
-                cursor: 0,
+                buf: TextBuffer::empty(),
             };
         }
         Action::StartTagFilter => {
@@ -719,122 +804,73 @@ fn process_action(
         }
         Action::StartSearch => {
             state.mode = Mode::Filter {
-                input: String::new(),
-                cursor: 0,
+                buf: TextBuffer::empty(),
             };
         }
 
-        // Input handling
+        // Input handling — delegate to TextBuffer
         Action::InputChar(c) => {
+            let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
-                Mode::Input { input, cursor, .. } => {
-                    input.insert(*cursor, c);
-                    *cursor += 1;
-                }
-                Mode::Filter { input, cursor } => {
-                    input.insert(*cursor, c);
-                    *cursor += 1;
-                    // Live filter update
-                    state.active_filter = Some(input.clone());
-                }
+                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.insert(c),
                 _ => {}
+            }
+            if is_filter {
+                sync_filter(state);
             }
         }
         Action::InputBackspace => {
+            let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
-                Mode::Input { input, cursor, .. } => {
-                    if *cursor > 0 {
-                        input.remove(*cursor - 1);
-                        *cursor -= 1;
-                    }
-                }
-                Mode::Filter { input, cursor } => {
-                    if *cursor > 0 {
-                        input.remove(*cursor - 1);
-                        *cursor -= 1;
-                        state.active_filter = if input.is_empty() {
-                            None
-                        } else {
-                            Some(input.clone())
-                        };
-                    }
-                }
+                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.backspace(),
                 _ => {}
+            }
+            if is_filter {
+                sync_filter(state);
             }
         }
         Action::InputLeft => {
             match &mut state.mode {
-                Mode::Input { cursor, .. } | Mode::Filter { cursor, .. } => {
-                    if *cursor > 0 {
-                        *cursor -= 1;
-                    }
-                }
+                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.move_left(),
                 _ => {}
             }
         }
         Action::InputRight => {
             match &mut state.mode {
-                Mode::Input { input, cursor, .. } | Mode::Filter { input, cursor } => {
-                    if *cursor < input.len() {
-                        *cursor += 1;
-                    }
-                }
+                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.move_right(),
                 _ => {}
             }
         }
         Action::InputHome => {
             match &mut state.mode {
-                Mode::Input { cursor, .. } | Mode::Filter { cursor, .. } => {
-                    *cursor = 0;
-                }
+                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.home(),
                 _ => {}
             }
         }
         Action::InputEnd => {
             match &mut state.mode {
-                Mode::Input { input, cursor, .. } | Mode::Filter { input, cursor } => {
-                    *cursor = input.len();
-                }
+                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.end(),
                 _ => {}
             }
         }
         Action::InputDeleteWord => {
+            let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
-                Mode::Input { input, cursor, .. } => {
-                    // Delete backward to previous word boundary
-                    let start = input[..*cursor]
-                        .trim_end()
-                        .rfind(|c: char| c.is_whitespace())
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                    input.drain(start..*cursor);
-                    *cursor = start;
-                }
-                Mode::Filter { input, cursor } => {
-                    let start = input[..*cursor]
-                        .trim_end()
-                        .rfind(|c: char| c.is_whitespace())
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                    input.drain(start..*cursor);
-                    *cursor = start;
-                    state.active_filter = if input.is_empty() {
-                        None
-                    } else {
-                        Some(input.clone())
-                    };
-                }
+                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.delete_word(),
                 _ => {}
+            }
+            if is_filter {
+                sync_filter(state);
             }
         }
         Action::InputConfirm => {
             match state.mode.clone() {
                 Mode::Input {
-                    input,
+                    buf,
                     on_confirm: InputTarget::NewCardTitle,
                     ..
                 } => {
-                    let title = input.trim().to_string();
+                    let title = buf.input.trim().to_string();
                     if !title.is_empty() {
                         let id = board.next_card_id();
                         let card = Card::new(id, title);
@@ -850,11 +886,11 @@ fn process_action(
                     state.mode = Mode::Normal;
                 }
                 Mode::Input {
-                    input,
+                    buf,
                     on_confirm: InputTarget::EditTags,
                     ..
                 } => {
-                    let tags: Vec<String> = input
+                    let tags: Vec<String> = buf.input
                         .split(',')
                         .map(|t| t.trim().to_lowercase())
                         .filter(|t| !t.is_empty())
@@ -872,11 +908,11 @@ fn process_action(
                     state.notify("Tags updated");
                     state.mode = Mode::Normal;
                 }
-                Mode::Filter { input, .. } => {
-                    if input.trim().is_empty() {
+                Mode::Filter { buf } => {
+                    if buf.input.trim().is_empty() {
                         state.active_filter = None;
                     } else {
-                        state.active_filter = Some(input);
+                        state.active_filter = Some(buf.input);
                     }
                     state.mode = Mode::Normal;
                 }
