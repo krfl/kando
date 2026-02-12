@@ -226,11 +226,17 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
             }
         }
 
-        // Write card files
+        // Write card files (skip unchanged cards)
         for card in &col.cards {
             let card_path = col_dir.join(format!("{}.md", card.id));
             let content = serialize_card(card);
-            fs::write(&card_path, content)?;
+            let needs_write = match fs::read_to_string(&card_path) {
+                Ok(existing) => existing.replace("\r\n", "\n") != content,
+                Err(_) => true,
+            };
+            if needs_write {
+                fs::write(&card_path, content)?;
+            }
         }
     }
 
