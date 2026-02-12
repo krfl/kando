@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -157,12 +156,11 @@ pub struct AppState {
     pub notification: Option<String>,
     pub notification_expires: Option<Instant>,
     pub should_quit: bool,
-    pub kando_dir: PathBuf,
     pub sync_state: Option<SyncState>,
 }
 
 impl AppState {
-    pub fn new(kando_dir: PathBuf) -> Self {
+    pub fn new() -> Self {
         Self {
             mode: Mode::Normal,
             focused_column: 0,
@@ -173,7 +171,6 @@ impl AppState {
             notification: None,
             notification_expires: None,
             should_quit: false,
-            kando_dir,
             sync_state: None,
         }
     }
@@ -289,7 +286,7 @@ fn try_move_card(
 pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(start_dir)?;
     let mut board = load_board(&kando_dir)?;
-    let mut state = AppState::new(kando_dir.clone());
+    let mut state = AppState::new();
 
     // Initialize git sync if configured
     if let Some(ref branch) = board.sync_branch {
@@ -379,7 +376,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 let action = map_key(key, &state.mode);
-                process_action(&mut board, &mut state, action, terminal)?;
+                process_action(&mut board, &mut state, action, terminal, &kando_dir)?;
 
                 if state.should_quit {
                     break;
@@ -396,10 +393,10 @@ fn process_action(
     state: &mut AppState,
     action: Action,
     terminal: &mut DefaultTerminal,
+    kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
     // For minor modes, return to normal after processing (unless entering a new mode)
     let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::View);
-    let kando_dir = state.kando_dir.clone();
     let mut sync_message: Option<String> = None;
 
     match action {
