@@ -11,7 +11,7 @@ use ratatui::Frame;
 use super::theme::Theme;
 use crate::app::AppState;
 use crate::board::age::{format_age, staleness, Staleness};
-use crate::board::{Board, Card, Priority};
+use crate::board::{Board, Card};
 use chrono::{DateTime, Utc};
 
 pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, now: DateTime<Utc>) {
@@ -250,12 +250,7 @@ fn render_card(
 
     // Priority glyph
     if let Some(sym) = card.priority.symbol() {
-        let color = match card.priority {
-            Priority::Low => Theme::PRIORITY_LOW,
-            Priority::High => Theme::PRIORITY_HIGH,
-            Priority::Urgent => Theme::PRIORITY_URGENT,
-            _ => Theme::FG,
-        };
+        let color = Theme::priority_color(card.priority);
         if !right_glyphs.is_empty() {
             right_glyphs.push(Span::raw(" "));
         }

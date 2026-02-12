@@ -73,12 +73,7 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
     let priority_spans = {
         let mut spans = vec![Span::styled("Priority: ", Theme::dim_style())];
         if let Some(sym) = card.priority.symbol() {
-            let color = match card.priority {
-                crate::board::Priority::Low => Theme::PRIORITY_LOW,
-                crate::board::Priority::High => Theme::PRIORITY_HIGH,
-                crate::board::Priority::Urgent => Theme::PRIORITY_URGENT,
-                _ => Theme::FG,
-            };
+            let color = Theme::priority_color(card.priority);
             spans.push(Span::styled(format!("{sym} "), Style::default().fg(color)));
         }
         spans.push(Span::raw(card.priority.as_str()));

@@ -1,5 +1,7 @@
 use ratatui::style::{Color, Style};
 
+use crate::board::Priority;
+
 /// Color theme for Kando.
 ///
 /// All text and UI chrome uses the terminal's default foreground color (Color::Reset).
@@ -47,6 +49,16 @@ impl Theme {
 
     pub fn status_style() -> Style {
         Style::default().fg(Self::FG)
+    }
+
+    /// Color for a priority level.
+    pub fn priority_color(priority: Priority) -> Color {
+        match priority {
+            Priority::Low => Self::PRIORITY_LOW,
+            Priority::Normal => Self::FG,
+            Priority::High => Self::PRIORITY_HIGH,
+            Priority::Urgent => Self::PRIORITY_URGENT,
+        }
     }
 
     /// Assign a consistent color to a tag based on its name.
