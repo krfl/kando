@@ -147,6 +147,19 @@ impl AppState {
     }
 }
 
+/// Find the next visible column in a given direction from `from` (exclusive).
+/// Returns `None` if no visible column exists in that direction.
+fn next_visible_column(board: &Board, from: usize, forward: bool, show_hidden: bool) -> Option<usize> {
+    if forward {
+        (from + 1..board.columns.len())
+            .find(|&i| show_hidden || !board.columns[i].hidden)
+    } else {
+        (0..from)
+            .rev()
+            .find(|&i| show_hidden || !board.columns[i].hidden)
+    }
+}
+
 /// Main TUI application loop.
 pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(start_dir)?;
@@ -275,34 +288,18 @@ fn process_action(
             if was_minor_mode {
                 state.mode = Mode::Normal;
             }
-            // Skip hidden columns
-            let mut target = state.focused_column;
-            loop {
-                if target == 0 {
-                    break;
-                }
-                target -= 1;
-                if state.show_hidden_columns || !board.columns[target].hidden {
-                    state.focused_column = target;
-                    state.clamp_selection(board);
-                    break;
-                }
+            if let Some(col) = next_visible_column(board, state.focused_column, false, state.show_hidden_columns) {
+                state.focused_column = col;
+                state.clamp_selection(board);
             }
         }
         Action::FocusNextColumn => {
             if was_minor_mode {
                 state.mode = Mode::Normal;
             }
-            // Skip hidden columns
-            let max = board.columns.len();
-            let mut target = state.focused_column + 1;
-            while target < max {
-                if state.show_hidden_columns || !board.columns[target].hidden {
-                    state.focused_column = target;
-                    state.clamp_selection(board);
-                    break;
-                }
-                target += 1;
+            if let Some(col) = next_visible_column(board, state.focused_column, true, state.show_hidden_columns) {
+                state.focused_column = col;
+                state.clamp_selection(board);
             }
         }
         Action::SelectPrevCard => {
@@ -348,19 +345,17 @@ fn process_action(
             }
             if let Some(col) = board.columns.get(state.focused_column) {
                 if state.selected_card + 1 < col.cards.len() {
-                    // More cards in this column
                     state.selected_card += 1;
                 } else {
-                    // Jump to next visible column's first card
-                    let max = board.columns.len();
-                    let mut target = state.focused_column + 1;
-                    while target < max {
-                        if (state.show_hidden_columns || !board.columns[target].hidden) && !board.columns[target].cards.is_empty() {
-                            state.focused_column = target;
+                    // Jump to next visible non-empty column
+                    let mut from = state.focused_column;
+                    while let Some(next) = next_visible_column(board, from, true, state.show_hidden_columns) {
+                        if !board.columns[next].cards.is_empty() {
+                            state.focused_column = next;
                             state.selected_card = 0;
                             break;
                         }
-                        target += 1;
+                        from = next;
                     }
                 }
             }
@@ -370,18 +365,17 @@ fn process_action(
                 state.mode = Mode::Normal;
             }
             if state.selected_card > 0 {
-                // More cards above in this column
                 state.selected_card -= 1;
             } else {
-                // Jump to previous visible column's last card
-                let mut target = state.focused_column;
-                while target > 0 {
-                    target -= 1;
-                    if (state.show_hidden_columns || !board.columns[target].hidden) && !board.columns[target].cards.is_empty() {
-                        state.focused_column = target;
-                        state.selected_card = board.columns[target].cards.len() - 1;
+                // Jump to previous visible non-empty column
+                let mut from = state.focused_column;
+                while let Some(prev) = next_visible_column(board, from, false, state.show_hidden_columns) {
+                    if !board.columns[prev].cards.is_empty() {
+                        state.focused_column = prev;
+                        state.selected_card = board.columns[prev].cards.len() - 1;
                         break;
                     }
+                    from = prev;
                 }
             }
         }
@@ -435,16 +429,7 @@ fn process_action(
 
         // Card movement
         Action::MoveCardPrevColumn => {
-            // Find previous visible column
-            let mut to = None;
-            let mut target = state.focused_column;
-            while target > 0 {
-                target -= 1;
-                if state.show_hidden_columns || !board.columns[target].hidden {
-                    to = Some(target);
-                    break;
-                }
-            }
+            let to = next_visible_column(board, state.focused_column, false, state.show_hidden_columns);
             if let Some(to) = to {
                 if let Some(col) = board.columns.get(state.focused_column) {
                     if !col.cards.is_empty() {
@@ -470,17 +455,7 @@ fn process_action(
             }
         }
         Action::MoveCardNextColumn => {
-            // Find next visible column
-            let max = board.columns.len();
-            let mut to = None;
-            let mut target = state.focused_column + 1;
-            while target < max {
-                if state.show_hidden_columns || !board.columns[target].hidden {
-                    to = Some(target);
-                    break;
-                }
-                target += 1;
-            }
+            let to = next_visible_column(board, state.focused_column, true, state.show_hidden_columns);
             if let Some(to) = to {
                 if let Some(col) = board.columns.get(state.focused_column) {
                     if !col.cards.is_empty() {
