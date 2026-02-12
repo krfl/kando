@@ -41,7 +41,7 @@ enum Command {
         tags: Vec<String>,
         /// Priority (low, normal, high, urgent)
         #[arg(short, long, default_value = "normal")]
-        priority: String,
+        priority: Priority,
     },
     /// List all cards
     List {
@@ -104,7 +104,7 @@ fn main() -> color_eyre::Result<()> {
             title,
             tags,
             priority,
-        }) => cmd_add(&cwd, &title, tags, &priority),
+        }) => cmd_add(&cwd, &title, tags, priority),
         Some(Command::List { tag, column }) => cmd_list(&cwd, tag.as_deref(), column.as_deref()),
         Some(Command::Move { card_id, column }) => cmd_move(&cwd, &card_id, &column),
         Some(Command::Tags) => cmd_tags(&cwd),
@@ -194,20 +194,10 @@ fn cmd_add(
     cwd: &Path,
     title: &str,
     tags: Vec<String>,
-    priority: &str,
+    priority: Priority,
 ) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let mut board = load_board(&kando_dir)?;
-
-    let priority = match priority.to_lowercase().as_str() {
-        "low" => Priority::Low,
-        "normal" => Priority::Normal,
-        "high" => Priority::High,
-        "urgent" => Priority::Urgent,
-        other => {
-            bail!("Unknown priority '{other}'. Use: low, normal, high, urgent");
-        }
-    };
 
     let id = board.next_card_id();
     let mut card = Card::new(id.clone(), title.to_string());
