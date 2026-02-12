@@ -296,7 +296,10 @@ fn serialize_card(card: &Card) -> String {
 
 /// Parse `---` delimited TOML frontmatter from a string.
 /// Returns (frontmatter, body).
+///
+/// Normalizes `\r\n` to `\n` so files edited on Windows parse correctly.
 fn parse_frontmatter(content: &str) -> Option<(String, String)> {
+    let content = content.replace("\r\n", "\n");
     let content = content.trim_start();
     if !content.starts_with("---") {
         return None;
@@ -357,6 +360,14 @@ mod tests {
     #[test]
     fn test_parse_frontmatter() {
         let content = "---\nid = \"001\"\ntitle = \"Test\"\n---\n\nBody text here.\n";
+        let (fm, body) = parse_frontmatter(content).unwrap();
+        assert!(fm.contains("id = \"001\""));
+        assert_eq!(body, "Body text here.");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_crlf() {
+        let content = "---\r\nid = \"001\"\r\ntitle = \"Test\"\r\n---\r\n\r\nBody text here.\r\n";
         let (fm, body) = parse_frontmatter(content).unwrap();
         assert!(fm.contains("id = \"001\""));
         assert_eq!(body, "Body text here.");
