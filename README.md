@@ -2,6 +2,8 @@
 
 A keyboard-first Kanban TUI for your terminal.
 
+![Screenshot showing a kando board](screenshot.png "Screenshot showing a kando board")
+
 ## Features
 
 - **Vim-style navigation** with Helix-inspired minor modes (`g` goto, `Space` commands, `z` view)
