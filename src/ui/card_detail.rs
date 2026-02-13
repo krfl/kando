@@ -86,6 +86,21 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
         ]));
     }
 
+    // Assignees
+    if !card.assignees.is_empty() {
+        let mut spans = vec![Span::styled("Assigned: ", Theme::dim_style())];
+        for (i, assignee) in card.assignees.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(", "));
+            }
+            spans.push(Span::styled(
+                assignee.as_str(),
+                Style::default().fg(Theme::ASSIGNEE),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
     // Tags
     if !card.tags.is_empty() {
         let mut tag_spans = vec![Span::styled("Tags:     ", Theme::dim_style())];

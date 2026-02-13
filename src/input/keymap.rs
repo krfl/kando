@@ -10,6 +10,7 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Goto => map_goto(key),
         Mode::Space => map_space(key),
         Mode::View => map_view(key),
+        Mode::FilterMenu => map_filter_menu(key),
         Mode::Input { .. } => map_input(key),
         Mode::Confirm { .. } => map_confirm(key),
         Mode::Filter { .. } => map_input(key),
@@ -47,6 +48,7 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Enter => Action::OpenCardDetail,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('/') => Action::StartFilter,
+        KeyCode::Char('f') => Action::EnterFilterMode,
         KeyCode::Char('g') => Action::EnterGotoMode,
         KeyCode::Char(' ') => Action::EnterSpaceMode,
         KeyCode::Char('z') => Action::EnterViewMode,
@@ -77,7 +79,7 @@ fn map_space(key: KeyEvent) -> Action {
         KeyCode::Char('d') => Action::DeleteCard,
         KeyCode::Char('e') => Action::EditCardExternal,
         KeyCode::Char('t') => Action::EditTags,
-        KeyCode::Char('f') => Action::StartTagFilter,
+        KeyCode::Char('a') => Action::EditAssignees,
         KeyCode::Char('p') => Action::PickPriority,
         KeyCode::Char('m') => Action::MoveToColumn,
         KeyCode::Char('b') => Action::ToggleBlocker,
@@ -92,6 +94,16 @@ fn map_space(key: KeyEvent) -> Action {
 fn map_view(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('h') => Action::ToggleHiddenColumns,
+        KeyCode::Esc => Action::None,
+        _ => Action::None,
+    }
+}
+
+fn map_filter_menu(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('t') => Action::StartTagFilter,
+        KeyCode::Char('a') => Action::StartAssigneeFilter,
+        KeyCode::Char('/') => Action::StartFilter,
         KeyCode::Esc => Action::None,
         _ => Action::None,
     }
@@ -191,13 +203,19 @@ pub const SPACE_BINDINGS: &[Binding] = &[
     Binding { key: "d", description: "Delete card", tutorial: true },
     Binding { key: "e", description: "Edit in $EDITOR", tutorial: true },
     Binding { key: "t", description: "Edit tags", tutorial: false },
+    Binding { key: "a", description: "Edit assignees", tutorial: false },
     Binding { key: "p", description: "Set priority", tutorial: true },
     Binding { key: "m", description: "Move to column", tutorial: true },
-    Binding { key: "f", description: "Filter by tag", tutorial: true },
     Binding { key: "b", description: "Toggle blocker", tutorial: false },
     Binding { key: "r", description: "Reload board", tutorial: false },
     Binding { key: "/", description: "Search all", tutorial: false },
     Binding { key: "?", description: "This help", tutorial: false },
+];
+
+pub const FILTER_BINDINGS: &[Binding] = &[
+    Binding { key: "t", description: "By tag", tutorial: false },
+    Binding { key: "a", description: "By assignee", tutorial: false },
+    Binding { key: "/", description: "Text search", tutorial: false },
 ];
 
 pub const GOTO_BINDINGS: &[Binding] = &[
@@ -253,6 +271,7 @@ pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
         Mode::Goto => GOTO_BINDINGS,
         Mode::Space => SPACE_BINDINGS,
         Mode::View => VIEW_BINDINGS,
+        Mode::FilterMenu => FILTER_BINDINGS,
         _ => &[],
     }
 }

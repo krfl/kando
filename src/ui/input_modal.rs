@@ -31,6 +31,7 @@ pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
         Mode::Goto => "goto",
         Mode::Space => "commands",
         Mode::View => "view",
+        Mode::FilterMenu => "filter",
         _ => "",
     };
 

@@ -23,6 +23,7 @@ pub enum Action {
     DeleteCard,
     EditCardExternal,
     EditTags,
+    EditAssignees,
     CyclePriority,
     PickPriority,
     MoveToColumn,
@@ -40,6 +41,8 @@ pub enum Action {
     // Search & filter
     StartFilter,
     StartTagFilter,
+    StartAssigneeFilter,
+    EnterFilterMode,
     ClearFilters,
     // Board
     ReloadBoard,

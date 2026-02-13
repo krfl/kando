@@ -45,6 +45,7 @@ fn build_left_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>
         Mode::Goto => "GOTO",
         Mode::Space => "SPACE",
         Mode::View => "VIEW",
+        Mode::FilterMenu => "FILTER",
         Mode::CardDetail { .. } => "DETAIL",
         Mode::Tutorial => "TUTORIAL",
         Mode::Help => "HELP",
@@ -192,9 +193,9 @@ fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<
             Some(Line::from(spans))
         }
         Mode::Command { cmd } => {
-            let card_tags: Vec<String> = state
+            let (card_tags, card_assignees) = state
                 .selected_card_ref(board)
-                .map(|c| c.tags.clone())
+                .map(|c| (c.tags.clone(), c.assignees.clone()))
                 .unwrap_or_default();
             let mut spans = vec![
                 Span::styled(
@@ -208,7 +209,7 @@ fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<
             ];
             // Ghost completion text (dimmed, after cursor) — only when NOT actively cycling
             if cmd.completion.is_none() {
-                if let Some(ghost) = crate::command::compute_ghost(&cmd.buf.input, board, &card_tags) {
+                if let Some(ghost) = crate::command::compute_ghost(&cmd.buf.input, board, &card_tags, &card_assignees) {
                     spans.push(Span::styled(ghost, Style::default().fg(Theme::DIM)));
                 }
             }

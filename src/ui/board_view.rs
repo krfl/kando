@@ -71,20 +71,22 @@ fn render_column(
         .filter(|(_, card)| {
             if let Some(ref filter) = state.active_filter {
                 let filter_lower = filter.to_lowercase();
+                let filter_bare = filter_lower.trim_start_matches('@');
                 card.title.to_lowercase().contains(&filter_lower)
                     || card.tags.iter().any(|t| t.contains(&filter_lower))
-            } else if !state.active_tag_filters.is_empty() {
-                card.tags
-                    .iter()
-                    .any(|t| state.active_tag_filters.contains(t))
+                    || card.assignees.iter().any(|a| a.contains(filter_bare))
             } else {
-                true
+                let tag_ok = state.active_tag_filters.is_empty()
+                    || card.tags.iter().any(|t| state.active_tag_filters.contains(t));
+                let assignee_ok = state.active_assignee_filters.is_empty()
+                    || card.assignees.iter().any(|a| state.active_assignee_filters.contains(a));
+                tag_ok && assignee_ok
             }
         })
         .collect();
 
     // Build header
-    let card_count = if state.active_filter.is_some() || !state.active_tag_filters.is_empty() {
+    let card_count = if state.active_filter.is_some() || !state.active_tag_filters.is_empty() || !state.active_assignee_filters.is_empty() {
         format!("{}/{}", cards.len(), col.cards.len())
     } else {
         format!("{}", col.cards.len())
@@ -332,17 +334,30 @@ fn render_card(
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
     }
-    // Line 3: tags (if any)
-    if inner.height >= 3 && !card.tags.is_empty() {
+    // Line 3: assignees + tags
+    let has_metadata = !card.assignees.is_empty() || !card.tags.is_empty();
+    if inner.height >= 3 && has_metadata {
         let mut spans = vec![Span::raw("  ")];
-        for (i, tag) in card.tags.iter().enumerate() {
-            if i > 0 {
+        let mut need_sep = false;
+        for assignee in &card.assignees {
+            if need_sep {
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(
+                format!("@{assignee}"),
+                Style::default().fg(Theme::ASSIGNEE).add_modifier(selected_mod),
+            ));
+            need_sep = true;
+        }
+        for tag in &card.tags {
+            if need_sep {
                 spans.push(Span::styled(" · ", Theme::dim_style()));
             }
             spans.push(Span::styled(
                 tag.as_str(),
                 Style::default().fg(Theme::tag_color(tag)).add_modifier(selected_mod),
             ));
+            need_sep = true;
         }
         f.render_widget(
             Paragraph::new(Line::from(spans)),

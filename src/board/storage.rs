@@ -272,6 +272,10 @@ fn serialize_card(card: &Card) -> String {
     } else {
         fm.push_str("tags = []\n");
     }
+    if !card.assignees.is_empty() {
+        let assignees: Vec<String> = card.assignees.iter().map(|a| format!("{a:?}")).collect();
+        fm.push_str(&format!("assignees = [{}]\n", assignees.join(", ")));
+    }
     if card.blocked {
         fm.push_str("blocked = true\n");
     }

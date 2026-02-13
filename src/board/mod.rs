@@ -145,6 +145,8 @@ pub struct Card {
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
+    pub assignees: Vec<String>,
+    #[serde(default)]
     pub blocked: bool,
     /// The markdown body (not serialized into frontmatter).
     #[serde(skip)]
@@ -161,6 +163,7 @@ impl Card {
             updated: now,
             priority: Priority::default(),
             tags: Vec::new(),
+            assignees: Vec::new(),
             blocked: false,
             body: String::new(),
         }
@@ -221,6 +224,24 @@ impl Board {
             .collect();
         tags.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         tags
+    }
+
+    /// Collect all unique assignees across all cards, with counts.
+    pub fn all_assignees(&self) -> Vec<(String, usize)> {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for col in &self.columns {
+            for card in &col.cards {
+                for assignee in &card.assignees {
+                    *counts.entry(assignee.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut assignees: Vec<_> = counts
+            .into_iter()
+            .map(|(name, count)| (name.to_string(), count))
+            .collect();
+        assignees.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        assignees
     }
 }
 

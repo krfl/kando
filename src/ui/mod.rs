@@ -36,7 +36,7 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
 
     // Overlays
     match &state.mode {
-        crate::app::Mode::Goto | crate::app::Mode::Space | crate::app::Mode::View => {
+        crate::app::Mode::Goto | crate::app::Mode::Space | crate::app::Mode::View | crate::app::Mode::FilterMenu => {
             input_modal::render_hint_popup(f, chunks[0], &state.mode);
         }
         crate::app::Mode::Picker { title, items, selected, .. } => {
@@ -55,11 +55,11 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
             help::render_help(f, f.area());
         }
         crate::app::Mode::Command { cmd } => {
-            let card_tags: Vec<String> = state
+            let (card_tags, card_assignees) = state
                 .selected_card_ref(board)
-                .map(|c| c.tags.clone())
+                .map(|c| (c.tags.clone(), c.assignees.clone()))
                 .unwrap_or_default();
-            let (title, items) = crate::command::palette_items(&cmd.buf.input, board, &card_tags);
+            let (title, items) = crate::command::palette_items(&cmd.buf.input, board, &card_tags, &card_assignees);
             if !items.is_empty() {
                 // Determine which name is selected (from active completion state)
                 let selected_name = cmd.completion.as_ref().and_then(|c| {

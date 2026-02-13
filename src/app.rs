@@ -97,6 +97,7 @@ pub enum Mode {
     Goto,
     Space,
     View,
+    FilterMenu,
     Input {
         prompt: &'static str,
         buf: TextBuffer,
@@ -129,6 +130,7 @@ pub enum Mode {
 pub enum InputTarget {
     NewCardTitle,
     EditTags,
+    EditAssignees,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +148,7 @@ pub enum PickerTarget {
     Priority,
     MoveToColumn,
     TagFilter,
+    AssigneeFilter,
 }
 
 /// Notification severity for statusbar coloring.
@@ -163,6 +166,7 @@ pub struct AppState {
     pub show_hidden_columns: bool,
     pub active_filter: Option<String>,
     pub active_tag_filters: Vec<String>,
+    pub active_assignee_filters: Vec<String>,
     pub notification: Option<String>,
     pub notification_level: NotificationLevel,
     pub notification_expires: Option<Instant>,
@@ -179,6 +183,7 @@ impl AppState {
             show_hidden_columns: false,
             active_filter: None,
             active_tag_filters: Vec::new(),
+            active_assignee_filters: Vec::new(),
             notification: None,
             notification_level: NotificationLevel::Info,
             notification_expires: None,
@@ -406,7 +411,7 @@ fn process_action(
     terminal: &mut DefaultTerminal,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
-    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::View);
+    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::View | Mode::FilterMenu);
     let mut sync_message: Option<String> = None;
 
     match action {
@@ -446,6 +451,7 @@ fn process_action(
         | Action::MoveToColumn
         | Action::ToggleBlocker
         | Action::EditTags
+        | Action::EditAssignees
         | Action::OpenCardDetail
         | Action::ClosePanel
         | Action::DetailScrollDown
@@ -461,7 +467,7 @@ fn process_action(
         }
 
         // Filter / tag filter
-        Action::StartFilter | Action::StartTagFilter => {
+        Action::StartFilter | Action::StartTagFilter | Action::StartAssigneeFilter => {
             handle_filter_start(board, state, action);
         }
 
@@ -489,6 +495,7 @@ fn process_action(
         Action::EnterGotoMode => state.mode = Mode::Goto,
         Action::EnterSpaceMode => state.mode = Mode::Space,
         Action::EnterViewMode => state.mode = Mode::View,
+        Action::EnterFilterMode => state.mode = Mode::FilterMenu,
         Action::EnterCommandMode => {
             state.mode = Mode::Command { cmd: crate::command::CommandState::new() };
         }
@@ -513,9 +520,10 @@ fn process_action(
             }
         }
         Action::ClearFilters => {
-            if state.active_filter.is_some() || !state.active_tag_filters.is_empty() {
+            if state.active_filter.is_some() || !state.active_tag_filters.is_empty() || !state.active_assignee_filters.is_empty() {
                 state.active_filter = None;
                 state.active_tag_filters.clear();
+                state.active_assignee_filters.clear();
                 state.notify("Filters cleared");
             }
         }
@@ -821,6 +829,18 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 state.mode = Mode::Normal;
             }
         }
+        Action::EditAssignees => {
+            if let Some(card) = state.selected_card_ref(board) {
+                let current = card.assignees.join(", ");
+                state.mode = Mode::Input {
+                    prompt: "Assignees (comma-separated)",
+                    buf: TextBuffer::new(current),
+                    on_confirm: InputTarget::EditAssignees,
+                };
+            } else {
+                state.mode = Mode::Normal;
+            }
+        }
         Action::OpenCardDetail => {
             if state.selected_card_ref(board).is_some() {
                 state.mode = Mode::CardDetail { scroll: 0 };
@@ -920,6 +940,27 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                 };
             }
         }
+        Action::StartAssigneeFilter => {
+            let assignees = board.all_assignees();
+            if assignees.is_empty() {
+                state.mode = Mode::Normal;
+                state.notify("No assignees on the board");
+            } else {
+                let items: Vec<(String, bool)> = assignees
+                    .iter()
+                    .map(|(name, _count)| {
+                        let active = state.active_assignee_filters.contains(name);
+                        (name.clone(), active)
+                    })
+                    .collect();
+                state.mode = Mode::Picker {
+                    title: "filter by assignee",
+                    items,
+                    selected: 0,
+                    target: PickerTarget::AssigneeFilter,
+                };
+            }
+        }
         _ => unreachable!(),
     }
 }
@@ -1009,13 +1050,13 @@ fn handle_input(
         }
         Action::InputComplete | Action::InputCompleteBack => {
             let forward = matches!(action, Action::InputComplete);
-            // Extract card tags before mutably borrowing state.mode
-            let card_tags: Vec<String> = state
+            // Extract card data before mutably borrowing state.mode
+            let (card_tags, card_assignees) = state
                 .selected_card_ref(board)
-                .map(|c| c.tags.clone())
+                .map(|c| (c.tags.clone(), c.assignees.clone()))
                 .unwrap_or_default();
             if let Mode::Command { cmd } = &mut state.mode {
-                crate::command::cycle_completion(cmd, board, &card_tags, forward);
+                crate::command::cycle_completion(cmd, board, &card_tags, &card_assignees, forward);
             }
         }
         _ => unreachable!(),
@@ -1074,6 +1115,28 @@ fn handle_input_confirm(
             state.clamp_selection(board);
             state.notify("Tags updated");
         }
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::EditAssignees,
+            ..
+        } => {
+            let assignees: Vec<String> = buf.input
+                .split(',')
+                .map(|a| a.trim().to_lowercase())
+                .filter(|a| !a.is_empty())
+                .collect();
+            if let Some(col) = board.columns.get_mut(state.focused_column) {
+                if let Some(card) = col.cards.get_mut(state.selected_card) {
+                    card.assignees = assignees;
+                    card.touch();
+                }
+                col.sort_cards();
+            }
+            save_board(kando_dir, board)?;
+            sync_message = Some("Update assignees".into());
+            state.clamp_selection(board);
+            state.notify("Assignees updated");
+        }
         Mode::Filter { buf } => {
             if buf.input.trim().is_empty() {
                 state.active_filter = None;
@@ -1096,6 +1159,20 @@ fn handle_input_confirm(
                         *active = state.active_tag_filters.contains(tag);
                     }
                     state.mode = Mode::Picker { title, items, selected, target: PickerTarget::TagFilter };
+                }
+                PickerTarget::AssigneeFilter => {
+                    if let Some((name, _)) = items.get(selected) {
+                        let name = name.clone();
+                        if state.active_assignee_filters.contains(&name) {
+                            state.active_assignee_filters.retain(|a| *a != name);
+                        } else {
+                            state.active_assignee_filters.push(name);
+                        }
+                    }
+                    for (name, active) in items.iter_mut() {
+                        *active = state.active_assignee_filters.contains(name);
+                    }
+                    state.mode = Mode::Picker { title, items, selected, target: PickerTarget::AssigneeFilter };
                 }
                 PickerTarget::Priority => {
                     use crate::board::Priority;

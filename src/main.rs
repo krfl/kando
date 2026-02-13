@@ -40,6 +40,9 @@ enum Command {
         /// Tags (comma-separated)
         #[arg(short, long, value_delimiter = ',')]
         tags: Vec<String>,
+        /// Assignees (comma-separated)
+        #[arg(short, long, value_delimiter = ',')]
+        assignee: Vec<String>,
         /// Priority (low, normal, high, urgent)
         #[arg(short, long, default_value = "normal")]
         priority: Priority,
@@ -104,8 +107,9 @@ fn main() -> color_eyre::Result<()> {
         Some(Command::Add {
             title,
             tags,
+            assignee,
             priority,
-        }) => cmd_add(&cwd, &title, tags, priority),
+        }) => cmd_add(&cwd, &title, tags, assignee, priority),
         Some(Command::List { tag, column }) => cmd_list(&cwd, tag.as_deref(), column.as_deref()),
         Some(Command::Move { card_id, column }) => cmd_move(&cwd, &card_id, &column),
         Some(Command::Tags) => cmd_tags(&cwd),
@@ -195,6 +199,7 @@ fn cmd_add(
     cwd: &Path,
     title: &str,
     tags: Vec<String>,
+    assignees: Vec<String>,
     priority: Priority,
 ) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
@@ -207,6 +212,11 @@ fn cmd_add(
         .into_iter()
         .map(|t| t.trim().to_lowercase())
         .filter(|t| !t.is_empty())
+        .collect();
+    card.assignees = assignees
+        .into_iter()
+        .map(|a| a.trim().to_lowercase())
+        .filter(|a| !a.is_empty())
         .collect();
 
     // Add to first column (backlog)

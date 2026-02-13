@@ -18,28 +18,29 @@ pub struct CommandInfo {
 }
 
 /// All recognized commands with descriptions (sorted alphabetically).
+/// Aliases (mv, pri, q) are intentionally omitted — they still work but
+/// are not shown in the palette or offered as completions.
 pub const COMMANDS: &[CommandInfo] = &[
+    CommandInfo { name: "assign",   description: "Assign card" },
     CommandInfo { name: "col",      description: "Column visibility" },
     CommandInfo { name: "count",    description: "Card counts" },
     CommandInfo { name: "find",     description: "Find card" },
     CommandInfo { name: "move",     description: "Move card to column" },
-    CommandInfo { name: "mv",       description: "Move card to column" },
-    CommandInfo { name: "pri",      description: "Set priority" },
     CommandInfo { name: "priority", description: "Set priority" },
-    CommandInfo { name: "q",        description: "Quit" },
     CommandInfo { name: "quit",     description: "Quit" },
     CommandInfo { name: "reload",   description: "Reload board" },
     CommandInfo { name: "rename",   description: "Rename card" },
     CommandInfo { name: "sort",     description: "Sort column" },
     CommandInfo { name: "tag",      description: "Add tag" },
+    CommandInfo { name: "unassign", description: "Unassign card" },
     CommandInfo { name: "untag",    description: "Remove tag" },
     CommandInfo { name: "wip",      description: "Set WIP limit" },
 ];
 
 /// All recognized command names (for completion), derived from COMMANDS.
 const COMMAND_NAMES: &[&str] = &[
-    "col", "count", "find", "move", "mv", "pri", "priority", "q", "quit",
-    "reload", "rename", "sort", "tag", "untag", "wip",
+    "assign", "col", "count", "find", "move", "priority",
+    "quit", "reload", "rename", "sort", "tag", "unassign", "untag", "wip",
 ];
 
 const PRIORITY_NAMES: &[&str] = &["low", "normal", "high", "urgent"];
@@ -73,8 +74,8 @@ impl CommandState {
 
 /// Compute the ghost suffix for the current input (shown as dimmed text after cursor).
 /// Returns the suffix to append, or None if no match.
-pub fn compute_ghost(input: &str, board: &Board, card_tags: &[String]) -> Option<String> {
-    let (token, candidates) = current_token_and_candidates(input, board, card_tags);
+pub fn compute_ghost(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> Option<String> {
+    let (token, candidates) = current_token_and_candidates(input, board, card_tags, card_assignees);
     if token.is_empty() {
         // After "command " (space following a known command): show first candidate.
         // But not when input is empty/blank — no ghost on bare `:` prompt.
@@ -94,8 +95,8 @@ pub fn compute_ghost(input: &str, board: &Board, card_tags: &[String]) -> Option
 }
 
 /// Compute all matching candidates for the current token.
-fn compute_candidates_for_token(input: &str, board: &Board, card_tags: &[String]) -> Vec<String> {
-    let (token, candidates) = current_token_and_candidates(input, board, card_tags);
+fn compute_candidates_for_token(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> Vec<String> {
+    let (token, candidates) = current_token_and_candidates(input, board, card_tags, card_assignees);
     let token_lower = token.to_lowercase();
     if token.is_empty() {
         return candidates;
@@ -107,7 +108,7 @@ fn compute_candidates_for_token(input: &str, board: &Board, card_tags: &[String]
 }
 
 /// Get the current token being typed and the candidate list for its position.
-fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String]) -> (String, Vec<String>) {
+fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> (String, Vec<String>) {
     let trimmed = input.trim_start();
 
     // Split into tokens
@@ -133,6 +134,8 @@ fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String]
         "move" | "mv" => column_names(board),
         "tag" => board_tags(board),
         "untag" => card_tags.to_vec(),
+        "assign" => board_assignees(board),
+        "unassign" => card_assignees.to_vec(),
         "priority" | "pri" => PRIORITY_NAMES.iter().map(|s| s.to_string()).collect(),
         "sort" => SORT_FIELDS.iter().map(|s| s.to_string()).collect(),
         "col" => {
@@ -183,11 +186,15 @@ fn board_tags(board: &Board) -> Vec<String> {
     board.all_tags().into_iter().map(|(tag, _)| tag).collect()
 }
 
+fn board_assignees(board: &Board) -> Vec<String> {
+    board.all_assignees().into_iter().map(|(name, _)| name).collect()
+}
+
 /// Compute the palette items (name, description) for the command overlay.
 ///
 /// Returns `(title, items)` where `title` is the palette heading (e.g. "commands",
 /// "columns") and `items` is the filtered list of `(name, description)` pairs.
-pub fn palette_items(input: &str, board: &Board, card_tags: &[String]) -> (&'static str, Vec<(String, String)>) {
+pub fn palette_items(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> (&'static str, Vec<(String, String)>) {
     let trimmed = input.trim_start();
     let parts: Vec<&str> = trimmed.split_whitespace().collect();
     let ends_with_space = trimmed.ends_with(' ');
@@ -221,6 +228,8 @@ pub fn palette_items(input: &str, board: &Board, card_tags: &[String]) -> (&'sta
         "move" | "mv" => ("columns", column_names(board).into_iter().map(|n| (n, String::new())).collect()),
         "tag" => ("tags", board_tags(board).into_iter().map(|t| (t, String::new())).collect()),
         "untag" => ("tags", card_tags.iter().map(|t| (t.clone(), String::new())).collect()),
+        "assign" => ("assignees", board_assignees(board).into_iter().map(|n| (n, String::new())).collect()),
+        "unassign" => ("assignees", card_assignees.iter().map(|a| (a.clone(), String::new())).collect()),
         "priority" | "pri" => ("priorities", PRIORITY_NAMES.iter().map(|s| (s.to_string(), String::new())).collect()),
         "sort" => ("sort", SORT_FIELDS.iter().map(|s| (s.to_string(), String::new())).collect()),
         "col" => {
@@ -265,7 +274,7 @@ pub fn current_token(input: &str) -> String {
 }
 
 /// Handle Tab/Shift-Tab: cycle through completions.
-pub fn cycle_completion(cmd: &mut CommandState, board: &Board, card_tags: &[String], forward: bool) {
+pub fn cycle_completion(cmd: &mut CommandState, board: &Board, card_tags: &[String], card_assignees: &[String], forward: bool) {
     if let Some(ref mut comp) = cmd.completion {
         // Already cycling — advance index
         if comp.candidates.is_empty() {
@@ -284,7 +293,7 @@ pub fn cycle_completion(cmd: &mut CommandState, board: &Board, card_tags: &[Stri
         cmd.buf.cursor = cmd.buf.input.chars().count();
     } else {
         // First Tab press — compute candidates and accept first match
-        let candidates = compute_candidates_for_token(&cmd.buf.input, board, card_tags);
+        let candidates = compute_candidates_for_token(&cmd.buf.input, board, card_tags, card_assignees);
         if candidates.is_empty() {
             return;
         }
@@ -346,6 +355,8 @@ pub fn execute_command(
         "move" | "mv" => cmd_move(board, state, rest, kando_dir),
         "tag" => cmd_tag(board, state, rest, kando_dir),
         "untag" => cmd_untag(board, state, rest, kando_dir),
+        "assign" => cmd_assign(board, state, rest, kando_dir),
+        "unassign" => cmd_unassign(board, state, rest, kando_dir),
         "priority" | "pri" => cmd_priority(board, state, rest, kando_dir),
         "rename" => cmd_rename(board, state, rest, kando_dir),
         "wip" => cmd_wip(board, state, rest, kando_dir),
@@ -458,32 +469,42 @@ fn cmd_move(
     }
 }
 
-/// :tag <tag> — Add tag to selected card.
+/// :tag <name>[,name,...] — Add tags to selected card.
 fn cmd_tag(
     board: &mut Board,
     state: &mut AppState,
     args: &str,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<Option<String>> {
-    let tag = args.trim().trim_start_matches('@').to_lowercase();
-    if tag.is_empty() {
-        state.notify_error("Usage: tag <name>");
+    let names: Vec<String> = args
+        .split(',')
+        .map(|t| t.trim().trim_start_matches('@').to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if names.is_empty() {
+        state.notify_error("Usage: tag <name>[,name,...]");
         return Ok(None);
     }
 
     let col_idx = state.focused_column;
     let card_idx = state.selected_card;
     if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
-        if card.tags.contains(&tag) {
-            state.notify(format!("Already tagged: {tag}"));
+        let mut added = Vec::new();
+        for tag in names {
+            if !card.tags.contains(&tag) {
+                card.tags.push(tag.clone());
+                added.push(tag);
+            }
+        }
+        if added.is_empty() {
+            state.notify("All tags already present");
             return Ok(None);
         }
-        card.tags.push(tag.clone());
         card.touch();
         board.columns[col_idx].sort_cards();
         state.clamp_selection(board);
         save_board(kando_dir, board)?;
-        state.notify(format!("Tagged: {tag}"));
+        state.notify(format!("Tagged: {}", added.join(", ")));
         Ok(Some("Update tags".into()))
     } else {
         state.notify_error("No card selected");
@@ -491,33 +512,157 @@ fn cmd_tag(
     }
 }
 
-/// :untag <tag> — Remove tag from selected card.
+/// :untag <name>[,name,...] — Remove tags from selected card.
 fn cmd_untag(
     board: &mut Board,
     state: &mut AppState,
     args: &str,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<Option<String>> {
-    let tag = args.trim().trim_start_matches('@').to_lowercase();
-    if tag.is_empty() {
-        state.notify_error("Usage: untag <name>");
+    let names: Vec<String> = args
+        .split(',')
+        .map(|t| t.trim().trim_start_matches('@').to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if names.is_empty() {
+        state.notify_error("Usage: untag <name>[,name,...]");
         return Ok(None);
     }
 
     let col_idx = state.focused_column;
     let card_idx = state.selected_card;
     if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
-        if !card.tags.contains(&tag) {
-            state.notify_error(format!("Tag not found: {tag}"));
+        if names.len() == 1 && names[0] == "*" {
+            if card.tags.is_empty() {
+                state.notify("No tags to remove");
+                return Ok(None);
+            }
+            let all = card.tags.join(", ");
+            card.tags.clear();
+            card.touch();
+            board.columns[col_idx].sort_cards();
+            state.clamp_selection(board);
+            save_board(kando_dir, board)?;
+            state.notify(format!("Untagged: {all}"));
+            return Ok(Some("Update tags".into()));
+        }
+        let mut removed = Vec::new();
+        for tag in &names {
+            if card.tags.contains(tag) {
+                removed.push(tag.clone());
+            }
+        }
+        if removed.is_empty() {
+            state.notify_error(format!("Tags not found: {}", names.join(", ")));
             return Ok(None);
         }
-        card.tags.retain(|t| t != &tag);
+        card.tags.retain(|t| !removed.contains(t));
         card.touch();
         board.columns[col_idx].sort_cards();
         state.clamp_selection(board);
         save_board(kando_dir, board)?;
-        state.notify(format!("Untagged: {tag}"));
+        state.notify(format!("Untagged: {}", removed.join(", ")));
         Ok(Some("Update tags".into()))
+    } else {
+        state.notify_error("No card selected");
+        Ok(None)
+    }
+}
+
+/// :assign <name>[,name,...] — Assign people to the selected card.
+fn cmd_assign(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &str,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let names: Vec<String> = args
+        .split(',')
+        .map(|a| a.trim().trim_start_matches('@').to_lowercase())
+        .filter(|a| !a.is_empty())
+        .collect();
+    if names.is_empty() {
+        state.notify_error("Usage: assign <name>[,name,...]");
+        return Ok(None);
+    }
+
+    let col_idx = state.focused_column;
+    let card_idx = state.selected_card;
+    if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+        let mut added = Vec::new();
+        for name in names {
+            if !card.assignees.contains(&name) {
+                card.assignees.push(name.clone());
+                added.push(name);
+            }
+        }
+        if added.is_empty() {
+            state.notify("All already assigned");
+            return Ok(None);
+        }
+        card.touch();
+        board.columns[col_idx].sort_cards();
+        state.clamp_selection(board);
+        save_board(kando_dir, board)?;
+        state.notify(format!("Assigned: {}", added.join(", ")));
+        Ok(Some("Update assignees".into()))
+    } else {
+        state.notify_error("No card selected");
+        Ok(None)
+    }
+}
+
+/// :unassign <name>[,name,...] — Remove assignees from the selected card.
+fn cmd_unassign(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &str,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let names: Vec<String> = args
+        .split(',')
+        .map(|a| a.trim().trim_start_matches('@').to_lowercase())
+        .filter(|a| !a.is_empty())
+        .collect();
+    if names.is_empty() {
+        state.notify_error("Usage: unassign <name>[,name,...]");
+        return Ok(None);
+    }
+
+    let col_idx = state.focused_column;
+    let card_idx = state.selected_card;
+    if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+        if names.len() == 1 && names[0] == "*" {
+            if card.assignees.is_empty() {
+                state.notify("No assignees to remove");
+                return Ok(None);
+            }
+            let all = card.assignees.join(", ");
+            card.assignees.clear();
+            card.touch();
+            board.columns[col_idx].sort_cards();
+            state.clamp_selection(board);
+            save_board(kando_dir, board)?;
+            state.notify(format!("Unassigned: {all}"));
+            return Ok(Some("Update assignees".into()));
+        }
+        let mut removed = Vec::new();
+        for name in &names {
+            if card.assignees.contains(name) {
+                removed.push(name.clone());
+            }
+        }
+        if removed.is_empty() {
+            state.notify_error(format!("Not assigned: {}", names.join(", ")));
+            return Ok(None);
+        }
+        card.assignees.retain(|a| !removed.contains(a));
+        card.touch();
+        board.columns[col_idx].sort_cards();
+        state.clamp_selection(board);
+        save_board(kando_dir, board)?;
+        state.notify(format!("Unassigned: {}", removed.join(", ")));
+        Ok(Some("Update assignees".into()))
     } else {
         state.notify_error("No card selected");
         Ok(None)
@@ -958,7 +1103,7 @@ mod tests {
     #[test]
     fn ghost_command_name() {
         let board = test_board();
-        let ghost = compute_ghost("mo", &board, &[]);
+        let ghost = compute_ghost("mo", &board, &[], &[]);
         assert_eq!(ghost, Some("ve".into()));
     }
 
@@ -966,42 +1111,42 @@ mod tests {
     fn ghost_command_name_exact_no_ghost() {
         let board = test_board();
         // Exact match — no ghost (nothing left to complete)
-        let ghost = compute_ghost("move", &board, &[]);
+        let ghost = compute_ghost("move", &board, &[], &[]);
         assert_eq!(ghost, None);
     }
 
     #[test]
     fn ghost_column_name() {
         let board = test_board();
-        let ghost = compute_ghost("move back", &board, &[]);
+        let ghost = compute_ghost("move back", &board, &[], &[]);
         assert_eq!(ghost, Some("log".into()));
     }
 
     #[test]
     fn ghost_priority() {
         let board = test_board();
-        let ghost = compute_ghost("priority ur", &board, &[]);
+        let ghost = compute_ghost("priority ur", &board, &[], &[]);
         assert_eq!(ghost, Some("gent".into()));
     }
 
     #[test]
     fn ghost_sort_field() {
         let board = test_board();
-        let ghost = compute_ghost("sort cr", &board, &[]);
+        let ghost = compute_ghost("sort cr", &board, &[], &[]);
         assert_eq!(ghost, Some("eated".into()));
     }
 
     #[test]
     fn ghost_no_match() {
         let board = test_board();
-        let ghost = compute_ghost("xyz", &board, &[]);
+        let ghost = compute_ghost("xyz", &board, &[], &[]);
         assert_eq!(ghost, None);
     }
 
     #[test]
     fn ghost_empty_input() {
         let board = test_board();
-        let ghost = compute_ghost("", &board, &[]);
+        let ghost = compute_ghost("", &board, &[], &[]);
         assert_eq!(ghost, None);
     }
 
@@ -1009,7 +1154,7 @@ mod tests {
     fn ghost_after_space_shows_first_candidate() {
         let board = test_board();
         // After "move " we should see column completion
-        let ghost = compute_ghost("move ", &board, &[]);
+        let ghost = compute_ghost("move ", &board, &[], &[]);
         // First column alphabetically: backlog
         assert_eq!(ghost, Some("backlog".into()));
     }
@@ -1019,7 +1164,7 @@ mod tests {
         let board = test_board();
         let mut cmd = CommandState::new();
         cmd.buf = TextBuffer::new("mo".into());
-        cycle_completion(&mut cmd, &board, &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], true);
         // Only one match ("move") — accepts with trailing space, no cycling state
         assert_eq!(cmd.buf.input, "move ");
         assert!(cmd.completion.is_none());
@@ -1029,10 +1174,10 @@ mod tests {
     fn cycle_completion_first_tab_multiple() {
         let board = test_board();
         let mut cmd = CommandState::new();
-        cmd.buf = TextBuffer::new("m".into());
-        cycle_completion(&mut cmd, &board, &[], true);
-        // "m" matches ["move", "mv"]; first Tab skips no exact match, picks "move"
-        assert_eq!(cmd.buf.input, "move");
+        // "re" matches ["reload", "rename"] — multiple candidates, first Tab picks first
+        cmd.buf = TextBuffer::new("re".into());
+        cycle_completion(&mut cmd, &board, &[], &[], true);
+        assert_eq!(cmd.buf.input, "reload");
         assert!(cmd.completion.is_some());
     }
 
@@ -1040,14 +1185,16 @@ mod tests {
     fn cycle_completion_skips_exact_match() {
         let board = test_board();
         let mut cmd = CommandState::new();
-        cmd.buf = TextBuffer::new("pri".into());
-        cycle_completion(&mut cmd, &board, &[], true);
-        // "pri" exactly matches candidate "pri", so first Tab skips to "priority"
-        assert_eq!(cmd.buf.input, "priority");
+        // "tag" exactly matches candidate "tag", but also matches "tag" only —
+        // with aliases removed, "tag" is a single match → auto-commits with space
+        // Use "un" which matches ["unassign", "untag"] for cycling test
+        cmd.buf = TextBuffer::new("un".into());
+        cycle_completion(&mut cmd, &board, &[], &[], true);
+        assert_eq!(cmd.buf.input, "unassign");
         assert!(cmd.completion.is_some());
-        // Tab again cycles back to "pri"
-        cycle_completion(&mut cmd, &board, &[], true);
-        assert_eq!(cmd.buf.input, "pri");
+        // Tab again cycles to "untag"
+        cycle_completion(&mut cmd, &board, &[], &[], true);
+        assert_eq!(cmd.buf.input, "untag");
     }
 
     #[test]
@@ -1056,10 +1203,10 @@ mod tests {
         let mut cmd = CommandState::new();
         cmd.buf = TextBuffer::new("move ".into());
         // First Tab: selects first column
-        cycle_completion(&mut cmd, &board, &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], true);
         let first = cmd.buf.input.clone();
         // Second Tab: cycles to next
-        cycle_completion(&mut cmd, &board, &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], true);
         let second = cmd.buf.input.clone();
         assert_ne!(first, second);
     }
@@ -1080,14 +1227,14 @@ mod tests {
     fn ghost_untag_uses_card_tags() {
         let board = test_board();
         let card_tags = vec!["bug".to_string(), "feature".to_string()];
-        let ghost = compute_ghost("untag b", &board, &card_tags);
+        let ghost = compute_ghost("untag b", &board, &card_tags, &[]);
         assert_eq!(ghost, Some("ug".into()));
     }
 
     #[test]
     fn ghost_col_subcmd() {
         let board = test_board();
-        let ghost = compute_ghost("col backlog hi", &board, &[]);
+        let ghost = compute_ghost("col backlog hi", &board, &[], &[]);
         assert_eq!(ghost, Some("de".into()));
     }
 
@@ -1096,7 +1243,7 @@ mod tests {
     #[test]
     fn palette_empty_input_shows_all_commands() {
         let board = test_board();
-        let (title, items) = palette_items("", &board, &[]);
+        let (title, items) = palette_items("", &board, &[], &[]);
         assert_eq!(title, "commands");
         assert_eq!(items.len(), COMMANDS.len());
     }
@@ -1104,7 +1251,7 @@ mod tests {
     #[test]
     fn palette_filters_commands_by_query() {
         let board = test_board();
-        let (title, items) = palette_items("sor", &board, &[]);
+        let (title, items) = palette_items("sor", &board, &[], &[]);
         assert_eq!(title, "commands");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].0, "sort");
@@ -1113,7 +1260,7 @@ mod tests {
     #[test]
     fn palette_after_command_space_shows_columns() {
         let board = test_board();
-        let (title, items) = palette_items("move ", &board, &[]);
+        let (title, items) = palette_items("move ", &board, &[], &[]);
         assert_eq!(title, "columns");
         assert_eq!(items.len(), 3); // backlog, in-progress, done
     }
@@ -1121,7 +1268,7 @@ mod tests {
     #[test]
     fn palette_filters_argument_candidates() {
         let board = test_board();
-        let (title, items) = palette_items("move back", &board, &[]);
+        let (title, items) = palette_items("move back", &board, &[], &[]);
         assert_eq!(title, "columns");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].0, "backlog");
@@ -1130,7 +1277,7 @@ mod tests {
     #[test]
     fn palette_no_args_returns_empty() {
         let board = test_board();
-        let (_, items) = palette_items("find ", &board, &[]);
+        let (_, items) = palette_items("find ", &board, &[], &[]);
         assert!(items.is_empty());
     }
 
@@ -1138,7 +1285,7 @@ mod tests {
     fn palette_fuzzy_matches_description() {
         let board = test_board();
         // "card" appears in descriptions of "move" and "find" and "rename"
-        let (title, items) = palette_items("card", &board, &[]);
+        let (title, items) = palette_items("card", &board, &[], &[]);
         assert_eq!(title, "commands");
         assert!(items.iter().any(|(n, _)| n == "find"));
         assert!(items.iter().any(|(n, _)| n == "rename"));

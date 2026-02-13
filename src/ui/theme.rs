@@ -36,6 +36,9 @@ impl Theme {
     pub const WIP_NEAR: Color = Color::Yellow;
     pub const WIP_OVER: Color = Color::Red;
 
+    // Assignee
+    pub const ASSIGNEE: Color = Color::Cyan;
+
     // Status bar
     pub const STATUS_ERROR: Color = Color::Red;
 
