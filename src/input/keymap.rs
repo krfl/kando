@@ -89,10 +89,6 @@ fn map_space(key: KeyEvent) -> Action {
 
 fn map_view(key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Char('c') => Action::ToggleCollapseColumn,
-        KeyCode::Char('a') => Action::ToggleCollapseAll,
-        KeyCode::Char('w') => Action::ToggleWipDisplay,
-        KeyCode::Char('z') => Action::CenterOnCard,
         KeyCode::Char('h') => Action::ToggleHiddenColumns,
         KeyCode::Esc => Action::None,
         _ => Action::None,
@@ -188,10 +184,6 @@ pub const GOTO_BINDINGS: &[Binding] = &[
 ];
 
 pub const VIEW_BINDINGS: &[Binding] = &[
-    Binding { key: "c", description: "Collapse empty column", tutorial: false },
-    Binding { key: "a", description: "Show all columns", tutorial: false },
-    Binding { key: "w", description: "Toggle WIP display", tutorial: false },
-    Binding { key: "z", description: "Center on selected card", tutorial: false },
     Binding { key: "h", description: "Toggle hidden columns", tutorial: false },
 ];
 
@@ -208,7 +200,7 @@ pub const DETAIL_BINDINGS: &[Binding] = &[
 /// Extra bindings shown only in the tutorial "More" section.
 const TUTORIAL_EXTRA: &[Binding] = &[
     Binding { key: "g", description: "Goto mode (jump to columns)", tutorial: true },
-    Binding { key: "z", description: "View mode (collapse, hidden cols)", tutorial: true },
+    Binding { key: "z", description: "View mode (hidden columns)", tutorial: true },
     Binding { key: "/", description: "Search cards", tutorial: true },
     Binding { key: "Space ?", description: "Full help", tutorial: true },
     Binding { key: "q", description: "Quit", tutorial: true },
@@ -233,7 +225,7 @@ pub const TUTORIAL_GROUPS: &[BindingGroup] = &[
 /// Pre-computed compact hint strings for the status bar (avoids per-frame allocation).
 pub const GOTO_HINTS: &str = "1-9: Jump to column  g: First card  e: Last card  b: Backlog  d: Done";
 pub const SPACE_HINTS: &str = "n: New card  d: Delete card  e: Edit in $EDITOR  t: Edit tags  p: Set priority  m: Move to column  f: Filter by tag  b: Toggle blocker  r: Reload board  /: Search all  ?: This help";
-pub const VIEW_HINTS: &str = "c: Collapse empty column  a: Show all columns  w: Toggle WIP display  z: Center on selected card  h: Toggle hidden columns";
+pub const VIEW_HINTS: &str = "h: Toggle hidden columns";
 
 /// Get bindings for a minor mode (for popup and status display).
 pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {

@@ -180,18 +180,6 @@ impl Board {
         id
     }
 
-    /// Find a column by slug.
-    #[allow(dead_code)]
-    pub fn column_by_slug(&self, slug: &str) -> Option<&Column> {
-        self.columns.iter().find(|c| c.slug == slug)
-    }
-
-    /// Find a column by slug (mutable).
-    #[allow(dead_code)]
-    pub fn column_by_slug_mut(&mut self, slug: &str) -> Option<&mut Column> {
-        self.columns.iter_mut().find(|c| c.slug == slug)
-    }
-
     /// Find which column a card is in and its index.
     pub fn find_card(&self, card_id: &str) -> Option<(usize, usize)> {
         for (col_idx, col) in self.columns.iter().enumerate() {
@@ -254,10 +242,4 @@ impl Column {
             .is_some_and(|limit| self.cards.len() as u32 >= limit)
     }
 
-    /// Whether this column is near its WIP limit (within 1).
-    #[allow(dead_code)]
-    pub fn is_near_wip_limit(&self) -> bool {
-        self.wip_limit
-            .is_some_and(|limit| self.cards.len() as u32 + 1 >= limit)
-    }
 }

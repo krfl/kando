@@ -35,10 +35,6 @@ pub enum Action {
     DetailPrevCard,
 
     // View
-    ToggleCollapseColumn,
-    ToggleCollapseAll,
-    ToggleWipDisplay,
-    CenterOnCard,
     ToggleHiddenColumns,
 
     // Search & filter

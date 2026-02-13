@@ -159,7 +159,7 @@ fn render_column(
         0
     };
 
-    for (vis_idx, &(_real_idx, card)) in cards.iter().enumerate().skip(scroll_offset) {
+    for (vis_idx, &(real_idx, card)) in cards.iter().enumerate().skip(scroll_offset) {
         if vis_idx - scroll_offset >= max_visible {
             break;
         }
@@ -167,7 +167,7 @@ fn render_column(
         let y = inner.y + ((vis_idx - scroll_offset) as u16 * card_height);
         let card_area = Rect::new(inner.x, y, inner.width, card_height);
 
-        let is_selected = is_focused && state.selected_card == vis_idx;
+        let is_selected = is_focused && state.selected_card == real_idx;
         render_card(f, card_area, card, is_selected, policies, now);
     }
 

@@ -42,9 +42,19 @@ kando
 | `Enter` | Card detail |
 | `Space` | Command menu (new, delete, edit, tags, priority, blocker, search) |
 | `g` | Goto menu (column 1-9, first/last card, backlog, done) |
-| `z` | View menu (collapse, WIP, center, hidden columns) |
+| `z` | View menu (toggle hidden columns) |
 | `/` | Filter cards |
 | `q` | Quit |
+
+## Coming Soon
+
+- **Undo for card deletion** — soft delete with trash/restore
+- **Card duplication** — clone existing cards
+- **Column reordering** — reorder columns from the TUI
+- **Column collapse** — collapse empty or inactive columns
+- **Dynamic card height** — auto-size cards based on content
+- **Extended CLI** — `kando delete`, `kando edit`, more `kando config` options
+- **WIP limit display toggle** — show/hide WIP indicators
 
 ## SSH Setup for Team Sync
 

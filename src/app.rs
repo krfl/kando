@@ -210,15 +210,6 @@ impl AppState {
         }
     }
 
-    /// Count visible (non-hidden) columns.
-    #[allow(dead_code)]
-    fn visible_column_count(&self, board: &Board) -> usize {
-        board
-            .columns
-            .iter()
-            .filter(|c| !c.hidden || self.show_hidden_columns)
-            .count()
-    }
 }
 
 /// Sync `active_filter` from the current filter buffer.
@@ -444,11 +435,7 @@ fn process_action(
         }
 
         // View toggles
-        Action::ToggleHiddenColumns
-        | Action::ToggleCollapseColumn
-        | Action::ToggleCollapseAll
-        | Action::ToggleWipDisplay
-        | Action::CenterOnCard => {
+        Action::ToggleHiddenColumns => {
             handle_view_toggle(board, state, action);
         }
 
@@ -870,18 +857,6 @@ fn handle_view_toggle(board: &Board, state: &mut AppState, action: Action) {
             } else {
                 "Hiding hidden columns"
             });
-        }
-        Action::ToggleCollapseColumn => {
-            state.notify("Column collapse not yet implemented");
-        }
-        Action::ToggleCollapseAll => {
-            state.notify("Collapse all not yet implemented");
-        }
-        Action::ToggleWipDisplay => {
-            state.notify("WIP display toggle not yet implemented");
-        }
-        Action::CenterOnCard => {
-            // Scroll is handled automatically
         }
         _ => unreachable!(),
     }

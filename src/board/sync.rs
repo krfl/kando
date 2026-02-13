@@ -10,9 +10,6 @@ pub struct SyncState {
     pub branch: String,
     /// Whether we're currently online (last git op succeeded).
     pub online: bool,
-    /// Path to the original repo root (parent of .kando/).
-    #[allow(dead_code)]
-    pub repo_root: PathBuf,
     /// Last error message from a git operation, shown in the status bar.
     pub last_error: Option<String>,
 }
@@ -163,7 +160,6 @@ pub fn init_shadow(kando_dir: &Path, branch: &str) -> Result<SyncState, SyncErro
         shadow_path,
         branch: branch.to_string(),
         online: true,
-        repo_root: git_root,
         last_error: ssh_warning,
     })
 }
