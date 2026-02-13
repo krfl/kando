@@ -32,6 +32,12 @@ kando add "My first card" -t bug,ui -p high
 kando
 ```
 
+## Usage Modes
+
+**Discovery mode** — Navigate with `h/j/k/l`, trigger actions through minor-mode menus (`Space`, `g`, `z`). Every action is one or two keystrokes away, with on-screen hints showing available keys.
+
+**Command mode** — Press `:` to open a command line with a fuzzy-filtered palette. Type commands like `:move done`, `:tag bug`, or `:sort priority`. Tab completes arguments.
+
 ## Keybindings
 
 | Key | Action |
@@ -44,6 +50,7 @@ kando
 | `g` | Goto menu (column 1-9, first/last card, backlog, done) |
 | `z` | View menu (toggle hidden columns) |
 | `/` | Filter cards |
+| `:` | Command mode |
 | `q` | Quit |
 
 ## Coming Soon
@@ -54,7 +61,6 @@ kando
 - **Column collapse** — collapse empty or inactive columns
 - **Dynamic card height** — auto-size cards based on content
 - **Extended CLI** — `kando delete`, `kando edit`, more `kando config` options
-- **WIP limit display toggle** — show/hide WIP indicators
 
 ## SSH Setup for Team Sync
 
