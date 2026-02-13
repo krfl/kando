@@ -13,6 +13,7 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Input { .. } => map_input(key),
         Mode::Confirm { .. } => map_confirm(key),
         Mode::Filter { .. } => map_input(key),
+        Mode::Command { .. } => map_command(key),
         Mode::Picker { .. } => map_picker(key),
         Mode::Tutorial => Action::DismissTutorial,
         Mode::Help => match key.code {
@@ -49,6 +50,7 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Char('g') => Action::EnterGotoMode,
         KeyCode::Char(' ') => Action::EnterSpaceMode,
         KeyCode::Char('z') => Action::EnterViewMode,
+        KeyCode::Char(':') => Action::EnterCommandMode,
         KeyCode::Tab => Action::CycleNextCard,
         KeyCode::BackTab => Action::CyclePrevCard,
         KeyCode::Esc => Action::ClearFilters,
@@ -114,6 +116,28 @@ fn map_input(key: KeyEvent) -> Action {
     }
 }
 
+fn map_command(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Tab => Action::InputComplete,
+        KeyCode::BackTab => Action::InputCompleteBack,
+        // Everything else same as map_input
+        KeyCode::Enter => Action::InputConfirm,
+        KeyCode::Esc => Action::InputCancel,
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::InputHome,
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::InputEnd,
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Action::InputDeleteWord
+        }
+        KeyCode::Char(c) => Action::InputChar(c),
+        KeyCode::Backspace => Action::InputBackspace,
+        KeyCode::Left => Action::InputLeft,
+        KeyCode::Right => Action::InputRight,
+        KeyCode::Home => Action::InputHome,
+        KeyCode::End => Action::InputEnd,
+        _ => Action::None,
+    }
+}
+
 fn map_confirm(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => Action::Confirm,
@@ -157,6 +181,7 @@ pub const NORMAL_BINDINGS: &[Binding] = &[
     Binding { key: "H / L", description: "Move card left/right", tutorial: true },
     Binding { key: "Enter", description: "Open card detail", tutorial: true },
     Binding { key: "/", description: "Search cards", tutorial: false },
+    Binding { key: ":", description: "Command mode", tutorial: false },
     Binding { key: "Esc", description: "Clear filters", tutorial: false },
     Binding { key: "q", description: "Quit", tutorial: false },
 ];
@@ -222,11 +247,6 @@ pub const TUTORIAL_GROUPS: &[BindingGroup] = &[
     BindingGroup { name: "More", bindings: TUTORIAL_EXTRA },
 ];
 
-/// Pre-computed compact hint strings for the status bar (avoids per-frame allocation).
-pub const GOTO_HINTS: &str = "1-9: Jump to column  g: First card  e: Last card  b: Backlog  d: Done";
-pub const SPACE_HINTS: &str = "n: New card  d: Delete card  e: Edit in $EDITOR  t: Edit tags  p: Set priority  m: Move to column  f: Filter by tag  b: Toggle blocker  r: Reload board  /: Search all  ?: This help";
-pub const VIEW_HINTS: &str = "h: Toggle hidden columns";
-
 /// Get bindings for a minor mode (for popup and status display).
 pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
     match mode {
@@ -234,15 +254,5 @@ pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
         Mode::Space => SPACE_BINDINGS,
         Mode::View => VIEW_BINDINGS,
         _ => &[],
-    }
-}
-
-/// Get compact hint string for a minor mode (for status bar display).
-pub fn mode_hints_str(mode: &Mode) -> &'static str {
-    match mode {
-        Mode::Goto => GOTO_HINTS,
-        Mode::Space => SPACE_HINTS,
-        Mode::View => VIEW_HINTS,
-        _ => "",
     }
 }

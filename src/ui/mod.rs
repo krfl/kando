@@ -32,7 +32,7 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
     board_view::render_board(f, chunks[0], board, state, now);
 
     // Status bar
-    status_bar::render_status_bar(f, chunks[1], state, &board.name);
+    status_bar::render_status_bar(f, chunks[1], state, board);
 
     // Overlays
     match &state.mode {
@@ -53,6 +53,21 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
         }
         crate::app::Mode::Help => {
             help::render_help(f, f.area());
+        }
+        crate::app::Mode::Command { cmd } => {
+            let card_tags: Vec<String> = state
+                .selected_card_ref(board)
+                .map(|c| c.tags.clone())
+                .unwrap_or_default();
+            let (title, items) = crate::command::palette_items(&cmd.buf.input, board, &card_tags);
+            if !items.is_empty() {
+                // Determine which name is selected (from active completion state)
+                let selected_name = cmd.completion.as_ref().and_then(|c| {
+                    c.candidates.get(c.index).map(|s| s.as_str())
+                });
+                let query = crate::command::current_token(&cmd.buf.input);
+                input_modal::render_command_palette(f, chunks[0], title, &items, selected_name, &query);
+            }
         }
         _ => {}
     }

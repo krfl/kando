@@ -37,7 +37,7 @@ impl Theme {
     pub const WIP_OVER: Color = Color::Red;
 
     // Status bar
-    pub const STATUS_HINT: Color = Color::DarkGray;
+    pub const STATUS_ERROR: Color = Color::Red;
 
     // Hint popup
     pub const HINT_KEY: Color = Color::Reset;

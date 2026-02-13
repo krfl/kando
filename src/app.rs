@@ -115,6 +115,9 @@ pub enum Mode {
         selected: usize,
         target: PickerTarget,
     },
+    Command {
+        cmd: crate::command::CommandState,
+    },
     CardDetail {
         scroll: u16,
     },
@@ -145,6 +148,13 @@ pub enum PickerTarget {
     TagFilter,
 }
 
+/// Notification severity for statusbar coloring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationLevel {
+    Info,
+    Error,
+}
+
 /// Global application state.
 pub struct AppState {
     pub mode: Mode,
@@ -154,6 +164,7 @@ pub struct AppState {
     pub active_filter: Option<String>,
     pub active_tag_filters: Vec<String>,
     pub notification: Option<String>,
+    pub notification_level: NotificationLevel,
     pub notification_expires: Option<Instant>,
     pub should_quit: bool,
     pub sync_state: Option<SyncState>,
@@ -169,6 +180,7 @@ impl AppState {
             active_filter: None,
             active_tag_filters: Vec::new(),
             notification: None,
+            notification_level: NotificationLevel::Info,
             notification_expires: None,
             should_quit: false,
             sync_state: None,
@@ -186,6 +198,14 @@ impl AppState {
     /// Show a transient notification.
     pub fn notify(&mut self, msg: impl Into<String>) {
         self.notification = Some(msg.into());
+        self.notification_level = NotificationLevel::Info;
+        self.notification_expires = Some(Instant::now() + Duration::from_secs(3));
+    }
+
+    /// Show a transient error notification (rendered in red).
+    pub fn notify_error(&mut self, msg: impl Into<String>) {
+        self.notification = Some(msg.into());
+        self.notification_level = NotificationLevel::Error;
         self.notification_expires = Some(Instant::now() + Duration::from_secs(3));
     }
 
@@ -194,6 +214,7 @@ impl AppState {
         if let Some(expires) = self.notification_expires {
             if Instant::now() >= expires {
                 self.notification = None;
+                self.notification_level = NotificationLevel::Info;
                 self.notification_expires = None;
             }
         }
@@ -452,6 +473,8 @@ fn process_action(
         | Action::InputHome
         | Action::InputEnd
         | Action::InputDeleteWord
+        | Action::InputComplete
+        | Action::InputCompleteBack
         | Action::InputConfirm
         | Action::InputCancel => {
             sync_message = handle_input(board, state, action, kando_dir)?;
@@ -466,6 +489,9 @@ fn process_action(
         Action::EnterGotoMode => state.mode = Mode::Goto,
         Action::EnterSpaceMode => state.mode = Mode::Space,
         Action::EnterViewMode => state.mode = Mode::View,
+        Action::EnterCommandMode => {
+            state.mode = Mode::Command { cmd: crate::command::CommandState::new() };
+        }
 
         // Board-level actions
         Action::ReloadBoard => {
@@ -915,6 +941,7 @@ fn handle_input(
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.insert(c),
+                Mode::Command { cmd } => { cmd.buf.insert(c); crate::command::clear_completion(cmd); }
                 _ => {}
             }
             if is_filter { sync_filter(state); }
@@ -923,6 +950,7 @@ fn handle_input(
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.backspace(),
+                Mode::Command { cmd } => { cmd.buf.backspace(); crate::command::clear_completion(cmd); }
                 _ => {}
             }
             if is_filter { sync_filter(state); }
@@ -930,24 +958,28 @@ fn handle_input(
         Action::InputLeft => {
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.move_left(),
+                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.move_left(); }
                 _ => {}
             }
         }
         Action::InputRight => {
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.move_right(),
+                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.move_right(); }
                 _ => {}
             }
         }
         Action::InputHome => {
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.home(),
+                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.home(); }
                 _ => {}
             }
         }
         Action::InputEnd => {
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.end(),
+                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.end(); }
                 _ => {}
             }
         }
@@ -955,6 +987,7 @@ fn handle_input(
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.delete_word(),
+                Mode::Command { cmd } => { cmd.buf.delete_word(); crate::command::clear_completion(cmd); }
                 _ => {}
             }
             if is_filter { sync_filter(state); }
@@ -967,12 +1000,23 @@ fn handle_input(
                 Mode::Filter { .. } => {
                     state.active_filter = None;
                 }
-                Mode::Picker { .. } => {
-                    // Keep any active filters, just close the picker
+                Mode::Picker { .. } | Mode::Command { .. } => {
+                    // Just close — no side effects
                 }
                 _ => {}
             }
             state.mode = Mode::Normal;
+        }
+        Action::InputComplete | Action::InputCompleteBack => {
+            let forward = matches!(action, Action::InputComplete);
+            // Extract card tags before mutably borrowing state.mode
+            let card_tags: Vec<String> = state
+                .selected_card_ref(board)
+                .map(|c| c.tags.clone())
+                .unwrap_or_default();
+            if let Mode::Command { cmd } = &mut state.mode {
+                crate::command::cycle_completion(cmd, board, &card_tags, forward);
+            }
         }
         _ => unreachable!(),
     }
@@ -1092,6 +1136,9 @@ fn handle_input_confirm(
                     }
                 }
             }
+        }
+        Mode::Command { cmd } => {
+            sync_message = crate::command::execute_command(board, state, &cmd.buf.input, kando_dir)?;
         }
         _ => {}
     }

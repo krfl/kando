@@ -51,6 +51,7 @@ pub enum Action {
     EnterGotoMode,
     EnterSpaceMode,
     EnterViewMode,
+    EnterCommandMode,
 
     // Input modal
     InputConfirm,
@@ -62,6 +63,8 @@ pub enum Action {
     InputHome,
     InputEnd,
     InputDeleteWord,
+    InputComplete,
+    InputCompleteBack,
 
     // Confirmation
     Confirm,
