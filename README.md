@@ -9,12 +9,14 @@ A keyboard-first Kanban TUI for your terminal.
 - **Vim-style navigation** with Helix-inspired minor modes (`g` goto, `Space` commands, `z` view)
 - **Cards as Markdown files** with TOML frontmatter in a `.kando/` directory
 - **Priority sorting** &mdash; cards auto-sort by priority then recency, no manual ordering
+- **Assignees** &mdash; assign people to cards, filter by assignee
 - **Tags, blockers, and WIP limits**
-- **Fuzzy search and tag filtering**
+- **Fuzzy search and filtering** by text, tag, or assignee
 - **Edit cards in `$EDITOR`**
 - **Git-based team sync** via a shadow clone &mdash; pull/push on a dedicated branch with offline fallback
 - **Auto-close policies** for stale cards
 - **CLI commands** for scripting: `kando add`, `kando list`, `kando move`, `kando tags`, `kando sync`
+- **Helix-style command palette** with fuzzy filtering and tab completion
 
 ## Quick Start
 
@@ -28,7 +30,7 @@ kando init
 kando init --branch kando
 
 # Add cards from the CLI
-kando add "My first card" -t bug,ui -p high
+kando add "My first card" -t bug,ui -a alice -p high
 
 # Open the TUI
 kando
@@ -38,7 +40,7 @@ kando
 
 **Discovery mode** — Navigate with `h/j/k/l`, trigger actions through minor-mode menus (`Space`, `g`, `z`). Every action is one or two keystrokes away, with on-screen hints showing available keys.
 
-**Command mode** — Press `:` to open a command line with a fuzzy-filtered palette. Type commands like `:move done`, `:tag bug`, or `:sort priority`. Tab completes arguments.
+**Command mode** — Press `:` to open a command line with a fuzzy-filtered palette. Type commands like `:move done`, `:tag bug`, `:assign alice,bob`, or `:sort priority`. Tab completes arguments; commas let you add multiple tags or assignees at once.
 
 ## Keybindings
 
@@ -48,10 +50,11 @@ kando
 | `j/k` | Navigate cards |
 | `H/L` | Move card between columns |
 | `Enter` | Card detail |
-| `Space` | Command menu (new, delete, edit, tags, priority, blocker, search) |
+| `Space` | Action menu (new, delete, edit, tags, assignees, priority, blocker, search) |
+| `f` | Filter menu (by tag, assignee, or text search) |
 | `g` | Goto menu (column 1-9, first/last card, backlog, done) |
 | `z` | View menu (toggle hidden columns) |
-| `/` | Filter cards |
+| `/` | Text search |
 | `:` | Command mode |
 | `q` | Quit |
 
