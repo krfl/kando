@@ -18,6 +18,21 @@ pub enum StorageError {
     NotFound(PathBuf),
     #[error("invalid card file {path}: {reason}")]
     InvalidCard { path: PathBuf, reason: String },
+    #[error("invalid slug: {0:?} (must match [a-z0-9-]+)")]
+    InvalidSlug(String),
+}
+
+/// Validate that a slug is safe for use as a directory name.
+/// Must start with a letter or digit, then only lowercase alphanumeric and hyphens.
+fn validate_slug(slug: &str) -> Result<(), StorageError> {
+    let first = slug.as_bytes().first().copied().unwrap_or(0);
+    if slug.is_empty()
+        || !(first.is_ascii_lowercase() || first.is_ascii_digit())
+        || !slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(StorageError::InvalidSlug(slug.to_string()));
+    }
+    Ok(())
 }
 
 /// Find the .kando directory by walking up from `start`.
@@ -108,6 +123,7 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
     let mut columns = Vec::new();
 
     for col_config in &config.columns {
+        validate_slug(&col_config.slug)?;
         let col_dir = columns_dir.join(&col_config.slug);
         let meta = if col_dir.join("_meta.toml").exists() {
             let meta_str = fs::read_to_string(col_dir.join("_meta.toml"))?;
@@ -184,6 +200,11 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
         },
         columns: column_configs,
     };
+    // Validate all slugs upfront before writing anything
+    for col in &board.columns {
+        validate_slug(&col.slug)?;
+    }
+
     let config_str = toml::to_string_pretty(&config)?;
     fs::write(kando_dir.join("config.toml"), config_str)?;
 
@@ -247,6 +268,15 @@ fn load_card(path: &Path) -> Result<Card, StorageError> {
         path: path.to_path_buf(),
         reason: format!("invalid TOML: {e}"),
     })?;
+    // Validate card ID is safe for use as a filename
+    if card.id.is_empty()
+        || !card.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(StorageError::InvalidCard {
+            path: path.to_path_buf(),
+            reason: format!("unsafe card id: {:?}", card.id),
+        });
+    }
     card.body = body;
     Ok(card)
 }

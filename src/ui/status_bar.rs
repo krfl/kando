@@ -193,10 +193,7 @@ fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<
             Some(Line::from(spans))
         }
         Mode::Command { cmd } => {
-            let (card_tags, card_assignees) = state
-                .selected_card_ref(board)
-                .map(|c| (c.tags.clone(), c.assignees.clone()))
-                .unwrap_or_default();
+            let (card_tags, card_assignees) = state.selected_card_metadata(board);
             let mut spans = vec![
                 Span::styled(
                     " : ",

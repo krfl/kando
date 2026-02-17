@@ -178,9 +178,9 @@ impl Card {
 impl Board {
     /// Generate the next card ID and increment the counter.
     pub fn next_card_id(&mut self) -> String {
-        let id = format!("{:03}", self.next_card_id);
+        let n = self.next_card_id;
         self.next_card_id += 1;
-        id
+        n.to_string()
     }
 
     /// Find which column a card is in and its index.

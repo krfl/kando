@@ -200,6 +200,13 @@ impl AppState {
             .and_then(|col| col.cards.get(self.selected_card))
     }
 
+    /// Get the tags and assignees of the selected card (for completion context).
+    pub fn selected_card_metadata(&self, board: &Board) -> (Vec<String>, Vec<String>) {
+        self.selected_card_ref(board)
+            .map(|c| (c.tags.clone(), c.assignees.clone()))
+            .unwrap_or_default()
+    }
+
     /// Show a transient notification.
     pub fn notify(&mut self, msg: impl Into<String>) {
         self.notification = Some(msg.into());
@@ -722,11 +729,22 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 save_board(kando_dir, board)?;
 
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+                let editor_trimmed = editor.trim();
+                if editor_trimmed.is_empty() {
+                    state.notify_error("$EDITOR is empty");
+                    return Ok(None);
+                }
 
                 crossterm::terminal::disable_raw_mode()?;
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
 
-                let _ = std::process::Command::new(&editor).arg(&card_path).status();
+                // Use sh -c so $EDITOR with arguments (e.g. "code --wait") works correctly
+                let editor_result = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("{editor_trimmed} \"$1\""))
+                    .arg("--") // $0
+                    .arg(&card_path) // $1
+                    .status();
 
                 crossterm::execute!(
                     std::io::stdout(),
@@ -736,6 +754,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
 
                 terminal.clear()?;
 
+                // Always reload — the user may have saved before the editor exited
                 *board = load_board(kando_dir)?;
                 if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
                     board.columns[col_idx].cards[card_idx].touch();
@@ -744,7 +763,18 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     sync_message = Some("Edit card".into());
                 }
                 state.clamp_selection(board);
-                state.notify("Card updated");
+
+                match editor_result {
+                    Ok(status) if status.success() => {
+                        state.notify("Card updated");
+                    }
+                    Ok(status) => {
+                        state.notify_error(format!("Editor exited with {status}"));
+                    }
+                    Err(e) => {
+                        state.notify_error(format!("Failed to launch editor: {e}"));
+                    }
+                }
             }
         }
         Action::CyclePriority => {
@@ -1051,10 +1081,7 @@ fn handle_input(
         Action::InputComplete | Action::InputCompleteBack => {
             let forward = matches!(action, Action::InputComplete);
             // Extract card data before mutably borrowing state.mode
-            let (card_tags, card_assignees) = state
-                .selected_card_ref(board)
-                .map(|c| (c.tags.clone(), c.assignees.clone()))
-                .unwrap_or_default();
+            let (card_tags, card_assignees) = state.selected_card_metadata(board);
             if let Mode::Command { cmd } = &mut state.mode {
                 crate::command::cycle_completion(cmd, board, &card_tags, &card_assignees, forward);
             }

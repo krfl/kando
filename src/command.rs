@@ -171,7 +171,7 @@ fn current_token_start(input: &str) -> usize {
     match trimmed.rfind(char::is_whitespace) {
         Some(pos) => {
             // Advance past the whitespace character (may be multi-byte)
-            let ws_char = trimmed[pos..].chars().next().unwrap();
+            let ws_char = trimmed[pos..].chars().next().expect("rfind returned valid pos");
             trimmed_start + pos + ws_char.len_utf8()
         }
         None => trimmed_start,
