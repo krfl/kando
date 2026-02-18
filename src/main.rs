@@ -8,7 +8,7 @@ mod ui;
 use std::env;
 use std::path::Path;
 
-use color_eyre::eyre::bail;
+use color_eyre::eyre::{bail, WrapErr};
 
 use clap::{Parser, Subcommand};
 
@@ -89,12 +89,19 @@ enum ConfigSetting {
     },
 }
 
-fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
+fn main() {
+    // Install color_eyre for unexpected panics/errors (developer bugs).
+    let _ = color_eyre::install();
     let cli = Cli::parse();
-    let cwd = env::current_dir()?;
+    let cwd = match env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot determine current directory: {e}");
+            std::process::exit(1);
+        }
+    };
 
-    match cli.command {
+    let result = match cli.command {
         Some(Command::Init { name, branch }) => {
             let name = name.unwrap_or_else(|| {
                 cwd.file_name()
@@ -120,7 +127,79 @@ fn main() -> color_eyre::Result<()> {
         Some(Command::SyncStatus) => cmd_sync_status(&cwd),
         Some(Command::Doctor) => cmd_doctor(&cwd),
         None => cmd_tui(&cwd),
+    };
+
+    if let Err(e) = result {
+        print_user_error(&e);
+        std::process::exit(1);
     }
+}
+
+/// Print a user-friendly error message, with actionable hints for known error types.
+fn print_user_error(error: &color_eyre::Report) {
+    // Walk the error chain looking for known types.
+    if let Some(storage_err) = error.downcast_ref::<board::storage::StorageError>() {
+        match storage_err {
+            board::storage::StorageError::NotFound(_) => {
+                eprintln!("error: no kando board found in this directory.");
+                eprintln!("  Run `kando init` to create one.");
+            }
+            board::storage::StorageError::InvalidCard { path, reason } => {
+                eprintln!(
+                    "error: invalid card file: {}",
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&path.to_string_lossy())
+                );
+                eprintln!("  {reason}");
+            }
+            board::storage::StorageError::InvalidSlug(slug) => {
+                eprintln!("error: invalid column slug: {slug:?}");
+                eprintln!("  Column slugs must match [a-z0-9][a-z0-9-]*");
+            }
+            board::storage::StorageError::TomlDe(e) => {
+                eprintln!("error: config file has invalid TOML syntax.");
+                eprintln!("  {e}");
+                eprintln!("  Run `kando doctor` to diagnose.");
+            }
+            board::storage::StorageError::TomlSer(e) => {
+                eprintln!("error: failed to save board config.");
+                eprintln!("  {e}");
+            }
+            board::storage::StorageError::Io(e) => {
+                eprintln!("error: could not read or write board files.");
+                eprintln!("  {e}");
+            }
+        }
+        return;
+    }
+
+    if let Some(sync_err) = error.downcast_ref::<board::sync::SyncError>() {
+        match sync_err {
+            board::sync::SyncError::NotGitRepo => {
+                eprintln!("error: not a git repository.");
+                eprintln!("  Run `git init` first, then `kando init --branch <name>`.");
+            }
+            board::sync::SyncError::NoRemote => {
+                eprintln!("error: no git remote 'origin' configured.");
+                eprintln!("  Run `git remote add origin <url>` to set one up.");
+            }
+            board::sync::SyncError::GitFailed(msg) => {
+                eprintln!("error: git command failed.");
+                eprintln!("  {msg}");
+                eprintln!("  Run `kando doctor` to diagnose.");
+            }
+            board::sync::SyncError::Io(e) => {
+                eprintln!("error: sync I/O failure.");
+                eprintln!("  {e}");
+            }
+        }
+        return;
+    }
+
+    // For eyre::eyre!() / bail!() messages, print the full error chain.
+    // These are already human-readable strings like "Card '003' not found".
+    eprintln!("error: {e:#}", e = error);
 }
 
 fn cmd_init(cwd: &Path, name: &str, branch: Option<String>) -> color_eyre::Result<()> {
@@ -356,7 +435,7 @@ fn cmd_sync(cwd: &Path) -> color_eyre::Result<()> {
     };
 
     let mut sync_state = sync::init_shadow(&kando_dir, &branch)
-        .map_err(|e| color_eyre::eyre::eyre!("Failed to initialize sync: {e}"))?;
+        .wrap_err("Failed to initialize sync")?;
 
     // Pull
     println!("Pulling from remote...");
