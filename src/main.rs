@@ -76,6 +76,22 @@ enum Command {
     SyncStatus,
     /// Check board setup and diagnose common issues
     Doctor,
+    /// Manage trashed (soft-deleted) cards
+    Trash {
+        #[command(subcommand)]
+        action: Option<TrashAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrashAction {
+    /// Restore a trashed card back to its original column
+    Restore {
+        /// Card ID to restore
+        card_id: String,
+    },
+    /// Permanently delete all trashed cards
+    Purge,
 }
 
 #[derive(Subcommand)]
@@ -126,6 +142,7 @@ fn main() {
         },
         Some(Command::SyncStatus) => cmd_sync_status(&cwd),
         Some(Command::Doctor) => cmd_doctor(&cwd),
+        Some(Command::Trash { action }) => cmd_trash(&cwd, action),
         None => cmd_tui(&cwd),
     };
 
@@ -683,6 +700,67 @@ fn cmd_doctor(cwd: &Path) -> color_eyre::Result<()> {
         );
     }
     println!();
+    Ok(())
+}
+
+fn cmd_trash(cwd: &Path, action: Option<TrashAction>) -> color_eyre::Result<()> {
+    use board::storage::{load_trash, restore_card};
+
+    let kando_dir = find_kando_dir(cwd)?;
+
+    match action {
+        None => {
+            // List trashed cards
+            let entries = load_trash(&kando_dir);
+            if entries.is_empty() {
+                println!("Trash is empty.");
+                return Ok(());
+            }
+
+            println!("\nTrash ({} card{}):", entries.len(), if entries.len() == 1 { "" } else { "s" });
+            println!("{}", "─".repeat(60));
+            for entry in &entries {
+                println!(
+                    "  {:<6} {:<30} from {}  ({})",
+                    entry.id, entry.title, entry.from_column, entry.deleted
+                );
+            }
+            println!("\nRestore with: kando trash restore <card-id>");
+            println!();
+        }
+        Some(TrashAction::Restore { card_id }) => {
+            let entries = load_trash(&kando_dir);
+            let entry = entries.iter().find(|e| e.id == card_id)
+                .ok_or_else(|| color_eyre::eyre::eyre!("Card '{}' not found in trash", card_id))?;
+
+            let board = load_board(&kando_dir)?;
+            let target_col = board.columns.iter().position(|c| c.slug == entry.from_column)
+                .unwrap_or(0);
+            let target_slug = &board.columns[target_col].slug;
+            let title = entry.title.clone();
+            let col_name = board.columns[target_col].name.clone();
+
+            restore_card(&kando_dir, &card_id, target_slug)?;
+            println!("Restored {} ({}) to {}", card_id, title, col_name);
+        }
+        Some(TrashAction::Purge) => {
+            let entries = load_trash(&kando_dir);
+            if entries.is_empty() {
+                println!("Trash is already empty.");
+                return Ok(());
+            }
+            let count = entries.len();
+            let trash_dir = kando_dir.join(".trash");
+            for entry in &entries {
+                let card_file = trash_dir.join(format!("{}.md", entry.id));
+                let _ = std::fs::remove_file(card_file);
+            }
+            // Clear the meta file
+            let _ = std::fs::remove_file(trash_dir.join("_meta.toml"));
+            println!("Permanently deleted {count} card{} from trash.", if count == 1 { "" } else { "s" });
+        }
+    }
+
     Ok(())
 }
 

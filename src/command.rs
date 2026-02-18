@@ -4,7 +4,7 @@
 //! and runtime configuration changes.
 
 use crate::app::{AppState, TextBuffer};
-use crate::board::storage::save_board;
+use crate::board::storage::{save_board, load_trash, restore_card, load_board};
 use crate::board::Board;
 
 // ---------------------------------------------------------------------------
@@ -30,6 +30,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo { name: "quit",     description: "Quit" },
     CommandInfo { name: "reload",   description: "Reload board" },
     CommandInfo { name: "rename",   description: "Rename card" },
+    CommandInfo { name: "restore",  description: "Restore deleted card" },
     CommandInfo { name: "sort",     description: "Sort column" },
     CommandInfo { name: "tag",      description: "Add tag" },
     CommandInfo { name: "unassign", description: "Unassign card" },
@@ -40,7 +41,7 @@ pub const COMMANDS: &[CommandInfo] = &[
 /// All recognized command names (for completion), derived from COMMANDS.
 const COMMAND_NAMES: &[&str] = &[
     "assign", "col", "count", "find", "move", "priority",
-    "quit", "reload", "rename", "sort", "tag", "unassign", "untag", "wip",
+    "quit", "reload", "rename", "restore", "sort", "tag", "unassign", "untag", "wip",
 ];
 
 const PRIORITY_NAMES: &[&str] = &["low", "normal", "high", "urgent"];
@@ -74,8 +75,8 @@ impl CommandState {
 
 /// Compute the ghost suffix for the current input (shown as dimmed text after cursor).
 /// Returns the suffix to append, or None if no match.
-pub fn compute_ghost(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> Option<String> {
-    let (token, candidates) = current_token_and_candidates(input, board, card_tags, card_assignees);
+pub fn compute_ghost(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String], trash_ids: &[(String, String)]) -> Option<String> {
+    let (token, candidates) = current_token_and_candidates(input, board, card_tags, card_assignees, trash_ids);
     if token.is_empty() {
         // After "command " (space following a known command): show first candidate.
         // But not when input is empty/blank — no ghost on bare `:` prompt.
@@ -95,8 +96,8 @@ pub fn compute_ghost(input: &str, board: &Board, card_tags: &[String], card_assi
 }
 
 /// Compute all matching candidates for the current token.
-fn compute_candidates_for_token(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> Vec<String> {
-    let (token, candidates) = current_token_and_candidates(input, board, card_tags, card_assignees);
+fn compute_candidates_for_token(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String], trash_ids: &[(String, String)]) -> Vec<String> {
+    let (token, candidates) = current_token_and_candidates(input, board, card_tags, card_assignees, trash_ids);
     let token_lower = token.to_lowercase();
     if token.is_empty() {
         return candidates;
@@ -108,7 +109,7 @@ fn compute_candidates_for_token(input: &str, board: &Board, card_tags: &[String]
 }
 
 /// Get the current token being typed and the candidate list for its position.
-fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> (String, Vec<String>) {
+fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String], trash_ids: &[(String, String)]) -> (String, Vec<String>) {
     let trimmed = input.trim_start();
 
     // Split into tokens
@@ -152,6 +153,7 @@ fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String]
                 vec![] // WIP limit is a number — no completion
             }
         }
+        "restore" => trash_ids.iter().map(|(id, _)| id.clone()).collect(),
         _ => vec![], // find, rename, reload, count — no arg completion
     };
 
@@ -194,7 +196,7 @@ fn board_assignees(board: &Board) -> Vec<String> {
 ///
 /// Returns `(title, items)` where `title` is the palette heading (e.g. "commands",
 /// "columns") and `items` is the filtered list of `(name, description)` pairs.
-pub fn palette_items(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String]) -> (&'static str, Vec<(String, String)>) {
+pub fn palette_items(input: &str, board: &Board, card_tags: &[String], card_assignees: &[String], trash_ids: &[(String, String)]) -> (&'static str, Vec<(String, String)>) {
     let trimmed = input.trim_start();
     let parts: Vec<&str> = trimmed.split_whitespace().collect();
     let ends_with_space = trimmed.ends_with(' ');
@@ -246,6 +248,7 @@ pub fn palette_items(input: &str, board: &Board, card_tags: &[String], card_assi
                 return ("", vec![]); // WIP limit is a number
             }
         }
+        "restore" => ("trash", trash_ids.iter().map(|(id, title)| (id.clone(), title.clone())).collect()),
         _ => return ("", vec![]), // find, rename, reload, count, q, quit — no arg completion
     };
 
@@ -274,7 +277,7 @@ pub fn current_token(input: &str) -> String {
 }
 
 /// Handle Tab/Shift-Tab: cycle through completions.
-pub fn cycle_completion(cmd: &mut CommandState, board: &Board, card_tags: &[String], card_assignees: &[String], forward: bool) {
+pub fn cycle_completion(cmd: &mut CommandState, board: &Board, card_tags: &[String], card_assignees: &[String], trash_ids: &[(String, String)], forward: bool) {
     if let Some(ref mut comp) = cmd.completion {
         // Already cycling — advance index
         if comp.candidates.is_empty() {
@@ -293,7 +296,7 @@ pub fn cycle_completion(cmd: &mut CommandState, board: &Board, card_tags: &[Stri
         cmd.buf.cursor = cmd.buf.input.chars().count();
     } else {
         // First Tab press — compute candidates and accept first match
-        let candidates = compute_candidates_for_token(&cmd.buf.input, board, card_tags, card_assignees);
+        let candidates = compute_candidates_for_token(&cmd.buf.input, board, card_tags, card_assignees, trash_ids);
         if candidates.is_empty() {
             return;
         }
@@ -350,7 +353,7 @@ pub fn execute_command(
         None => (input, ""),
     };
 
-    match cmd {
+    let result = match cmd {
         "q" | "quit" => { state.should_quit = true; Ok(None) }
         "move" | "mv" => cmd_move(board, state, rest, kando_dir),
         "tag" => cmd_tag(board, state, rest, kando_dir),
@@ -363,13 +366,25 @@ pub fn execute_command(
         "sort" => cmd_sort(board, state, rest, kando_dir),
         "find" => cmd_find(board, state, rest),
         "col" => cmd_col(board, state, rest, kando_dir),
+        "restore" => cmd_restore(board, state, rest, kando_dir),
         "reload" => cmd_reload(board, state, kando_dir),
         "count" => cmd_count(board, state),
         _ => {
             state.notify_error(format!("Unknown command: {cmd}"));
             Ok(None)
         }
+    };
+
+    // Mirror the keyboard handler: clear undo state on any successful card
+    // mutation so that `u` doesn't silently restore across unrelated changes.
+    // Commands that return Some(sync_msg) are the ones that mutate state.
+    // `:restore` manages last_delete itself; `:reload` reloads from disk so
+    // last_delete would be stale anyway.
+    if matches!(result, Ok(Some(_))) && cmd != "restore" {
+        state.last_delete = None;
     }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -903,6 +918,52 @@ fn cmd_col(
     }
 }
 
+/// :restore <id> — Restore a card from the trash.
+fn cmd_restore(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &str,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let card_id = args.trim();
+    if card_id.is_empty() {
+        state.notify_error("Usage: restore <card-id>");
+        return Ok(None);
+    }
+
+    let entries = load_trash(kando_dir);
+    let entry = match entries.iter().find(|e| e.id == card_id) {
+        Some(e) => e,
+        None => {
+            state.notify_error(format!("Card {card_id} not found in trash"));
+            return Ok(None);
+        }
+    };
+
+    // Restore to original column if it exists, otherwise first column (backlog)
+    let target_col = board.columns.iter().position(|c| c.slug == entry.from_column)
+        .unwrap_or(0);
+    let target_slug = board.columns[target_col].slug.clone();
+    let title = entry.title.clone();
+
+    restore_card(kando_dir, card_id, &target_slug)?;
+    *board = load_board(kando_dir)?;
+    if let Some((col_idx, card_idx)) = board.find_card(card_id) {
+        state.focused_column = col_idx;
+        state.selected_card = card_idx;
+    } else {
+        state.focused_column = target_col;
+        state.clamp_selection(board);
+    }
+    // Clear undo state — if this card was the last deleted, `u` would try to
+    // restore it again (file already gone) and produce a spurious error.
+    if state.last_delete.as_ref().map(|e| e.id.as_str()) == Some(card_id) {
+        state.last_delete = None;
+    }
+    state.notify(format!("Restored: {title}"));
+    Ok(Some("Restore card".into()))
+}
+
 /// :reload — Reload board from disk.
 fn cmd_reload(
     board: &mut Board,
@@ -1103,7 +1164,7 @@ mod tests {
     #[test]
     fn ghost_command_name() {
         let board = test_board();
-        let ghost = compute_ghost("mo", &board, &[], &[]);
+        let ghost = compute_ghost("mo", &board, &[], &[], &[]);
         assert_eq!(ghost, Some("ve".into()));
     }
 
@@ -1111,42 +1172,42 @@ mod tests {
     fn ghost_command_name_exact_no_ghost() {
         let board = test_board();
         // Exact match — no ghost (nothing left to complete)
-        let ghost = compute_ghost("move", &board, &[], &[]);
+        let ghost = compute_ghost("move", &board, &[], &[], &[]);
         assert_eq!(ghost, None);
     }
 
     #[test]
     fn ghost_column_name() {
         let board = test_board();
-        let ghost = compute_ghost("move back", &board, &[], &[]);
+        let ghost = compute_ghost("move back", &board, &[], &[], &[]);
         assert_eq!(ghost, Some("log".into()));
     }
 
     #[test]
     fn ghost_priority() {
         let board = test_board();
-        let ghost = compute_ghost("priority ur", &board, &[], &[]);
+        let ghost = compute_ghost("priority ur", &board, &[], &[], &[]);
         assert_eq!(ghost, Some("gent".into()));
     }
 
     #[test]
     fn ghost_sort_field() {
         let board = test_board();
-        let ghost = compute_ghost("sort cr", &board, &[], &[]);
+        let ghost = compute_ghost("sort cr", &board, &[], &[], &[]);
         assert_eq!(ghost, Some("eated".into()));
     }
 
     #[test]
     fn ghost_no_match() {
         let board = test_board();
-        let ghost = compute_ghost("xyz", &board, &[], &[]);
+        let ghost = compute_ghost("xyz", &board, &[], &[], &[]);
         assert_eq!(ghost, None);
     }
 
     #[test]
     fn ghost_empty_input() {
         let board = test_board();
-        let ghost = compute_ghost("", &board, &[], &[]);
+        let ghost = compute_ghost("", &board, &[], &[], &[]);
         assert_eq!(ghost, None);
     }
 
@@ -1154,7 +1215,7 @@ mod tests {
     fn ghost_after_space_shows_first_candidate() {
         let board = test_board();
         // After "move " we should see column completion
-        let ghost = compute_ghost("move ", &board, &[], &[]);
+        let ghost = compute_ghost("move ", &board, &[], &[], &[]);
         // First column alphabetically: backlog
         assert_eq!(ghost, Some("backlog".into()));
     }
@@ -1164,7 +1225,7 @@ mod tests {
         let board = test_board();
         let mut cmd = CommandState::new();
         cmd.buf = TextBuffer::new("mo".into());
-        cycle_completion(&mut cmd, &board, &[], &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], &[], true);
         // Only one match ("move") — accepts with trailing space, no cycling state
         assert_eq!(cmd.buf.input, "move ");
         assert!(cmd.completion.is_none());
@@ -1176,7 +1237,7 @@ mod tests {
         let mut cmd = CommandState::new();
         // "re" matches ["reload", "rename"] — multiple candidates, first Tab picks first
         cmd.buf = TextBuffer::new("re".into());
-        cycle_completion(&mut cmd, &board, &[], &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], &[], true);
         assert_eq!(cmd.buf.input, "reload");
         assert!(cmd.completion.is_some());
     }
@@ -1189,11 +1250,11 @@ mod tests {
         // with aliases removed, "tag" is a single match → auto-commits with space
         // Use "un" which matches ["unassign", "untag"] for cycling test
         cmd.buf = TextBuffer::new("un".into());
-        cycle_completion(&mut cmd, &board, &[], &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], &[], true);
         assert_eq!(cmd.buf.input, "unassign");
         assert!(cmd.completion.is_some());
         // Tab again cycles to "untag"
-        cycle_completion(&mut cmd, &board, &[], &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], &[], true);
         assert_eq!(cmd.buf.input, "untag");
     }
 
@@ -1203,10 +1264,10 @@ mod tests {
         let mut cmd = CommandState::new();
         cmd.buf = TextBuffer::new("move ".into());
         // First Tab: selects first column
-        cycle_completion(&mut cmd, &board, &[], &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], &[], true);
         let first = cmd.buf.input.clone();
         // Second Tab: cycles to next
-        cycle_completion(&mut cmd, &board, &[], &[], true);
+        cycle_completion(&mut cmd, &board, &[], &[], &[], true);
         let second = cmd.buf.input.clone();
         assert_ne!(first, second);
     }
@@ -1227,14 +1288,14 @@ mod tests {
     fn ghost_untag_uses_card_tags() {
         let board = test_board();
         let card_tags = vec!["bug".to_string(), "feature".to_string()];
-        let ghost = compute_ghost("untag b", &board, &card_tags, &[]);
+        let ghost = compute_ghost("untag b", &board, &card_tags, &[], &[]);
         assert_eq!(ghost, Some("ug".into()));
     }
 
     #[test]
     fn ghost_col_subcmd() {
         let board = test_board();
-        let ghost = compute_ghost("col backlog hi", &board, &[], &[]);
+        let ghost = compute_ghost("col backlog hi", &board, &[], &[], &[]);
         assert_eq!(ghost, Some("de".into()));
     }
 
@@ -1243,7 +1304,7 @@ mod tests {
     #[test]
     fn palette_empty_input_shows_all_commands() {
         let board = test_board();
-        let (title, items) = palette_items("", &board, &[], &[]);
+        let (title, items) = palette_items("", &board, &[], &[], &[]);
         assert_eq!(title, "commands");
         assert_eq!(items.len(), COMMANDS.len());
     }
@@ -1251,7 +1312,7 @@ mod tests {
     #[test]
     fn palette_filters_commands_by_query() {
         let board = test_board();
-        let (title, items) = palette_items("sor", &board, &[], &[]);
+        let (title, items) = palette_items("sor", &board, &[], &[], &[]);
         assert_eq!(title, "commands");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].0, "sort");
@@ -1260,7 +1321,7 @@ mod tests {
     #[test]
     fn palette_after_command_space_shows_columns() {
         let board = test_board();
-        let (title, items) = palette_items("move ", &board, &[], &[]);
+        let (title, items) = palette_items("move ", &board, &[], &[], &[]);
         assert_eq!(title, "columns");
         assert_eq!(items.len(), 3); // backlog, in-progress, done
     }
@@ -1268,7 +1329,7 @@ mod tests {
     #[test]
     fn palette_filters_argument_candidates() {
         let board = test_board();
-        let (title, items) = palette_items("move back", &board, &[], &[]);
+        let (title, items) = palette_items("move back", &board, &[], &[], &[]);
         assert_eq!(title, "columns");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].0, "backlog");
@@ -1277,7 +1338,7 @@ mod tests {
     #[test]
     fn palette_no_args_returns_empty() {
         let board = test_board();
-        let (_, items) = palette_items("find ", &board, &[], &[]);
+        let (_, items) = palette_items("find ", &board, &[], &[], &[]);
         assert!(items.is_empty());
     }
 
@@ -1285,7 +1346,7 @@ mod tests {
     fn palette_fuzzy_matches_description() {
         let board = test_board();
         // "card" appears in descriptions of "move" and "find" and "rename"
-        let (title, items) = palette_items("card", &board, &[], &[]);
+        let (title, items) = palette_items("card", &board, &[], &[], &[]);
         assert_eq!(title, "commands");
         assert!(items.iter().any(|(n, _)| n == "find"));
         assert!(items.iter().any(|(n, _)| n == "rename"));

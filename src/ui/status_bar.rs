@@ -206,7 +206,7 @@ fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<
             ];
             // Ghost completion text (dimmed, after cursor) — only when NOT actively cycling
             if cmd.completion.is_none() {
-                if let Some(ghost) = crate::command::compute_ghost(&cmd.buf.input, board, &card_tags, &card_assignees) {
+                if let Some(ghost) = crate::command::compute_ghost(&cmd.buf.input, board, &card_tags, &card_assignees, &state.cached_trash_ids) {
                     spans.push(Span::styled(ghost, Style::default().fg(Theme::DIM)));
                 }
             }

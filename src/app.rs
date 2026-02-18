@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::board::age::run_auto_close;
-use crate::board::storage::{find_kando_dir, load_board, save_board};
+use crate::board::storage::{find_kando_dir, load_board, save_board, trash_card, restore_card, TrashEntry};
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
@@ -174,6 +174,10 @@ pub struct AppState {
     pub notification_expires: Option<Instant>,
     pub should_quit: bool,
     pub sync_state: Option<SyncState>,
+    /// Last deleted card for single-level undo (`u` key).
+    pub last_delete: Option<TrashEntry>,
+    /// Cached trash entry IDs for `:restore` command palette/completion.
+    pub cached_trash_ids: Vec<(String, String)>, // (id, title)
 }
 
 impl AppState {
@@ -191,6 +195,8 @@ impl AppState {
             notification_expires: None,
             should_quit: false,
             sync_state: None,
+            last_delete: None,
+            cached_trash_ids: Vec::new(),
         }
     }
 
@@ -325,18 +331,43 @@ fn handle_auto_close(
     state: &mut AppState,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
+    let mut messages = Vec::new();
+
     let closed = run_auto_close(board, Utc::now());
     if !closed.is_empty() {
         save_board(kando_dir, board)?;
         if let Some(ref mut sync_state) = state.sync_state {
             sync::commit_and_push(sync_state, kando_dir, "Auto-close stale cards");
         }
-        state.notify(format!(
-            "{} card{} auto-closed to Archive",
+        messages.push(format!(
+            "{} card{} auto-closed",
             closed.len(),
             if closed.len() == 1 { "" } else { "s" }
         ));
     }
+
+    // Purge old trash entries
+    use crate::board::storage::purge_trash;
+    if let Ok(purged) = purge_trash(kando_dir, board.policies.trash_purge_days) {
+        if !purged.is_empty() {
+            // Invalidate undo if the purged card was the last-deleted one
+            if let Some(ref ld) = state.last_delete {
+                if purged.contains(&ld.id) {
+                    state.last_delete = None;
+                }
+            }
+            messages.push(format!(
+                "{} trashed card{} purged",
+                purged.len(),
+                if purged.len() == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    if !messages.is_empty() {
+        state.notify(messages.join("; "));
+    }
+
     Ok(())
 }
 
@@ -554,7 +585,17 @@ fn process_action(
         Action::EnterViewMode => state.mode = Mode::View,
         Action::EnterFilterMode => state.mode = Mode::FilterMenu,
         Action::EnterCommandMode => {
+            use crate::board::storage::load_trash;
+            state.cached_trash_ids = load_trash(kando_dir)
+                .into_iter()
+                .map(|e| (e.id, e.title))
+                .collect();
             state.mode = Mode::Command { cmd: crate::command::CommandState::new() };
+        }
+
+        // Undo last delete
+        Action::Undo => {
+            sync_message = handle_undo(board, state, kando_dir)?;
         }
 
         // Board-level actions
@@ -781,6 +822,12 @@ fn handle_card_action<B: ratatui::backend::Backend>(
     was_minor_mode: bool,
 ) -> color_eyre::Result<Option<String>> {
     let mut sync_message = None;
+
+    // Clear undo state on any card-mutating action (except delete itself, which sets it).
+    if !matches!(action, Action::DeleteCard | Action::OpenCardDetail | Action::ClosePanel
+        | Action::DetailScrollDown | Action::DetailScrollUp | Action::DetailNextCard | Action::DetailPrevCard) {
+        state.last_delete = None;
+    }
 
     // Guard: skip card-targeting actions when the selected card is filtered out.
     // Actions like NewCard, ClosePanel, detail scrolling/navigation don't target a specific card
@@ -1198,8 +1245,9 @@ fn handle_input(
             let forward = matches!(action, Action::InputComplete);
             // Extract card data before mutably borrowing state.mode
             let (card_tags, card_assignees) = state.selected_card_metadata(board);
+            let trash_ids = state.cached_trash_ids.clone();
             if let Mode::Command { cmd } = &mut state.mode {
-                crate::command::cycle_completion(cmd, board, &card_tags, &card_assignees, forward);
+                crate::command::cycle_completion(cmd, board, &card_tags, &card_assignees, &trash_ids, forward);
             }
         }
         _ => unreachable!(),
@@ -1370,6 +1418,44 @@ fn handle_input_confirm(
 }
 
 // ---------------------------------------------------------------------------
+// Handler: Undo last delete
+// ---------------------------------------------------------------------------
+
+fn handle_undo(
+    board: &mut Board,
+    state: &mut AppState,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    if let Some(entry) = state.last_delete.take() {
+        let target_col = board.columns.iter().position(|c| c.slug == entry.from_column)
+            .unwrap_or(0); // fall back to first column if original was deleted
+        let target_slug = board.columns[target_col].slug.clone();
+        let card_id = entry.id.clone();
+        match restore_card(kando_dir, &card_id, &target_slug) {
+            Ok(()) => {
+                *board = load_board(kando_dir)?;
+                if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
+                    state.focused_column = col_idx;
+                    state.selected_card = card_idx;
+                } else {
+                    state.focused_column = target_col;
+                    state.clamp_selection_filtered(board);
+                }
+                state.notify(format!("Restored: {}", entry.title));
+                Ok(Some("Restore card".into()))
+            }
+            Err(e) => {
+                state.notify_error(format!("Restore failed: {e}"));
+                Ok(None)
+            }
+        }
+    } else {
+        state.notify("Nothing to undo");
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Handler: Confirmation (delete card, WIP limit override)
 // ---------------------------------------------------------------------------
 
@@ -1390,23 +1476,21 @@ fn handle_confirm(
                 } => {
                     let id = id.clone();
                     if let Some((col_idx, card_idx)) = board.find_card(&id) {
-                        let card_path = kando_dir
-                            .join("columns")
-                            .join(&board.columns[col_idx].slug)
-                            .join(format!("{id}.md"));
-                        let file_err = match std::fs::remove_file(&card_path) {
-                            Ok(()) => None,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                            Err(e) => Some(e),
-                        };
-                        board.columns[col_idx].cards.remove(card_idx);
-                        save_board(kando_dir, board)?;
-                        sync_message = Some("Delete card".into());
-                        state.clamp_selection_filtered(board);
-                        if let Some(e) = file_err {
-                            state.notify(format!("Deleted (file removal failed: {e})"));
-                        } else {
-                            state.notify("Card deleted");
+                        let col_slug = board.columns[col_idx].slug.clone();
+                        let card_title = board.columns[col_idx].cards[card_idx].title.clone();
+                        // Trash the file BEFORE removing from board (save_board deletes orphans)
+                        match trash_card(kando_dir, &col_slug, &id, &card_title) {
+                            Ok(entry) => {
+                                board.columns[col_idx].cards.remove(card_idx);
+                                save_board(kando_dir, board)?;
+                                sync_message = Some("Delete card".into());
+                                state.clamp_selection_filtered(board);
+                                state.last_delete = Some(entry);
+                                state.notify("Card deleted (u to undo)");
+                            }
+                            Err(e) => {
+                                state.notify_error(format!("Delete failed (could not trash): {e}"));
+                            }
                         }
                     }
                 }
@@ -1909,7 +1993,7 @@ mod tests {
         let sync = handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
         assert_eq!(sync.as_deref(), Some("Delete card"));
         assert!(board.columns[0].cards.is_empty());
-        assert_eq!(state.notification.as_deref(), Some("Card deleted"));
+        assert_eq!(state.notification.as_deref(), Some("Card deleted (u to undo)"));
         assert!(matches!(state.mode, Mode::Normal));
     }
 
@@ -2044,5 +2128,232 @@ mod tests {
         assert_eq!(sync.as_deref(), Some("Toggle blocker"));
         assert!(board.columns[0].cards[0].blocked);
         assert_eq!(state.notification.as_deref(), Some("Card blocked"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Trash / undo tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_delete_populates_last_delete() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Doomed".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Confirm {
+            prompt: "Delete card?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        // last_delete is set for undo
+        assert!(state.last_delete.is_some());
+        let entry = state.last_delete.as_ref().unwrap();
+        assert_eq!(entry.id, "001");
+        assert_eq!(entry.title, "Doomed");
+        assert_eq!(entry.from_column, "backlog");
+    }
+
+    #[test]
+    fn test_undo_restores_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Undone".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+
+        // Delete the card
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert!(board.columns[0].cards.is_empty());
+
+        // Undo via production code path
+        let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(sync.as_deref(), Some("Restore card"));
+
+        // Card is back in the first column
+        assert_eq!(board.columns[0].cards.len(), 1);
+        assert_eq!(board.columns[0].cards[0].title, "Undone");
+        assert!(state.notification.as_deref().unwrap().contains("Restored"));
+        assert!(state.last_delete.is_none());
+    }
+
+    #[test]
+    fn test_delete_card_file_goes_to_trash() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Filed".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+
+        // Card file is in .trash, not in column directory
+        let col_file = kando_dir.join("columns/backlog/001.md");
+        let trash_file = kando_dir.join(".trash/001.md");
+        assert!(!col_file.exists());
+        assert!(trash_file.exists());
+    }
+
+    #[test]
+    fn test_undo_restores_to_original_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Put card in column 1 (in-progress)
+        board.columns[1].cards.push(Card::new("001".into(), "WIP".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = 1;
+
+        // Delete
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert_eq!(state.last_delete.as_ref().unwrap().from_column, "in-progress");
+
+        // Undo via production code path
+        handle_undo(&mut board, &mut state, &kando_dir).unwrap();
+
+        // Card is back in column 1 (in-progress), cursor focused there
+        assert_eq!(board.columns[1].cards.len(), 1);
+        assert_eq!(board.columns[1].cards[0].title, "WIP");
+        assert_eq!(state.focused_column, 1);
+    }
+
+    #[test]
+    fn test_undo_nothing_to_undo() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+
+        let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Nothing to undo"));
+    }
+
+    #[test]
+    fn test_undo_focuses_restored_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Keep".into()));
+        board.columns[0].cards.push(Card::new("002".into(), "Delete".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.selected_card = 1;
+
+        // Delete card 002
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("002".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+
+        // Undo and check cursor lands on restored card
+        handle_undo(&mut board, &mut state, &kando_dir).unwrap();
+        let restored = &board.columns[state.focused_column].cards[state.selected_card];
+        assert_eq!(restored.id, "002");
+    }
+
+    #[test]
+    fn test_restore_via_command_clears_last_delete() {
+        // Regression: :restore used to leave last_delete set, so pressing `u`
+        // afterwards would produce "Restore failed: No such file or directory".
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Bug".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+
+        // Step 1: delete the card (sets last_delete)
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert!(state.last_delete.is_some());
+
+        // Step 2: restore via :restore command
+        crate::command::execute_command(&mut board, &mut state, "restore 001", &kando_dir).unwrap();
+        assert_eq!(board.columns[0].cards.len(), 1);
+        assert_eq!(state.notification.as_deref(), Some("Restored: Bug")); // #4: assert restore notification
+
+        // Step 3: last_delete must be cleared — undo should say "Nothing to undo"
+        assert!(state.last_delete.is_none());
+        let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Nothing to undo"));
+    }
+
+    #[test]
+    fn test_restore_different_card_preserves_last_delete() {
+        // :restore B (a different card) must leave last_delete for A intact.
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Alpha".into()));
+        board.columns[0].cards.push(Card::new("002".into(), "Beta".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+
+        // Delete 001 — arms last_delete for 001
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert_eq!(state.last_delete.as_ref().unwrap().id, "001");
+
+        // Delete 002 as well (its last_delete entry is now 002, overwriting 001)
+        // … but we want to test the case where we restore a *different* card than
+        // the one in last_delete. Re-set last_delete manually back to 001.
+        trash_card(&kando_dir, "backlog", "002", "Beta").unwrap();
+        state.last_delete = Some(crate::board::storage::TrashEntry {
+            id: "001".into(),
+            deleted: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            from_column: "backlog".into(),
+            title: "Alpha".into(),
+        });
+
+        // Restore 002 (different from last_delete's 001)
+        crate::command::execute_command(&mut board, &mut state, "restore 002", &kando_dir).unwrap();
+
+        // last_delete for 001 must still be set — u should still work
+        assert_eq!(state.last_delete.as_ref().unwrap().id, "001");
+        let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(sync.as_deref(), Some("Restore card"));
+        assert!(board.columns[0].cards.iter().any(|c| c.id == "001"));
+    }
+
+    #[test]
+    fn test_mutating_command_clears_last_delete() {
+        // Commands like :move should clear last_delete, mirroring the keyboard handler.
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Deleted".into()));
+        board.columns[0].cards.push(Card::new("002".into(), "Mover".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+
+        // Delete 001 — arms last_delete
+        state.mode = Mode::Confirm {
+            prompt: "Delete?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert!(state.last_delete.is_some());
+
+        // :move selected card to done — should clear last_delete.
+        // After deleting 001, card 002 is at index 0 in backlog.
+        state.focused_column = 0;
+        state.selected_card = 0;
+        crate::command::execute_command(&mut board, &mut state, "move done", &kando_dir).unwrap();
+        assert!(state.last_delete.is_none());
     }
 }

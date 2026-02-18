@@ -56,7 +56,7 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
         }
         crate::app::Mode::Command { cmd } => {
             let (card_tags, card_assignees) = state.selected_card_metadata(board);
-            let (title, items) = crate::command::palette_items(&cmd.buf.input, board, &card_tags, &card_assignees);
+            let (title, items) = crate::command::palette_items(&cmd.buf.input, board, &card_tags, &card_assignees, &state.cached_trash_ids);
             if !items.is_empty() {
                 // Determine which name is selected (from active completion state)
                 let selected_name = cmd.completion.as_ref().and_then(|c| {

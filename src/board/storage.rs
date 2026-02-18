@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{Board, Card, Column, Policies};
@@ -372,6 +373,149 @@ pub struct ColumnConfig {
     pub hidden: Option<bool>,
 }
 
+// ── Trash (soft-delete) ──
+
+/// A single entry in `.kando/.trash/_meta.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashEntry {
+    pub id: String,
+    pub deleted: String, // ISO-8601 string, quoted for serde/toml compat
+    pub from_column: String,
+    pub title: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct TrashMeta {
+    #[serde(default)]
+    entries: Vec<TrashEntry>,
+}
+
+/// Path to the trash directory.
+fn trash_dir(kando_dir: &Path) -> PathBuf {
+    kando_dir.join(".trash")
+}
+
+/// Path to the trash metadata file.
+fn trash_meta_path(kando_dir: &Path) -> PathBuf {
+    trash_dir(kando_dir).join("_meta.toml")
+}
+
+/// Move a card file to `.trash/` and record metadata.
+/// Returns the `TrashEntry` (for undo tracking).
+pub fn trash_card(
+    kando_dir: &Path,
+    col_slug: &str,
+    card_id: &str,
+    card_title: &str,
+) -> Result<TrashEntry, StorageError> {
+    let src = kando_dir
+        .join("columns")
+        .join(col_slug)
+        .join(format!("{card_id}.md"));
+    let dst_dir = trash_dir(kando_dir);
+    fs::create_dir_all(&dst_dir)?;
+    let dst = dst_dir.join(format!("{card_id}.md"));
+
+    // Move file (rename if same filesystem, else copy+delete)
+    if fs::rename(&src, &dst).is_err() {
+        fs::copy(&src, &dst)?;
+        fs::remove_file(&src)?;
+    }
+
+    let entry = TrashEntry {
+        id: card_id.to_string(),
+        deleted: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        from_column: col_slug.to_string(),
+        title: card_title.to_string(),
+    };
+
+    // Append entry to _meta.toml
+    let mut meta = load_trash_meta(kando_dir);
+    meta.entries.push(entry.clone());
+    save_trash_meta(kando_dir, &meta)?;
+
+    Ok(entry)
+}
+
+/// Restore a card from `.trash/` back to a column directory.
+/// Removes the entry from `_meta.toml`.
+pub fn restore_card(
+    kando_dir: &Path,
+    card_id: &str,
+    target_col_slug: &str,
+) -> Result<(), StorageError> {
+    let src = trash_dir(kando_dir).join(format!("{card_id}.md"));
+    let dst_dir = kando_dir.join("columns").join(target_col_slug);
+    fs::create_dir_all(&dst_dir)?;
+    let dst = dst_dir.join(format!("{card_id}.md"));
+
+    if fs::rename(&src, &dst).is_err() {
+        fs::copy(&src, &dst)?;
+        fs::remove_file(&src)?;
+    }
+
+    // Remove from _meta.toml
+    let mut meta = load_trash_meta(kando_dir);
+    meta.entries.retain(|e| e.id != card_id);
+    save_trash_meta(kando_dir, &meta)?;
+
+    Ok(())
+}
+
+/// Load all trash entries from `_meta.toml`.
+pub fn load_trash(kando_dir: &Path) -> Vec<TrashEntry> {
+    load_trash_meta(kando_dir).entries
+}
+
+/// Purge trash entries older than `max_age_days`. Returns IDs of purged cards.
+pub fn purge_trash(kando_dir: &Path, max_age_days: u32) -> Result<Vec<String>, StorageError> {
+    if max_age_days == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut meta = load_trash_meta(kando_dir);
+    let now = Utc::now();
+    let mut purged = Vec::new();
+    let tdir = trash_dir(kando_dir);
+
+    meta.entries.retain(|entry| {
+        let keep = match entry.deleted.parse::<DateTime<Utc>>() {
+            Ok(deleted) => (now - deleted).num_days() < i64::from(max_age_days),
+            Err(_) => true, // keep entries with unparseable dates
+        };
+        if !keep {
+            let card_file = tdir.join(format!("{}.md", entry.id));
+            let _ = fs::remove_file(card_file);
+            purged.push(entry.id.clone());
+        }
+        keep
+    });
+
+    if !purged.is_empty() {
+        save_trash_meta(kando_dir, &meta)?;
+    }
+
+    Ok(purged)
+}
+
+/// Internal: load trash metadata, returning empty on missing/corrupt file.
+fn load_trash_meta(kando_dir: &Path) -> TrashMeta {
+    let path = trash_meta_path(kando_dir);
+    match fs::read_to_string(&path) {
+        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+        Err(_) => TrashMeta::default(),
+    }
+}
+
+/// Internal: write trash metadata to disk.
+fn save_trash_meta(kando_dir: &Path, meta: &TrashMeta) -> Result<(), StorageError> {
+    let dir = trash_dir(kando_dir);
+    fs::create_dir_all(&dir)?;
+    let content = toml::to_string_pretty(meta)?;
+    fs::write(trash_meta_path(kando_dir), content)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +618,278 @@ mod tests {
 
         let found = find_kando_dir(&nested).unwrap();
         assert_eq!(found, dir.path().join(".kando"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Trash (soft-delete) tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_trash_card_moves_file_and_records_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Create a card on disk
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id.clone(), "Trash me".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let col_slug = &board.columns[0].slug;
+        let src = kando_dir.join("columns").join(col_slug).join(format!("{id}.md"));
+        assert!(src.exists());
+
+        // Trash it
+        let entry = trash_card(&kando_dir, col_slug, &id, "Trash me").unwrap();
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.from_column, col_slug.as_str());
+        assert_eq!(entry.title, "Trash me");
+
+        // Source gone, trash file present
+        assert!(!src.exists());
+        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        assert!(trash_file.exists());
+
+        // Meta records the entry
+        let entries = load_trash(&kando_dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, id);
+    }
+
+    #[test]
+    fn test_restore_card_moves_file_back() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id.clone(), "Restore me".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let col_slug = board.columns[0].slug.clone();
+        trash_card(&kando_dir, &col_slug, &id, "Restore me").unwrap();
+
+        // Restore to same column
+        restore_card(&kando_dir, &id, &col_slug).unwrap();
+
+        // File is back in the column directory
+        let restored = kando_dir.join("columns").join(&col_slug).join(format!("{id}.md"));
+        assert!(restored.exists());
+
+        // Trash file gone, meta cleared
+        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        assert!(!trash_file.exists());
+        assert!(load_trash(&kando_dir).is_empty());
+    }
+
+    #[test]
+    fn test_restore_card_to_different_column() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id.clone(), "Move me".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let from_slug = board.columns[0].slug.clone();
+        let to_slug = board.columns[1].slug.clone();
+        trash_card(&kando_dir, &from_slug, &id, "Move me").unwrap();
+
+        // Restore to a different column
+        restore_card(&kando_dir, &id, &to_slug).unwrap();
+
+        let restored = kando_dir.join("columns").join(&to_slug).join(format!("{id}.md"));
+        assert!(restored.exists());
+        let old_loc = kando_dir.join("columns").join(&from_slug).join(format!("{id}.md"));
+        assert!(!old_loc.exists());
+    }
+
+    #[test]
+    fn test_purge_trash_removes_old_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id.clone(), "Old card".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let col_slug = board.columns[0].slug.clone();
+        trash_card(&kando_dir, &col_slug, &id, "Old card").unwrap();
+
+        // Manually backdate the entry to 60 days ago
+        let mut meta = load_trash_meta(&kando_dir);
+        let old_date = (Utc::now() - chrono::TimeDelta::days(60))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        meta.entries[0].deleted = old_date;
+        save_trash_meta(&kando_dir, &meta).unwrap();
+
+        // Purge with 30-day limit
+        let purged = purge_trash(&kando_dir, 30).unwrap();
+        assert_eq!(purged, vec![id.clone()]);
+
+        // File removed, meta empty
+        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        assert!(!trash_file.exists());
+        assert!(load_trash(&kando_dir).is_empty());
+    }
+
+    #[test]
+    fn test_purge_trash_keeps_recent_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id.clone(), "Recent".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let col_slug = board.columns[0].slug.clone();
+        trash_card(&kando_dir, &col_slug, &id, "Recent").unwrap();
+
+        // Purge with 30 days — card was just trashed, should survive
+        let purged = purge_trash(&kando_dir, 30).unwrap();
+        assert!(purged.is_empty());
+
+        // Entry still present
+        assert_eq!(load_trash(&kando_dir).len(), 1);
+    }
+
+    #[test]
+    fn test_purge_trash_zero_days_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id.clone(), "Safe".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let col_slug = board.columns[0].slug.clone();
+        trash_card(&kando_dir, &col_slug, &id, "Safe").unwrap();
+
+        // Backdate to 100 days ago
+        let mut meta = load_trash_meta(&kando_dir);
+        let old_date = (Utc::now() - chrono::TimeDelta::days(100))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        meta.entries[0].deleted = old_date;
+        save_trash_meta(&kando_dir, &meta).unwrap();
+
+        // max_age_days == 0 means never purge
+        let purged = purge_trash(&kando_dir, 0).unwrap();
+        assert!(purged.is_empty());
+        assert_eq!(load_trash(&kando_dir).len(), 1);
+    }
+
+    #[test]
+    fn test_load_trash_empty_when_no_trash_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // No .trash directory exists yet
+        assert!(load_trash(&kando_dir).is_empty());
+    }
+
+    #[test]
+    fn test_trash_card_missing_source_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Try to trash a card that doesn't exist on disk
+        let result = trash_card(&kando_dir, "backlog", "nonexistent", "Ghost");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_restore_card_missing_trash_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Create .trash dir and _meta.toml with an entry but no actual file
+        let trash = kando_dir.join(".trash");
+        fs::create_dir_all(&trash).unwrap();
+        let meta = TrashMeta {
+            entries: vec![TrashEntry {
+                id: "orphan".into(),
+                deleted: "2025-01-01T00:00:00Z".into(),
+                from_column: "backlog".into(),
+                title: "Orphan".into(),
+            }],
+        };
+        save_trash_meta(&kando_dir, &meta).unwrap();
+
+        // Restore should fail because the .md file is missing
+        let result = restore_card(&kando_dir, "orphan", "backlog");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_purge_trash_keeps_entry_with_unparseable_date() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Create a trash entry with a garbage date
+        let trash = kando_dir.join(".trash");
+        fs::create_dir_all(&trash).unwrap();
+        fs::write(trash.join("bad.md"), "---\nid = \"bad\"\ntitle = \"Bad date\"\n---\n").unwrap();
+        let meta = TrashMeta {
+            entries: vec![TrashEntry {
+                id: "bad".into(),
+                deleted: "not-a-date".into(),
+                from_column: "backlog".into(),
+                title: "Bad date".into(),
+            }],
+        };
+        save_trash_meta(&kando_dir, &meta).unwrap();
+
+        // Purge should keep the entry (unparseable date ⇒ keep, not delete)
+        let purged = purge_trash(&kando_dir, 1).unwrap();
+        assert!(purged.is_empty());
+        assert_eq!(load_trash(&kando_dir).len(), 1);
+    }
+
+    #[test]
+    fn test_trash_two_cards_restore_one() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "First".into()));
+        board.columns[0].cards.push(Card::new("002".into(), "Second".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let col_slug = board.columns[0].slug.clone();
+        trash_card(&kando_dir, &col_slug, "001", "First").unwrap();
+        trash_card(&kando_dir, &col_slug, "002", "Second").unwrap();
+
+        // Both in trash
+        assert_eq!(load_trash(&kando_dir).len(), 2);
+
+        // Restore only the first
+        restore_card(&kando_dir, "001", &col_slug).unwrap();
+
+        // First is back, second still in trash
+        let entries = load_trash(&kando_dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "002");
+
+        let restored = kando_dir.join("columns").join(&col_slug).join("001.md");
+        assert!(restored.exists());
+        let still_trashed = kando_dir.join(".trash/002.md");
+        assert!(still_trashed.exists());
     }
 }

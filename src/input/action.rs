@@ -44,6 +44,9 @@ pub enum Action {
     StartAssigneeFilter,
     EnterFilterMode,
     ClearFilters,
+    // Undo
+    Undo,
+
     // Board
     ReloadBoard,
     ShowHelp,
