@@ -1,3 +1,4 @@
+use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -40,6 +41,7 @@ pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, 
         .constraints(constraints)
         .split(area);
 
+    let matcher = SkimMatcherV2::default();
     for (vis_idx, &(col_idx, col)) in visible_columns.iter().enumerate() {
         let is_focused = state.focused_column == col_idx;
         render_column(
@@ -50,10 +52,12 @@ pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, 
             state,
             &board.policies,
             now,
+            &matcher,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_column(
     f: &mut Frame,
     area: Rect,
@@ -62,26 +66,21 @@ fn render_column(
     state: &AppState,
     policies: &crate::board::Policies,
     now: chrono::DateTime<Utc>,
+    matcher: &SkimMatcherV2,
 ) {
-    // Filter cards if filter is active
+    // Text search (/) takes precedence; tag/assignee picker filters apply otherwise
     let cards: Vec<(usize, &Card)> = col
         .cards
         .iter()
         .enumerate()
         .filter(|(_, card)| {
-            if let Some(ref filter) = state.active_filter {
-                let filter_lower = filter.to_lowercase();
-                let filter_bare = filter_lower.trim_start_matches('@');
-                card.title.to_lowercase().contains(&filter_lower)
-                    || card.tags.iter().any(|t| t.contains(&filter_lower))
-                    || card.assignees.iter().any(|a| a.contains(filter_bare))
-            } else {
-                let tag_ok = state.active_tag_filters.is_empty()
-                    || card.tags.iter().any(|t| state.active_tag_filters.contains(t));
-                let assignee_ok = state.active_assignee_filters.is_empty()
-                    || card.assignees.iter().any(|a| state.active_assignee_filters.contains(a));
-                tag_ok && assignee_ok
-            }
+            crate::board::card_is_visible(
+                card,
+                state.active_filter.as_deref(),
+                &state.active_tag_filters,
+                &state.active_assignee_filters,
+                matcher,
+            )
         })
         .collect();
 
@@ -145,9 +144,12 @@ fn render_column(
     let card_height: u16 = 5; // 3 inner lines + 2 border lines
     let max_visible = (inner.height / card_height) as usize;
 
-    // Calculate scroll offset
+    // Calculate scroll offset (position within the filtered list, not unfiltered index)
     let selected_in_col = if is_focused {
-        state.selected_card
+        cards
+            .iter()
+            .position(|&(real_idx, _)| real_idx == state.selected_card)
+            .unwrap_or(0)
     } else {
         0
     };

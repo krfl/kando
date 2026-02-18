@@ -4,10 +4,12 @@ use chrono::Utc;
 use crossterm::event::{self, Event};
 use ratatui::DefaultTerminal;
 
+use fuzzy_matcher::skim::SkimMatcherV2;
+
 use crate::board::age::run_auto_close;
 use crate::board::storage::{find_kando_dir, load_board, save_board};
 use crate::board::sync::{self, SyncState};
-use crate::board::{Board, Card};
+use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
 use crate::input::keymap::map_key;
 
@@ -243,6 +245,54 @@ impl AppState {
         }
     }
 
+    /// Whether any card filter is currently active.
+    pub fn has_active_filter(&self) -> bool {
+        self.active_filter.is_some()
+            || !self.active_tag_filters.is_empty()
+            || !self.active_assignee_filters.is_empty()
+    }
+
+    /// Clamp selection to the nearest visible card under active filters.
+    /// Falls back to the regular unfiltered clamp when no filters are active.
+    pub fn clamp_selection_filtered(&mut self, board: &Board) {
+        if !self.has_active_filter() {
+            self.clamp_selection(board);
+            return;
+        }
+        if let Some(col) = board.columns.get(self.focused_column) {
+            let visible = visible_card_indices(col, self);
+            if visible.is_empty() {
+                self.selected_card = 0;
+            } else if !visible.contains(&self.selected_card) {
+                // Snap to nearest visible card
+                self.selected_card = *visible
+                    .iter()
+                    .min_by_key(|&&idx| {
+                        (idx as isize - self.selected_card as isize).unsigned_abs()
+                    })
+                    .expect("visible is non-empty");
+            }
+        }
+    }
+}
+
+/// Return the unfiltered indices of cards visible under the current filters.
+fn visible_card_indices(col: &Column, state: &AppState) -> Vec<usize> {
+    let matcher = SkimMatcherV2::default();
+    col.cards
+        .iter()
+        .enumerate()
+        .filter(|(_, card)| {
+            crate::board::card_is_visible(
+                card,
+                state.active_filter.as_deref(),
+                &state.active_tag_filters,
+                &state.active_assignee_filters,
+                &matcher,
+            )
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Sync `active_filter` from the current filter buffer.
@@ -321,7 +371,7 @@ fn try_move_card(
     board.move_card(from, card_idx, to);
     board.columns[to].sort_cards();
     state.focused_column = to;
-    state.clamp_selection(board);
+    state.clamp_selection_filtered(board);
     save_board(kando_dir, board)?;
     state.notify("Card moved");
     Ok(Some("Move card".into()))
@@ -511,7 +561,7 @@ fn process_action(
         Action::ReloadBoard => {
             state.mode = Mode::Normal;
             *board = load_board(kando_dir)?;
-            state.clamp_selection(board);
+            state.clamp_selection_filtered(board);
             state.notify("Board reloaded");
         }
         Action::ShowHelp => state.mode = Mode::Help,
@@ -556,14 +606,14 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
             if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = next_visible_column(board, state.focused_column, false, state.show_hidden_columns) {
                 state.focused_column = col;
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
             }
         }
         Action::FocusNextColumn => {
             if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = next_visible_column(board, state.focused_column, true, state.show_hidden_columns) {
                 state.focused_column = col;
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
             }
         }
         Action::SelectPrevCard => {
@@ -573,7 +623,16 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
                 }
                 _ => {
                     if was_minor_mode { state.mode = Mode::Normal; }
-                    if state.selected_card > 0 { state.selected_card -= 1; }
+                    if let Some(col) = board.columns.get(state.focused_column) {
+                        let visible = visible_card_indices(col, state);
+                        if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
+                            if pos > 0 {
+                                state.selected_card = visible[pos - 1];
+                            }
+                        } else if let Some(&first) = visible.first() {
+                            state.selected_card = first;
+                        }
+                    }
                 }
             }
         }
@@ -585,8 +644,13 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
                 _ => {
                     if was_minor_mode { state.mode = Mode::Normal; }
                     if let Some(col) = board.columns.get(state.focused_column) {
-                        if state.selected_card + 1 < col.cards.len() {
-                            state.selected_card += 1;
+                        let visible = visible_card_indices(col, state);
+                        if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
+                            if pos + 1 < visible.len() {
+                                state.selected_card = visible[pos + 1];
+                            }
+                        } else if let Some(&first) = visible.first() {
+                            state.selected_card = first;
                         }
                     }
                 }
@@ -595,14 +659,22 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
         Action::CycleNextCard => {
             if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = board.columns.get(state.focused_column) {
-                if state.selected_card + 1 < col.cards.len() {
-                    state.selected_card += 1;
-                } else {
+                let visible = visible_card_indices(col, state);
+                let pos = visible.iter().position(|&i| i == state.selected_card);
+                let advanced = match pos {
+                    Some(p) if p + 1 < visible.len() => {
+                        state.selected_card = visible[p + 1];
+                        true
+                    }
+                    _ => false,
+                };
+                if !advanced {
                     let mut from = state.focused_column;
                     while let Some(next) = next_visible_column(board, from, true, state.show_hidden_columns) {
-                        if !board.columns[next].cards.is_empty() {
+                        let next_visible = visible_card_indices(&board.columns[next], state);
+                        if let Some(&first) = next_visible.first() {
                             state.focused_column = next;
-                            state.selected_card = 0;
+                            state.selected_card = first;
                             break;
                         }
                         from = next;
@@ -612,17 +684,27 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
         }
         Action::CyclePrevCard => {
             if was_minor_mode { state.mode = Mode::Normal; }
-            if state.selected_card > 0 {
-                state.selected_card -= 1;
-            } else {
-                let mut from = state.focused_column;
-                while let Some(prev) = next_visible_column(board, from, false, state.show_hidden_columns) {
-                    if !board.columns[prev].cards.is_empty() {
-                        state.focused_column = prev;
-                        state.selected_card = board.columns[prev].cards.len() - 1;
-                        break;
+            if let Some(col) = board.columns.get(state.focused_column) {
+                let visible = visible_card_indices(col, state);
+                let pos = visible.iter().position(|&i| i == state.selected_card);
+                let retreated = match pos {
+                    Some(p) if p > 0 => {
+                        state.selected_card = visible[p - 1];
+                        true
                     }
-                    from = prev;
+                    _ => false,
+                };
+                if !retreated {
+                    let mut from = state.focused_column;
+                    while let Some(prev) = next_visible_column(board, from, false, state.show_hidden_columns) {
+                        let prev_visible = visible_card_indices(&board.columns[prev], state);
+                        if let Some(&last) = prev_visible.last() {
+                            state.focused_column = prev;
+                            state.selected_card = last;
+                            break;
+                        }
+                        from = prev;
+                    }
                 }
             }
         }
@@ -647,16 +729,23 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
                 .collect();
             if idx < visible.len() {
                 state.focused_column = visible[idx];
-                state.selected_card = 0;
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
             }
         }
         Action::JumpToFirstCard => {
-            state.selected_card = 0;
+            if let Some(col) = board.columns.get(state.focused_column) {
+                let visible = visible_card_indices(col, state);
+                if let Some(&first) = visible.first() {
+                    state.selected_card = first;
+                }
+            }
         }
         Action::JumpToLastCard => {
             if let Some(col) = board.columns.get(state.focused_column) {
-                state.selected_card = col.cards.len().saturating_sub(1);
+                let visible = visible_card_indices(col, state);
+                if let Some(&last) = visible.last() {
+                    state.selected_card = last;
+                }
             }
         }
         Action::JumpToBacklog => {
@@ -664,8 +753,7 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
                 c.slug == "backlog" && (state.show_hidden_columns || !c.hidden)
             }) {
                 state.focused_column = idx;
-                state.selected_card = 0;
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
             }
         }
         Action::JumpToDone => {
@@ -673,8 +761,7 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
                 c.slug == "done" && (state.show_hidden_columns || !c.hidden)
             }) {
                 state.focused_column = idx;
-                state.selected_card = 0;
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
             }
         }
         _ => unreachable!(),
@@ -694,6 +781,27 @@ fn handle_card_action<B: ratatui::backend::Backend>(
     was_minor_mode: bool,
 ) -> color_eyre::Result<Option<String>> {
     let mut sync_message = None;
+
+    // Guard: skip card-targeting actions when the selected card is filtered out.
+    // Actions like NewCard, ClosePanel, detail scrolling/navigation don't target a specific card
+    // (detail nav does its own visible_card_indices check internally).
+    let needs_visible_card = !matches!(
+        action,
+        Action::NewCard
+            | Action::ClosePanel
+            | Action::DetailScrollDown
+            | Action::DetailScrollUp
+            | Action::DetailNextCard
+            | Action::DetailPrevCard
+    );
+    if needs_visible_card && state.has_active_filter() {
+        if let Some(col) = board.columns.get(state.focused_column) {
+            let visible = visible_card_indices(col, state);
+            if !visible.contains(&state.selected_card) {
+                return Ok(None);
+            }
+        }
+    }
 
     match action {
         Action::MoveCardPrevColumn => {
@@ -762,7 +870,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     save_board(kando_dir, board)?;
                     sync_message = Some("Edit card".into());
                 }
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
 
                 match editor_result {
                     Ok(status) if status.success() => {
@@ -788,7 +896,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 board.columns[col_idx].sort_cards();
                 save_board(kando_dir, board)?;
                 sync_message = Some("Change priority".into());
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
                 state.notify(priority_str);
             }
         }
@@ -843,7 +951,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 board.columns[col_idx].sort_cards();
                 save_board(kando_dir, board)?;
                 sync_message = Some("Toggle blocker".into());
-                state.clamp_selection(board);
+                state.clamp_selection_filtered(board);
                 state.notify(msg);
             }
         }
@@ -891,16 +999,24 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailNextCard => {
             if let Some(col) = board.columns.get(state.focused_column) {
-                if state.selected_card + 1 < col.cards.len() {
-                    state.selected_card += 1;
-                    state.mode = Mode::CardDetail { scroll: 0 };
+                let visible = visible_card_indices(col, state);
+                if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
+                    if pos + 1 < visible.len() {
+                        state.selected_card = visible[pos + 1];
+                        state.mode = Mode::CardDetail { scroll: 0 };
+                    }
                 }
             }
         }
         Action::DetailPrevCard => {
-            if state.selected_card > 0 {
-                state.selected_card -= 1;
-                state.mode = Mode::CardDetail { scroll: 0 };
+            if let Some(col) = board.columns.get(state.focused_column) {
+                let visible = visible_card_indices(col, state);
+                if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
+                    if pos > 0 {
+                        state.selected_card = visible[pos - 1];
+                        state.mode = Mode::CardDetail { scroll: 0 };
+                    }
+                }
             }
         }
         _ => unreachable!(),
@@ -923,7 +1039,7 @@ fn handle_view_toggle(board: &Board, state: &mut AppState, action: Action) {
                     if col.hidden {
                         if let Some(idx) = board.columns.iter().position(|c| !c.hidden) {
                             state.focused_column = idx;
-                            state.clamp_selection(board);
+                            state.clamp_selection_filtered(board);
                         }
                     }
                 }
@@ -1015,7 +1131,7 @@ fn handle_input(
                 Mode::Command { cmd } => { cmd.buf.insert(c); crate::command::clear_completion(cmd); }
                 _ => {}
             }
-            if is_filter { sync_filter(state); }
+            if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
         }
         Action::InputBackspace => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
@@ -1024,7 +1140,7 @@ fn handle_input(
                 Mode::Command { cmd } => { cmd.buf.backspace(); crate::command::clear_completion(cmd); }
                 _ => {}
             }
-            if is_filter { sync_filter(state); }
+            if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
         }
         Action::InputLeft => {
             match &mut state.mode {
@@ -1061,7 +1177,7 @@ fn handle_input(
                 Mode::Command { cmd } => { cmd.buf.delete_word(); crate::command::clear_completion(cmd); }
                 _ => {}
             }
-            if is_filter { sync_filter(state); }
+            if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
         }
         Action::InputConfirm => {
             sync_message = handle_input_confirm(board, state, kando_dir)?;
@@ -1139,7 +1255,7 @@ fn handle_input_confirm(
             }
             save_board(kando_dir, board)?;
             sync_message = Some("Update tags".into());
-            state.clamp_selection(board);
+            state.clamp_selection_filtered(board);
             state.notify("Tags updated");
         }
         Mode::Input {
@@ -1161,7 +1277,7 @@ fn handle_input_confirm(
             }
             save_board(kando_dir, board)?;
             sync_message = Some("Update assignees".into());
-            state.clamp_selection(board);
+            state.clamp_selection_filtered(board);
             state.notify("Assignees updated");
         }
         Mode::Filter { buf } => {
@@ -1170,6 +1286,7 @@ fn handle_input_confirm(
             } else {
                 state.active_filter = Some(buf.input);
             }
+            state.clamp_selection_filtered(board);
         }
         Mode::Picker { mut items, selected, target, title } => {
             match target {
@@ -1185,6 +1302,7 @@ fn handle_input_confirm(
                     for (tag, active) in items.iter_mut() {
                         *active = state.active_tag_filters.contains(tag);
                     }
+                    state.clamp_selection_filtered(board);
                     state.mode = Mode::Picker { title, items, selected, target: PickerTarget::TagFilter };
                 }
                 PickerTarget::AssigneeFilter => {
@@ -1199,6 +1317,7 @@ fn handle_input_confirm(
                     for (name, active) in items.iter_mut() {
                         *active = state.active_assignee_filters.contains(name);
                     }
+                    state.clamp_selection_filtered(board);
                     state.mode = Mode::Picker { title, items, selected, target: PickerTarget::AssigneeFilter };
                 }
                 PickerTarget::Priority => {
@@ -1213,7 +1332,7 @@ fn handle_input_confirm(
                             board.columns[col_idx].sort_cards();
                             save_board(kando_dir, board)?;
                             sync_message = Some("Change priority".into());
-                            state.clamp_selection(board);
+                            state.clamp_selection_filtered(board);
                             state.notify(priority_str);
                         }
                     }
@@ -1232,7 +1351,7 @@ fn handle_input_confirm(
                             board.move_card(from, card_idx, to);
                             board.columns[to].sort_cards();
                             state.focused_column = to;
-                            state.clamp_selection(board);
+                            state.clamp_selection_filtered(board);
                             save_board(kando_dir, board)?;
                             sync_message = Some("Move card".into());
                             state.notify(format!("Moved to {col_name}"));
@@ -1283,7 +1402,7 @@ fn handle_confirm(
                         board.columns[col_idx].cards.remove(card_idx);
                         save_board(kando_dir, board)?;
                         sync_message = Some("Delete card".into());
-                        state.clamp_selection(board);
+                        state.clamp_selection_filtered(board);
                         if let Some(e) = file_err {
                             state.notify(format!("Deleted (file removal failed: {e})"));
                         } else {
@@ -1299,7 +1418,7 @@ fn handle_confirm(
                     board.move_card(from, ci, to);
                     board.columns[to].sort_cards();
                     state.focused_column = to;
-                    state.clamp_selection(board);
+                    state.clamp_selection_filtered(board);
                     save_board(kando_dir, board)?;
                     sync_message = Some("Move card".into());
                     state.notify("Card moved");

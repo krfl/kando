@@ -3,6 +3,8 @@ pub mod storage;
 pub mod sync;
 
 use chrono::{DateTime, Utc};
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
 
 /// The top-level board containing all columns and cards.
@@ -243,6 +245,82 @@ impl Board {
         assignees.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         assignees
     }
+}
+
+// ---------------------------------------------------------------------------
+// Card filtering
+// ---------------------------------------------------------------------------
+
+/// Check whether a card is visible under the current set of filters.
+///
+/// `active_filter` is the text/fuzzy search (from `/`).
+/// `tag_filters` / `assignee_filters` are the picker-based filters.
+/// Text search takes precedence over picker filters.
+pub fn card_is_visible(
+    card: &Card,
+    active_filter: Option<&str>,
+    tag_filters: &[String],
+    assignee_filters: &[String],
+    matcher: &SkimMatcherV2,
+) -> bool {
+    if let Some(filter) = active_filter {
+        card_matches_filter(card, filter, matcher)
+    } else {
+        let tag_ok =
+            tag_filters.is_empty() || card.tags.iter().any(|t| tag_filters.contains(t));
+        let assignee_ok = assignee_filters.is_empty()
+            || card.assignees.iter().any(|a| assignee_filters.contains(a));
+        tag_ok && assignee_ok
+    }
+}
+
+/// Check whether a card matches a multi-term fuzzy filter.
+///
+/// The filter string is split on whitespace into individual terms.
+/// Each term must fuzzy-match at least one card field (title, any tag,
+/// or any assignee) — OR across fields, AND across terms.
+///
+/// Special prefixes:
+/// - `@` is stripped so `@alice` matches the assignee `alice`
+/// - `!` negates: the card must NOT match that term in any field
+pub fn card_matches_filter(card: &Card, filter: &str, matcher: &SkimMatcherV2) -> bool {
+    let terms: Vec<&str> = filter.split_whitespace().collect();
+    if terms.is_empty() {
+        return true;
+    }
+
+    for term in &terms {
+        let (negated, pattern) = if let Some(rest) = term.strip_prefix('!') {
+            (true, rest)
+        } else {
+            (false, *term)
+        };
+
+        // Strip leading @ for assignee-friendly matching
+        let bare = pattern.trim_start_matches('@');
+        if bare.is_empty() {
+            continue;
+        }
+
+        let matches_any_field = matcher.fuzzy_match(&card.title, bare).is_some()
+            || card
+                .tags
+                .iter()
+                .any(|t| matcher.fuzzy_match(t, bare).is_some())
+            || card
+                .assignees
+                .iter()
+                .any(|a| matcher.fuzzy_match(a, bare).is_some());
+
+        if negated && matches_any_field {
+            return false;
+        }
+        if !negated && !matches_any_field {
+            return false;
+        }
+    }
+
+    true
 }
 
 impl Column {
