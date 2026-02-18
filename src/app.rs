@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::board::age::run_auto_close;
-use crate::board::storage::{find_kando_dir, load_board, save_board, trash_card, restore_card, TrashEntry};
+use crate::board::storage::{find_kando_dir, load_board, load_trash, save_board, trash_card, restore_card, TrashEntry};
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
@@ -585,7 +585,6 @@ fn process_action(
         Action::EnterViewMode => state.mode = Mode::View,
         Action::EnterFilterMode => state.mode = Mode::FilterMenu,
         Action::EnterCommandMode => {
-            use crate::board::storage::load_trash;
             state.cached_trash_ids = load_trash(kando_dir)
                 .into_iter()
                 .map(|e| (e.id, e.title))
@@ -1426,7 +1425,18 @@ fn handle_undo(
     state: &mut AppState,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<Option<String>> {
-    if let Some(entry) = state.last_delete.take() {
+    // Use the in-session last_delete if available; otherwise fall back to the
+    // most recently trashed entry in _meta.toml so undo survives across sessions.
+    let entry = state.last_delete.take().or_else(|| {
+        let mut entries = load_trash(kando_dir);
+        if entries.is_empty() {
+            return None;
+        }
+        // Most recently deleted is last in the list (appended in trash_card)
+        Some(entries.swap_remove(entries.len() - 1))
+    });
+
+    if let Some(entry) = entry {
         let target_col = board.columns.iter().position(|c| c.slug == entry.from_column)
             .unwrap_or(0); // fall back to first column if original was deleted
         let target_slug = board.columns[target_col].slug.clone();
