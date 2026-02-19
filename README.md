@@ -1,8 +1,8 @@
 # Kando
 
-![A screenshot of Kando](screenshot.png)
-
 A keyboard-first Kanban board that runs right in your terminal.
+
+![A screenshot of Kando](screenshot.png)
 
 ## What is Kando?
 
