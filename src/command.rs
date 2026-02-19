@@ -382,6 +382,7 @@ pub fn execute_command(
     // last_delete would be stale anyway.
     if matches!(result, Ok(Some(_))) && cmd != "restore" {
         state.last_delete = None;
+        state.deleted_this_session = false;
     }
 
     result

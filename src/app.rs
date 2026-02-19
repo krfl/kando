@@ -176,6 +176,11 @@ pub struct AppState {
     pub sync_state: Option<SyncState>,
     /// Last deleted card for single-level undo (`u` key).
     pub last_delete: Option<TrashEntry>,
+    /// True if a card was deleted this session and `last_delete` hasn't been
+    /// cleared by a subsequent mutation. Used to gate cross-session undo so
+    /// that `u` doesn't silently restore an unrelated card from a previous
+    /// session when the user simply hasn't deleted anything this session.
+    pub deleted_this_session: bool,
     /// Cached trash entry IDs for `:restore` command palette/completion.
     pub cached_trash_ids: Vec<(String, String)>, // (id, title)
 }
@@ -196,6 +201,7 @@ impl AppState {
             should_quit: false,
             sync_state: None,
             last_delete: None,
+            deleted_this_session: false,
             cached_trash_ids: Vec::new(),
         }
     }
@@ -594,6 +600,7 @@ fn process_action(
 
         // Undo last delete
         Action::Undo => {
+            if was_minor_mode { state.mode = Mode::Normal; }
             sync_message = handle_undo(board, state, kando_dir)?;
         }
 
@@ -826,6 +833,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
     if !matches!(action, Action::DeleteCard | Action::OpenCardDetail | Action::ClosePanel
         | Action::DetailScrollDown | Action::DetailScrollUp | Action::DetailNextCard | Action::DetailPrevCard) {
         state.last_delete = None;
+        state.deleted_this_session = false;
     }
 
     // Guard: skip card-targeting actions when the selected card is filtered out.
@@ -1425,43 +1433,65 @@ fn handle_undo(
     state: &mut AppState,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<Option<String>> {
-    // Use the in-session last_delete if available; otherwise fall back to the
-    // most recently trashed entry in _meta.toml so undo survives across sessions.
-    let entry = state.last_delete.take().or_else(|| {
+    // Use the in-session last_delete if available.
+    // Fall back to the most recently trashed entry in _meta.toml only if a
+    // deletion actually happened this session (deleted_this_session). This
+    // prevents `u` from silently restoring an unrelated card from a previous
+    // session when last_delete was cleared by a subsequent mutation.
+    let entry = if state.last_delete.is_some() {
+        state.last_delete.take()
+    } else if state.deleted_this_session {
+        // last_delete was cleared (e.g. `:restore` used it), fall back to disk.
+        // Sort by the `deleted` ISO-8601 string so we get the most recent entry
+        // regardless of storage order in _meta.toml.
         let mut entries = load_trash(kando_dir);
-        if entries.is_empty() {
-            return None;
-        }
-        // Most recently deleted is last in the list (appended in trash_card)
-        Some(entries.swap_remove(entries.len() - 1))
-    });
-
-    if let Some(entry) = entry {
-        let target_col = board.columns.iter().position(|c| c.slug == entry.from_column)
-            .unwrap_or(0); // fall back to first column if original was deleted
-        let target_slug = board.columns[target_col].slug.clone();
-        let card_id = entry.id.clone();
-        match restore_card(kando_dir, &card_id, &target_slug) {
-            Ok(()) => {
-                *board = load_board(kando_dir)?;
-                if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
-                    state.focused_column = col_idx;
-                    state.selected_card = card_idx;
-                } else {
-                    state.focused_column = target_col;
-                    state.clamp_selection_filtered(board);
-                }
-                state.notify(format!("Restored: {}", entry.title));
-                Ok(Some("Restore card".into()))
-            }
-            Err(e) => {
-                state.notify_error(format!("Restore failed: {e}"));
-                Ok(None)
-            }
-        }
+        entries.sort_unstable_by(|a, b| a.deleted.cmp(&b.deleted));
+        entries.pop()
     } else {
+        None
+    };
+
+    let Some(entry) = entry else {
         state.notify("Nothing to undo");
-        Ok(None)
+        return Ok(None);
+    };
+
+    // Resolve target column — notify if we had to fall back to the first column.
+    let (target_col, used_fallback) = board.columns.iter()
+        .position(|c| c.slug == entry.from_column)
+        .map(|i| (i, false))
+        .unwrap_or((0, true));
+    let target_slug = board.columns[target_col].slug.clone();
+    let card_id = entry.id.clone();
+
+    match restore_card(kando_dir, &card_id, &target_slug) {
+        Ok(()) => {
+            // last_delete was already consumed by .take() above; just clear the session flag.
+            state.deleted_this_session = false;
+            *board = load_board(kando_dir)?;
+            if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
+                state.focused_column = col_idx;
+                state.selected_card = card_idx;
+            } else {
+                state.focused_column = target_col;
+                state.clamp_selection_filtered(board);
+            }
+            if used_fallback {
+                state.notify(format!(
+                    "Restored: {} (original column gone, moved to {})",
+                    entry.title,
+                    board.columns[target_col].name,
+                ));
+            } else {
+                state.notify(format!("Restored: {}", entry.title));
+            }
+            Ok(Some("Restore card".into()))
+        }
+        Err(e) => {
+            // Do NOT clear last_delete — let the user retry
+            state.notify_error(format!("Restore failed: {e}"));
+            Ok(None)
+        }
     }
 }
 
@@ -1496,6 +1526,7 @@ fn handle_confirm(
                                 sync_message = Some("Delete card".into());
                                 state.clamp_selection_filtered(board);
                                 state.last_delete = Some(entry);
+                                state.deleted_this_session = true;
                                 state.notify("Card deleted (u to undo)");
                             }
                             Err(e) => {
