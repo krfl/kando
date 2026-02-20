@@ -45,7 +45,8 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
         crate::app::Mode::CardDetail { scroll } => {
             // Show card detail overlay
             if let Some(card) = state.selected_card_ref(board) {
-                card_detail::render_card_detail(f, f.area(), card, &board.policies, *scroll, now);
+                let icons = theme::icons(state.nerd_font);
+                card_detail::render_card_detail(f, f.area(), card, &board.policies, *scroll, now, icons);
             }
         }
         crate::app::Mode::Tutorial => {

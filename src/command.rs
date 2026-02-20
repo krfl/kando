@@ -1000,6 +1000,7 @@ mod tests {
             policies: Policies::default(),
             sync_branch: None,
             tutorial_shown: true,
+            nerd_font: false,
             columns: vec![
                 Column {
                     slug: "backlog".into(),
@@ -1113,6 +1114,7 @@ mod tests {
             policies: Policies::default(),
             sync_branch: None,
             tutorial_shown: true,
+            nerd_font: false,
             columns: vec![
                 Column {
                     slug: "doing".into(),

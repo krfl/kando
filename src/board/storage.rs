@@ -105,6 +105,7 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
             policies: Policies::default(),
             sync_branch: sync_branch.map(|s| s.to_string()),
             tutorial_shown: false,
+            nerd_font: false,
         },
         columns: default_columns,
     };
@@ -170,6 +171,7 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
         policies: config.board.policies,
         sync_branch: config.board.sync_branch,
         tutorial_shown: config.board.tutorial_shown,
+        nerd_font: config.board.nerd_font,
         columns,
     })
 }
@@ -198,6 +200,7 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
             policies: board.policies.clone(),
             sync_branch: board.sync_branch.clone(),
             tutorial_shown: board.tutorial_shown,
+            nerd_font: board.nerd_font,
         },
         columns: column_configs,
     };
@@ -359,6 +362,9 @@ pub struct BoardSection {
     /// Whether the first-launch tutorial has been shown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tutorial_shown: bool,
+    /// Use Nerd Font glyphs instead of ASCII icons.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nerd_font: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

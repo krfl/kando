@@ -5,7 +5,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::theme::Theme;
+use super::theme::{self, Theme};
 use crate::app::{AppState, Mode, NotificationLevel};
 use crate::board::Board;
 
@@ -111,10 +111,11 @@ fn build_right_zone<'a>(state: &'a AppState, board: &'a Board) -> Vec<Span<'a>> 
     // Sync status
     if let Some(ref sync_state) = state.sync_state {
         spans.push(Span::raw(" "));
+        let icons = theme::icons(state.nerd_font);
         let (sync_icon, sync_color) = if sync_state.online {
-            ("\u{f021}", Theme::WIP_OK) // nf-fa-refresh, green
+            (icons.sync_online, Theme::WIP_OK)
         } else {
-            ("\u{f071}", Theme::WIP_OVER) // nf-fa-warning, red
+            (icons.sync_offline, Theme::WIP_OVER)
         };
         spans.push(Span::styled(sync_icon, Style::default().fg(sync_color)));
     }

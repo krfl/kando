@@ -18,6 +18,10 @@ use board::{Card, Priority};
 #[derive(Parser)]
 #[command(name = "kando", about = "A keyboard-first Kanban TUI")]
 struct Cli {
+    /// Use Nerd Font glyphs instead of ASCII icons
+    #[arg(long, visible_alias = "nf", global = true)]
+    nerd_font: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -133,7 +137,7 @@ fn main() {
             assignee,
             priority,
         }) => cmd_add(&cwd, &title, tags, assignee, priority),
-        Some(Command::List { tag, column }) => cmd_list(&cwd, tag.as_deref(), column.as_deref()),
+        Some(Command::List { tag, column }) => cmd_list(&cwd, tag.as_deref(), column.as_deref(), cli.nerd_font),
         Some(Command::Move { card_id, column }) => cmd_move(&cwd, &card_id, &column),
         Some(Command::Tags) => cmd_tags(&cwd),
         Some(Command::Sync) => cmd_sync(&cwd),
@@ -143,7 +147,7 @@ fn main() {
         Some(Command::SyncStatus) => cmd_sync_status(&cwd),
         Some(Command::Doctor) => cmd_doctor(&cwd),
         Some(Command::Trash { action }) => cmd_trash(&cwd, action),
-        None => cmd_tui(&cwd),
+        None => cmd_tui(&cwd, cli.nerd_font),
     };
 
     if let Err(e) = result {
@@ -325,9 +329,11 @@ fn cmd_add(
     Ok(())
 }
 
-fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>) -> color_eyre::Result<()> {
+fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, nerd_font_flag: bool) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let board = load_board(&kando_dir)?;
+    let nerd_font = nerd_font_flag || board.nerd_font;
+    let icons = ui::theme::icons(nerd_font);
     let now = chrono::Utc::now();
 
     for col in &board.columns {
@@ -362,7 +368,7 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>) -> color_eyre::
             } else {
                 format!(" [{}]", card.tags.join(", "))
             };
-            let priority = card.priority.symbol().unwrap_or("");
+            let priority = icons.priority(card.priority).unwrap_or("");
             let blocked = if card.blocked { " [blocked]" } else { "" };
             println!(
                 "  {} {:>5}  {}{}  {}{}",
@@ -764,9 +770,9 @@ fn cmd_trash(cwd: &Path, action: Option<TrashAction>) -> color_eyre::Result<()> 
     Ok(())
 }
 
-fn cmd_tui(cwd: &Path) -> color_eyre::Result<()> {
+fn cmd_tui(cwd: &Path, nerd_font_flag: bool) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
-    let result = app::run(&mut terminal, cwd);
+    let result = app::run(&mut terminal, cwd, nerd_font_flag);
     ratatui::restore();
     result
 }

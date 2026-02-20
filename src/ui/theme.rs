@@ -2,6 +2,63 @@ use ratatui::style::{Color, Style};
 
 use crate::board::Priority;
 
+/// Icon set for Kando glyphs.
+///
+/// Two variants: ASCII (default) and Nerd Font for terminals with a patched
+/// font. Select with `icons(nerd_font)`.
+pub struct Icons {
+    pub priority_low: &'static str,
+    pub priority_high: &'static str,
+    pub priority_urgent: &'static str,
+    pub stale: &'static str,
+    pub very_stale: &'static str,
+    pub blocker: &'static str,
+    pub chevron: &'static str,
+    pub sync_online: &'static str,
+    pub sync_offline: &'static str,
+}
+
+pub const NERD_ICONS: Icons = Icons {
+    priority_low: "\u{f063}",       // nf-fa-arrow_down
+    priority_high: "\u{f0e7}",      // nf-fa-bolt
+    priority_urgent: "\u{f06d}",    // nf-fa-fire
+    stale: "\u{f017}",              // nf-fa-clock
+    very_stale: "\u{f017}\u{f017}", // double clock
+    blocker: "\u{f05e}",            // nf-fa-ban
+    chevron: "\u{f054}",            // nf-fa-chevron_right
+    sync_online: "\u{f021}",        // nf-fa-refresh
+    sync_offline: "\u{f071}",       // nf-fa-warning
+};
+
+pub const ASCII_ICONS: Icons = Icons {
+    priority_low: "v",
+    priority_high: "!",
+    priority_urgent: "!!",
+    stale: "~",
+    very_stale: "~~",
+    blocker: "X",
+    chevron: ">",
+    sync_online: "*",
+    sync_offline: "!",
+};
+
+/// Return the icon set for the given mode.
+pub fn icons(nerd_font: bool) -> &'static Icons {
+    if nerd_font { &NERD_ICONS } else { &ASCII_ICONS }
+}
+
+impl Icons {
+    /// Priority icon for a given level, or `None` for Normal.
+    pub fn priority(&self, priority: Priority) -> Option<&'static str> {
+        match priority {
+            Priority::Low => Some(self.priority_low),
+            Priority::Normal => None,
+            Priority::High => Some(self.priority_high),
+            Priority::Urgent => Some(self.priority_urgent),
+        }
+    }
+}
+
 /// Color theme for Kando.
 ///
 /// All text and UI chrome uses the terminal's default foreground color (Color::Reset).
@@ -84,5 +141,58 @@ impl Theme {
             Color::LightRed,
         ];
         PALETTE[(hash % PALETTE.len() as u32) as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icons_default_is_ascii() {
+        let i = icons(false);
+        assert_eq!(i.chevron, ">");
+        assert_eq!(i.blocker, "X");
+        assert_eq!(i.priority_urgent, "!!");
+        assert_eq!(i.very_stale, "~~");
+    }
+
+    #[test]
+    fn icons_nerd_font_when_enabled() {
+        let i = icons(true);
+        assert_eq!(i.chevron, "\u{f054}");
+        assert_eq!(i.blocker, "\u{f05e}");
+    }
+
+    #[test]
+    fn priority_returns_none_for_normal() {
+        let ascii = icons(false);
+        assert!(ascii.priority(Priority::Normal).is_none());
+        let nerd = icons(true);
+        assert!(nerd.priority(Priority::Normal).is_none());
+    }
+
+    #[test]
+    fn priority_returns_some_for_non_normal() {
+        let i = icons(false);
+        assert_eq!(i.priority(Priority::Low), Some("v"));
+        assert_eq!(i.priority(Priority::High), Some("!"));
+        assert_eq!(i.priority(Priority::Urgent), Some("!!"));
+    }
+
+    #[test]
+    fn all_icon_fields_are_non_empty() {
+        for nerd_font in [false, true] {
+            let i = icons(nerd_font);
+            assert!(!i.priority_low.is_empty());
+            assert!(!i.priority_high.is_empty());
+            assert!(!i.priority_urgent.is_empty());
+            assert!(!i.stale.is_empty());
+            assert!(!i.very_stale.is_empty());
+            assert!(!i.blocker.is_empty());
+            assert!(!i.chevron.is_empty());
+            assert!(!i.sync_online.is_empty());
+            assert!(!i.sync_offline.is_empty());
+        }
     }
 }

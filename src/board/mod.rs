@@ -15,6 +15,7 @@ pub struct Board {
     pub policies: Policies,
     pub sync_branch: Option<String>,
     pub tutorial_shown: bool,
+    pub nerd_font: bool,
     pub columns: Vec<Column>,
 }
 
@@ -112,14 +113,6 @@ impl Priority {
         }
     }
 
-    pub fn symbol(&self) -> Option<&'static str> {
-        match self {
-            Self::Low => Some("\u{f063}"),      // nf-fa-arrow_down
-            Self::Normal => None,
-            Self::High => Some("\u{f0e7}"),     // nf-fa-bolt
-            Self::Urgent => Some("\u{f06d}"),   // nf-fa-fire
-        }
-    }
 }
 
 impl std::str::FromStr for Priority {

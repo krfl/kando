@@ -4,12 +4,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::theme::Theme;
+use super::theme::{Icons, Theme};
 use crate::board::age::{format_age, staleness, Staleness};
 use crate::board::{Card, Policies};
 use chrono::{DateTime, Utc};
 
-pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: u16, now: DateTime<Utc>) {
+pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: u16, now: DateTime<Utc>, icons: &Icons) {
 
     let panel_area = super::centered_rect(area, 60, 80, 40, 10);
 
@@ -67,7 +67,7 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
     // Priority with glyph
     let priority_spans = {
         let mut spans = vec![Span::styled("Priority: ", Theme::dim_style())];
-        if let Some(sym) = card.priority.symbol() {
+        if let Some(sym) = icons.priority(card.priority) {
             let color = Theme::priority_color(card.priority);
             spans.push(Span::styled(format!("{sym} "), Style::default().fg(color)));
         }
@@ -80,7 +80,7 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
         lines.push(Line::from(vec![
             Span::styled("Status:   ", Theme::dim_style()),
             Span::styled(
-                "\u{f05e} BLOCKED", // nf-fa-ban
+                format!("{} BLOCKED", icons.blocker),
                 Style::default().fg(Theme::BLOCKER),
             ),
         ]));

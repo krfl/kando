@@ -183,6 +183,8 @@ pub struct AppState {
     pub deleted_this_session: bool,
     /// Cached trash entry IDs for `:restore` command palette/completion.
     pub cached_trash_ids: Vec<(String, String)>, // (id, title)
+    /// Use Nerd Font glyphs instead of ASCII icons.
+    pub nerd_font: bool,
 }
 
 impl AppState {
@@ -203,6 +205,7 @@ impl AppState {
             last_delete: None,
             deleted_this_session: false,
             cached_trash_ids: Vec::new(),
+            nerd_font: false,
         }
     }
 
@@ -415,10 +418,13 @@ fn try_move_card(
 }
 
 /// Main TUI application loop.
-pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path) -> color_eyre::Result<()> {
+pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_font_flag: bool) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(start_dir)?;
     let mut board = load_board(&kando_dir)?;
     let mut state = AppState::new();
+
+    // CLI --nerd-font flag overrides config; otherwise use board config value
+    state.nerd_font = nerd_font_flag || board.nerd_font;
 
     // Initialize git sync if configured
     if let Some(ref branch) = board.sync_branch {
@@ -1593,6 +1599,7 @@ mod tests {
             policies: Policies::default(),
             sync_branch: None,
             tutorial_shown: true,
+            nerd_font: false,
             columns: cols,
         }
     }

@@ -210,6 +210,6 @@ This is the card body. Use regular Markdown here.
 ## Requirements
 
 - A terminal with UTF-8 support
-- For best visual results, install a Nerd Font (icons will appear as boxes otherwise)
+- Optional: install a [Nerd Font](https://www.nerdfonts.com/) and run with `--nerd-font` for fancier glyphs
 - Git (optional, for team sync feature)
 - SSH agent running (optional, for git sync over SSH)

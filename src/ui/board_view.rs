@@ -9,7 +9,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use super::theme::Theme;
+use super::theme::{self, Icons, Theme};
 use crate::app::AppState;
 use crate::board::age::{format_age, staleness, Staleness};
 use crate::board::{Board, Card};
@@ -42,6 +42,7 @@ pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, 
         .split(area);
 
     let matcher = SkimMatcherV2::default();
+    let icons = theme::icons(state.nerd_font);
     for (vis_idx, &(col_idx, col)) in visible_columns.iter().enumerate() {
         let is_focused = state.focused_column == col_idx;
         render_column(
@@ -53,6 +54,7 @@ pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, 
             &board.policies,
             now,
             &matcher,
+            icons,
         );
     }
 }
@@ -67,6 +69,7 @@ fn render_column(
     policies: &crate::board::Policies,
     now: chrono::DateTime<Utc>,
     matcher: &SkimMatcherV2,
+    icons: &Icons,
 ) {
     // Text search (/) takes precedence; tag/assignee picker filters apply otherwise
     let cards: Vec<(usize, &Card)> = col
@@ -172,7 +175,7 @@ fn render_column(
         let card_area = Rect::new(inner.x, y, inner.width, card_height);
 
         let is_selected = is_focused && state.selected_card == real_idx;
-        render_card(f, card_area, card, is_selected, policies, now);
+        render_card(f, card_area, card, is_selected, policies, now, icons);
     }
 
     // Scroll indicator
@@ -190,6 +193,7 @@ fn render_card(
     is_selected: bool,
     policies: &crate::board::Policies,
     now: chrono::DateTime<Utc>,
+    icons: &Icons,
 ) {
     if area.width < 4 || area.height < 3 {
         return;
@@ -239,13 +243,13 @@ fn render_card(
     match stale {
         Staleness::Stale => {
             right_glyphs.push(Span::styled(
-                "\u{f017}", // nf-fa-clock
+                icons.stale,
                 Style::default().fg(Theme::BUBBLE_UP_WARN),
             ));
         }
         Staleness::VeryStale => {
             right_glyphs.push(Span::styled(
-                "\u{f017}\u{f017}", // double clock
+                icons.very_stale,
                 Style::default().fg(Theme::BUBBLE_UP_CRITICAL),
             ));
         }
@@ -253,7 +257,7 @@ fn render_card(
     }
 
     // Priority glyph
-    if let Some(sym) = card.priority.symbol() {
+    if let Some(sym) = icons.priority(card.priority) {
         let color = Theme::priority_color(card.priority);
         if !right_glyphs.is_empty() {
             right_glyphs.push(Span::raw(" "));
@@ -267,7 +271,7 @@ fn render_card(
             right_glyphs.push(Span::raw(" "));
         }
         right_glyphs.push(Span::styled(
-            "\u{f05e}", // nf-fa-ban
+            icons.blocker,
             Style::default().fg(Theme::BLOCKER),
         ));
     }
@@ -276,15 +280,17 @@ fn render_card(
     let glyphs_width: usize = right_glyphs.iter().map(|s| s.width()).sum();
 
     // Line 1: [marker] ID  age ... [glyphs on right]
-    let marker = "\u{f054} "; // nf-fa-chevron_right — always present for stable layout
+    let marker = format!("{} ", icons.chevron); // chevron + space — always present for stable layout
     let marker_style = if is_selected {
         Style::default().fg(Theme::FG).add_modifier(selected_mod)
     } else {
         // Invisible: render as spaces matching the marker's display width
         Style::default()
     };
-    let marker_display = if is_selected { marker } else { "  " };
-    let left_width = marker.width() + card.id.width() + 1 + age_str.width();
+    let marker_width = marker.width();
+    let placeholder = " ".repeat(marker_width);
+    let marker_display: &str = if is_selected { &marker } else { &placeholder };
+    let left_width = marker_width + card.id.width() + 1 + age_str.width();
     // Reserve 1 char gap before glyphs so they don't touch the border
     let padding_needed =
         (inner.width as usize).saturating_sub(left_width + glyphs_width + 1);
