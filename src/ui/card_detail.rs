@@ -124,6 +124,17 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
             Theme::dim_style(),
         ),
     ]));
+
+    if let Some(started) = card.started {
+        lines.push(Line::from(vec![
+            Span::styled("Started:  ", Theme::dim_style()),
+            Span::styled(
+                started.format("%Y-%m-%d %H:%M").to_string(),
+                Theme::dim_style(),
+            ),
+        ]));
+    }
+
     lines.push(Line::from(vec![
         Span::styled("Updated:  ", Theme::dim_style()),
         Span::styled(
@@ -131,6 +142,16 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
             Theme::dim_style(),
         ),
     ]));
+
+    if let Some(completed) = card.completed {
+        lines.push(Line::from(vec![
+            Span::styled("Done:     ", Theme::dim_style()),
+            Span::styled(
+                completed.format("%Y-%m-%d %H:%M").to_string(),
+                Theme::dim_style(),
+            ),
+        ]));
+    }
 
     // Body
     if !card.body.is_empty() {

@@ -1,4 +1,5 @@
 pub mod age;
+pub mod metrics;
 pub mod storage;
 pub mod sync;
 
@@ -16,6 +17,8 @@ pub struct Board {
     pub sync_branch: Option<String>,
     pub tutorial_shown: bool,
     pub nerd_font: bool,
+    /// When the board was created. None for legacy boards.
+    pub created_at: Option<DateTime<Utc>>,
     pub columns: Vec<Column>,
 }
 
@@ -72,7 +75,7 @@ pub struct Column {
 }
 
 /// Priority levels for cards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Low,
@@ -150,6 +153,12 @@ pub struct Card {
     pub assignees: Vec<String>,
     #[serde(default)]
     pub blocked: bool,
+    /// When the card first moved past backlog (commitment point). `None` for cards still in backlog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<DateTime<Utc>>,
+    /// When the card was moved to the "done" column. `None` if not yet completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed: Option<DateTime<Utc>>,
     /// The markdown body (not serialized into frontmatter).
     #[serde(skip)]
     pub body: String,
@@ -167,6 +176,8 @@ impl Card {
             tags: Vec::new(),
             assignees: Vec::new(),
             blocked: false,
+            started: None,
+            completed: None,
             body: String::new(),
         }
     }
@@ -207,6 +218,19 @@ impl Board {
         }
         let mut card = self.columns[from_col].cards.remove(card_idx);
         card.touch();
+        // Set started when card first moves past backlog (column 0).
+        // Commitment is a one-time event: never cleared once set.
+        if card.started.is_none() && to_col > 0 {
+            card.started = Some(Utc::now());
+        }
+        // Set or clear completed based on target column
+        if self.columns[to_col].slug == "done" {
+            if card.completed.is_none() {
+                card.completed = Some(Utc::now());
+            }
+        } else {
+            card.completed = None;
+        }
         self.columns[to_col].cards.push(card);
     }
 
@@ -341,4 +365,222 @@ impl Column {
             .is_some_and(|limit| self.cards.len() as u32 >= limit)
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_board_with_done() -> Board {
+        Board {
+            name: "Test".into(),
+            next_card_id: 10,
+            policies: Policies::default(),
+            sync_branch: None,
+            tutorial_shown: true,
+            nerd_font: false,
+            created_at: None,
+            columns: vec![
+                Column {
+                    slug: "backlog".into(),
+                    name: "Backlog".into(),
+                    order: 0,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: vec![Card::new("1".into(), "Card A".into())],
+                },
+                Column {
+                    slug: "done".into(),
+                    name: "Done".into(),
+                    order: 1,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn move_to_done_sets_completed() {
+        let mut board = test_board_with_done();
+        assert!(board.columns[0].cards[0].completed.is_none());
+
+        board.move_card(0, 0, 1);
+        let card = &board.columns[1].cards[0];
+        assert!(card.completed.is_some(), "completed should be set when moving to done");
+    }
+
+    #[test]
+    fn move_away_from_done_clears_completed() {
+        let mut board = test_board_with_done();
+        // First move to done
+        board.move_card(0, 0, 1);
+        assert!(board.columns[1].cards[0].completed.is_some());
+
+        // Move back to backlog
+        board.move_card(1, 0, 0);
+        let card = &board.columns[0].cards[0];
+        assert!(card.completed.is_none(), "completed should be cleared when moving away from done");
+    }
+
+    #[test]
+    fn move_to_done_preserves_existing_completed() {
+        let mut board = test_board_with_done();
+        // Manually set completed to a specific time
+        let original_time = Utc::now() - chrono::TimeDelta::days(5);
+        board.columns[0].cards[0].completed = Some(original_time);
+
+        board.move_card(0, 0, 1);
+        let card = &board.columns[1].cards[0];
+        assert_eq!(
+            card.completed, Some(original_time),
+            "moving to done when already completed should keep original timestamp"
+        );
+    }
+
+    #[test]
+    fn move_between_non_done_columns_leaves_completed_none() {
+        let mut board = Board {
+            name: "Test".into(),
+            next_card_id: 10,
+            policies: Policies::default(),
+            sync_branch: None,
+            tutorial_shown: true,
+            nerd_font: false,
+            created_at: None,
+            columns: vec![
+                Column {
+                    slug: "backlog".into(),
+                    name: "Backlog".into(),
+                    order: 0,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: vec![Card::new("1".into(), "Card A".into())],
+                },
+                Column {
+                    slug: "in-progress".into(),
+                    name: "In Progress".into(),
+                    order: 1,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: Vec::new(),
+                },
+                Column {
+                    slug: "done".into(),
+                    name: "Done".into(),
+                    order: 2,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: Vec::new(),
+                },
+            ],
+        };
+
+        // Move backlog → in-progress (neither is "done")
+        board.move_card(0, 0, 1);
+        let card = &board.columns[1].cards[0];
+        assert!(
+            card.completed.is_none(),
+            "moving between non-done columns should not set completed"
+        );
+    }
+
+    // ── Started (commitment point) tests ──
+
+    fn three_column_board() -> Board {
+        Board {
+            name: "Test".into(),
+            next_card_id: 10,
+            policies: Policies::default(),
+            sync_branch: None,
+            tutorial_shown: true,
+            nerd_font: false,
+            created_at: None,
+            columns: vec![
+                Column {
+                    slug: "backlog".into(),
+                    name: "Backlog".into(),
+                    order: 0,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: vec![Card::new("1".into(), "Card A".into())],
+                },
+                Column {
+                    slug: "in-progress".into(),
+                    name: "In Progress".into(),
+                    order: 1,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: Vec::new(),
+                },
+                Column {
+                    slug: "done".into(),
+                    name: "Done".into(),
+                    order: 2,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn move_past_backlog_sets_started() {
+        let mut board = three_column_board();
+        assert!(board.columns[0].cards[0].started.is_none());
+
+        board.move_card(0, 0, 1); // backlog → in-progress
+        let card = &board.columns[1].cards[0];
+        assert!(card.started.is_some(), "started should be set when moving past backlog");
+    }
+
+    #[test]
+    fn move_within_active_preserves_started() {
+        let mut board = three_column_board();
+        board.move_card(0, 0, 1); // backlog → in-progress
+        let original_started = board.columns[1].cards[0].started;
+
+        // Add a review column and move there
+        board.columns.insert(2, Column {
+            slug: "review".into(),
+            name: "Review".into(),
+            order: 2,
+            wip_limit: None,
+            hidden: false,
+            cards: Vec::new(),
+        });
+        board.move_card(1, 0, 2); // in-progress → review
+        let card = &board.columns[2].cards[0];
+        assert_eq!(card.started, original_started, "started should be preserved when moving within active columns");
+    }
+
+    #[test]
+    fn move_back_to_backlog_preserves_started() {
+        let mut board = three_column_board();
+        board.move_card(0, 0, 1); // backlog → in-progress
+        assert!(board.columns[1].cards[0].started.is_some());
+
+        board.move_card(1, 0, 0); // in-progress → backlog
+        let card = &board.columns[0].cards[0];
+        assert!(card.started.is_some(), "started should NOT be cleared when moving back to backlog");
+    }
+
+    #[test]
+    fn move_to_done_sets_started_if_none() {
+        let mut board = test_board_with_done();
+        assert!(board.columns[0].cards[0].started.is_none());
+
+        board.move_card(0, 0, 1); // backlog → done
+        let card = &board.columns[1].cards[0];
+        assert!(card.started.is_some(), "started should be set when moving from backlog to done");
+        assert!(card.completed.is_some(), "completed should also be set");
+    }
+
+    #[test]
+    fn card_in_backlog_has_no_started() {
+        let card = Card::new("1".into(), "Test".into());
+        assert!(card.started.is_none());
+    }
 }

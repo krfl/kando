@@ -2,6 +2,7 @@ pub mod board_view;
 pub mod card_detail;
 pub mod help;
 pub mod input_modal;
+pub mod metrics;
 pub mod status_bar;
 pub mod theme;
 pub mod tutorial;
@@ -54,6 +55,9 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
         }
         crate::app::Mode::Help => {
             help::render_help(f, f.area());
+        }
+        crate::app::Mode::Metrics { scroll } => {
+            metrics::render_metrics(f, f.area(), board, *scroll, now);
         }
         crate::app::Mode::Command { cmd } => {
             let (card_tags, card_assignees) = state.selected_card_metadata(board);

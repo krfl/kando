@@ -21,6 +21,12 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
             KeyCode::Esc | KeyCode::Char('q') => Action::Quit,
             _ => Action::None,
         },
+        Mode::Metrics { .. } => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::ClosePanel,
+            KeyCode::Char('J') | KeyCode::Down => Action::DetailScrollDown,
+            KeyCode::Char('K') | KeyCode::Up => Action::DetailScrollUp,
+            _ => Action::None,
+        },
         Mode::CardDetail { .. } => match key.code {
             KeyCode::Esc => Action::ClosePanel,
             KeyCode::Char('q') => Action::ClosePanel,
@@ -84,6 +90,7 @@ fn map_space(key: KeyEvent) -> Action {
         KeyCode::Char('p') => Action::PickPriority,
         KeyCode::Char('m') => Action::MoveToColumn,
         KeyCode::Char('b') => Action::ToggleBlocker,
+        KeyCode::Char('s') => Action::ShowMetrics,
         KeyCode::Char('u') => Action::Undo,
         KeyCode::Char('/') => Action::StartFilter,
         KeyCode::Char('?') => Action::ShowHelp,
@@ -210,6 +217,7 @@ pub const SPACE_BINDINGS: &[Binding] = &[
     Binding { key: "p", description: "Set priority", tutorial: true },
     Binding { key: "m", description: "Move to column", tutorial: true },
     Binding { key: "b", description: "Toggle blocker", tutorial: false },
+    Binding { key: "s", description: "Board metrics", tutorial: true },
     Binding { key: "u", description: "Undo last delete", tutorial: false },
     Binding { key: "r", description: "Reload board", tutorial: false },
     Binding { key: "/", description: "Search all", tutorial: false },
@@ -277,5 +285,51 @@ pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
         Mode::View => VIEW_BINDINGS,
         Mode::FilterMenu => FILTER_BINDINGS,
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn space_s_maps_to_show_metrics() {
+        let action = map_key(key(KeyCode::Char('s')), &Mode::Space);
+        assert_eq!(action, Action::ShowMetrics);
+    }
+
+    #[test]
+    fn metrics_mode_esc_closes() {
+        let action = map_key(key(KeyCode::Esc), &Mode::Metrics { scroll: 5 });
+        assert_eq!(action, Action::ClosePanel);
+    }
+
+    #[test]
+    fn metrics_mode_q_closes() {
+        let action = map_key(key(KeyCode::Char('q')), &Mode::Metrics { scroll: 0 });
+        assert_eq!(action, Action::ClosePanel);
+    }
+
+    #[test]
+    fn metrics_mode_shift_j_scrolls_down() {
+        let action = map_key(key(KeyCode::Char('J')), &Mode::Metrics { scroll: 0 });
+        assert_eq!(action, Action::DetailScrollDown);
+    }
+
+    #[test]
+    fn metrics_mode_shift_k_scrolls_up() {
+        let action = map_key(key(KeyCode::Char('K')), &Mode::Metrics { scroll: 3 });
+        assert_eq!(action, Action::DetailScrollUp);
+    }
+
+    #[test]
+    fn metrics_mode_other_key_is_noop() {
+        let action = map_key(key(KeyCode::Char('x')), &Mode::Metrics { scroll: 0 });
+        assert_eq!(action, Action::None);
     }
 }

@@ -124,6 +124,9 @@ pub enum Mode {
     CardDetail {
         scroll: u16,
     },
+    Metrics {
+        scroll: u16,
+    },
     Tutorial,
     Help,
 }
@@ -618,6 +621,7 @@ fn process_action(
             state.notify("Board reloaded");
         }
         Action::ShowHelp => state.mode = Mode::Help,
+        Action::ShowMetrics => state.mode = Mode::Metrics { scroll: 0 },
         Action::DismissTutorial => {
             state.mode = Mode::Normal;
             board.tutorial_shown = true;
@@ -1048,13 +1052,19 @@ fn handle_card_action<B: ratatui::backend::Backend>(
             state.mode = Mode::Normal;
         }
         Action::DetailScrollDown => {
-            if let Mode::CardDetail { scroll } = &mut state.mode {
-                *scroll = scroll.saturating_add(1);
+            match &mut state.mode {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } => {
+                    *scroll = scroll.saturating_add(1);
+                }
+                _ => {}
             }
         }
         Action::DetailScrollUp => {
-            if let Mode::CardDetail { scroll } = &mut state.mode {
-                *scroll = scroll.saturating_sub(1);
+            match &mut state.mode {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } => {
+                    *scroll = scroll.saturating_sub(1);
+                }
+                _ => {}
             }
         }
         Action::DetailNextCard => {
@@ -1600,6 +1610,7 @@ mod tests {
             sync_branch: None,
             tutorial_shown: true,
             nerd_font: false,
+            created_at: None,
             columns: cols,
         }
     }
@@ -2403,5 +2414,64 @@ mod tests {
         state.selected_card = 0;
         crate::command::execute_command(&mut board, &mut state, "move done", &kando_dir).unwrap();
         assert!(state.last_delete.is_none());
+    }
+
+    #[test]
+    fn test_metrics_scroll() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Metrics { scroll: 0 };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+
+        // Scroll down
+        handle_card_action(&mut board, &mut state, Action::DetailScrollDown, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Metrics { scroll } = state.mode { assert_eq!(scroll, 1); } else { panic!("expected Mode::Metrics"); }
+
+        // Scroll up
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Metrics { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Metrics"); }
+
+        // Scroll up at 0 stays at 0 (saturating)
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Metrics { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Metrics"); }
+    }
+
+    #[test]
+    fn test_close_metrics_panel() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Metrics { scroll: 3 };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::ClosePanel, &mut terminal, kando_dir, false).unwrap();
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn test_move_card_sets_completed_integration() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test card".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+
+        // The board has columns: backlog(0), in-progress(1), done(2), archive(3)
+        // Move card from backlog to done
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        board.move_card(0, 0, done_idx);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+
+        // Reload and verify completed is set
+        let reloaded = crate::board::storage::load_board(&kando_dir).unwrap();
+        let done_cards = &reloaded.columns[done_idx].cards;
+        assert_eq!(done_cards.len(), 1);
+        assert!(done_cards[0].completed.is_some(), "card moved to done should have completed timestamp");
+
+        // Compute metrics — should find 1 completed card
+        let metrics = crate::board::metrics::compute_metrics(&reloaded, None);
+        assert_eq!(metrics.total_completed, 1);
+        assert!(metrics.time_stats.is_some());
     }
 }

@@ -50,6 +50,7 @@ pub enum Action {
     // Board
     ReloadBoard,
     ShowHelp,
+    ShowMetrics,
     DismissTutorial,
     Quit,
 

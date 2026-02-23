@@ -25,6 +25,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo { name: "col",      description: "Column visibility" },
     CommandInfo { name: "count",    description: "Card counts" },
     CommandInfo { name: "find",     description: "Find card" },
+    CommandInfo { name: "metrics",  description: "Board metrics" },
     CommandInfo { name: "move",     description: "Move card to column" },
     CommandInfo { name: "priority", description: "Set priority" },
     CommandInfo { name: "quit",     description: "Quit" },
@@ -40,7 +41,7 @@ pub const COMMANDS: &[CommandInfo] = &[
 
 /// All recognized command names (for completion), derived from COMMANDS.
 const COMMAND_NAMES: &[&str] = &[
-    "assign", "col", "count", "find", "move", "priority",
+    "assign", "col", "count", "find", "metrics", "move", "priority",
     "quit", "reload", "rename", "restore", "sort", "tag", "unassign", "untag", "wip",
 ];
 
@@ -368,6 +369,7 @@ pub fn execute_command(
         "col" => cmd_col(board, state, rest, kando_dir),
         "restore" => cmd_restore(board, state, rest, kando_dir),
         "reload" => cmd_reload(board, state, kando_dir),
+        "metrics" => { state.mode = crate::app::Mode::Metrics { scroll: 0 }; Ok(None) }
         "count" => cmd_count(board, state),
         _ => {
             state.notify_error(format!("Unknown command: {cmd}"));
@@ -1001,6 +1003,7 @@ mod tests {
             sync_branch: None,
             tutorial_shown: true,
             nerd_font: false,
+            created_at: None,
             columns: vec![
                 Column {
                     slug: "backlog".into(),
@@ -1115,6 +1118,7 @@ mod tests {
             sync_branch: None,
             tutorial_shown: true,
             nerd_font: false,
+            created_at: None,
             columns: vec![
                 Column {
                     slug: "doing".into(),

@@ -80,6 +80,15 @@ enum Command {
     SyncStatus,
     /// Check board setup and diagnose common issues
     Doctor,
+    /// Show board metrics (throughput, cycle time, WIP)
+    Metrics {
+        /// Lookback window in weeks (default: full board lifetime)
+        #[arg(short, long)]
+        weeks: Option<u32>,
+        /// Output in CSV format for piping to other tools
+        #[arg(long)]
+        csv: bool,
+    },
     /// Manage trashed (soft-deleted) cards
     Trash {
         #[command(subcommand)]
@@ -146,6 +155,7 @@ fn main() {
         },
         Some(Command::SyncStatus) => cmd_sync_status(&cwd),
         Some(Command::Doctor) => cmd_doctor(&cwd),
+        Some(Command::Metrics { weeks, csv }) => cmd_metrics(&cwd, weeks, csv),
         Some(Command::Trash { action }) => cmd_trash(&cwd, action),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
@@ -767,6 +777,19 @@ fn cmd_trash(cwd: &Path, action: Option<TrashAction>) -> color_eyre::Result<()> 
         }
     }
 
+    Ok(())
+}
+
+fn cmd_metrics(cwd: &Path, weeks: Option<u32>, csv: bool) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let board = load_board(&kando_dir)?;
+    let since = weeks.map(|w| chrono::Utc::now() - chrono::TimeDelta::weeks(w as i64));
+    let metrics = board::metrics::compute_metrics(&board, since);
+    if csv {
+        print!("{}", board::metrics::format_csv(&metrics));
+    } else {
+        print!("{}", board::metrics::format_text(&metrics));
+    }
     Ok(())
 }
 

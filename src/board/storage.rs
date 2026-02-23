@@ -106,6 +106,7 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
             sync_branch: sync_branch.map(|s| s.to_string()),
             tutorial_shown: false,
             nerd_font: false,
+            created_at: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         },
         columns: default_columns,
     };
@@ -165,6 +166,12 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
 
     columns.sort_by_key(|c| c.order);
 
+    let created_at = config
+        .board
+        .created_at
+        .as_deref()
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+
     Ok(Board {
         name: config.board.name,
         next_card_id: config.board.next_card_id,
@@ -172,6 +179,7 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
         sync_branch: config.board.sync_branch,
         tutorial_shown: config.board.tutorial_shown,
         nerd_font: config.board.nerd_font,
+        created_at,
         columns,
     })
 }
@@ -201,6 +209,7 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
             sync_branch: board.sync_branch.clone(),
             tutorial_shown: board.tutorial_shown,
             nerd_font: board.nerd_font,
+            created_at: board.created_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         },
         columns: column_configs,
     };
@@ -313,6 +322,18 @@ fn serialize_card(card: &Card) -> String {
     if card.blocked {
         fm.push_str("blocked = true\n");
     }
+    if let Some(started) = card.started {
+        fm.push_str(&format!(
+            "started = \"{}\"\n",
+            started.format("%Y-%m-%dT%H:%M:%SZ")
+        ));
+    }
+    if let Some(completed) = card.completed {
+        fm.push_str(&format!(
+            "completed = \"{}\"\n",
+            completed.format("%Y-%m-%dT%H:%M:%SZ")
+        ));
+    }
 
     let mut out = String::new();
     out.push_str("---\n");
@@ -365,6 +386,9 @@ pub struct BoardSection {
     /// Use Nerd Font glyphs instead of ASCII icons.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nerd_font: bool,
+    /// When the board was created (ISO-8601 string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -839,6 +863,111 @@ mod tests {
         // Restore should fail because the .md file is missing
         let result = restore_card(&kando_dir, "orphan", "backlog");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_board_created_at_set_on_init() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.created_at.is_some(), "init_board should set created_at");
+        // Should be recent (within last 5 seconds)
+        let age = (Utc::now() - board.created_at.unwrap()).num_seconds();
+        assert!(age < 5, "created_at should be recent, but was {age}s ago");
+    }
+
+    #[test]
+    fn test_board_created_at_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let board = load_board(&kando_dir).unwrap();
+        let original_created_at = board.created_at.unwrap();
+
+        // Save and reload — created_at should be preserved
+        save_board(&kando_dir, &board).unwrap();
+        let reloaded = load_board(&kando_dir).unwrap();
+        assert!(reloaded.created_at.is_some());
+        let delta = (reloaded.created_at.unwrap() - original_created_at).num_seconds().abs();
+        assert!(delta <= 1, "created_at should roundtrip within 1 second, delta was {delta}s");
+    }
+
+    #[test]
+    fn test_board_created_at_none_for_legacy_config() {
+        // Simulate a legacy config.toml without created_at
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Read config, remove created_at, write back
+        let config_path = kando_dir.join("config.toml");
+        let config_str = fs::read_to_string(&config_path).unwrap();
+        let cleaned: String = config_str.lines()
+            .filter(|line| !line.starts_with("created_at"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&config_path, cleaned).unwrap();
+
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.created_at.is_none(), "legacy board without created_at should load as None");
+    }
+
+    #[test]
+    fn test_card_completed_roundtrip() {
+        let mut card = Card::new("100".into(), "Completed card".into());
+        let completed_time = Utc::now();
+        card.completed = Some(completed_time);
+
+        let serialized = serialize_card(&card);
+        assert!(serialized.contains("completed = \""));
+
+        let (fm, _body) = parse_frontmatter(&serialized).unwrap();
+        let deserialized: Card = toml::from_str(&fm).unwrap();
+        assert!(deserialized.completed.is_some());
+        // Timestamps lose sub-second precision through serialization
+        let delta = (deserialized.completed.unwrap() - completed_time).num_seconds().abs();
+        assert!(delta <= 1, "completed timestamp should roundtrip within 1 second");
+    }
+
+    #[test]
+    fn test_card_without_completed_deserializes_as_none() {
+        let card = Card::new("101".into(), "Pending card".into());
+        let serialized = serialize_card(&card);
+        assert!(!serialized.contains("completed"));
+
+        let (fm, _body) = parse_frontmatter(&serialized).unwrap();
+        let deserialized: Card = toml::from_str(&fm).unwrap();
+        assert!(deserialized.completed.is_none());
+    }
+
+    #[test]
+    fn test_card_started_roundtrip() {
+        let mut card = Card::new("102".into(), "Started card".into());
+        let started_time = Utc::now();
+        card.started = Some(started_time);
+
+        let serialized = serialize_card(&card);
+        assert!(serialized.contains("started = \""));
+
+        let (fm, _body) = parse_frontmatter(&serialized).unwrap();
+        let deserialized: Card = toml::from_str(&fm).unwrap();
+        assert!(deserialized.started.is_some());
+        let delta = (deserialized.started.unwrap() - started_time).num_seconds().abs();
+        assert!(delta <= 1, "started timestamp should roundtrip within 1 second");
+    }
+
+    #[test]
+    fn test_card_without_started_deserializes_as_none() {
+        let card = Card::new("103".into(), "New card".into());
+        let serialized = serialize_card(&card);
+        assert!(!serialized.contains("started"));
+
+        let (fm, _body) = parse_frontmatter(&serialized).unwrap();
+        let deserialized: Card = toml::from_str(&fm).unwrap();
+        assert!(deserialized.started.is_none());
     }
 
     #[test]
