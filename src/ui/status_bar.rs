@@ -6,7 +6,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use super::theme::{self, Theme};
-use crate::app::{AppState, Mode, NotificationLevel};
+use crate::app::{AppState, Mode, NotificationLevel, TextBuffer};
 use crate::board::Board;
 
 pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board: &Board) {
@@ -156,33 +156,58 @@ fn build_center_zone<'a>(state: &'a AppState, avail_width: usize) -> Vec<Span<'a
     }
 }
 
+/// Build spans for text input with a visible block cursor at `buf.cursor`.
+///
+/// Produces: leading space + text before cursor | reversed char at cursor | text after cursor.
+/// When the cursor is at the end, a reversed space serves as the block cursor.
+fn cursor_spans(buf: &TextBuffer) -> Vec<Span<'_>> {
+    let char_count = buf.input.chars().count();
+    let before: String = buf.input.chars().take(buf.cursor).collect();
+    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+
+    if buf.cursor >= char_count {
+        // Cursor at end — show reversed space as block cursor
+        vec![
+            Span::raw(format!(" {}", before)),
+            Span::styled(" ", cursor_style),
+        ]
+    } else {
+        // Cursor in middle — reverse the char under cursor
+        let cursor_char: String = buf.input.chars().nth(buf.cursor).unwrap().to_string();
+        let after: String = buf.input.chars().skip(buf.cursor + 1).collect();
+        vec![
+            Span::raw(format!(" {}", before)),
+            Span::styled(cursor_char, cursor_style),
+            Span::raw(after),
+        ]
+    }
+}
+
 /// Render full-line modes (Filter, Input, Confirm, Command).
 fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<'a>> {
     match &state.mode {
         Mode::Filter { buf } => {
-            let spans = vec![
+            let mut spans = vec![
                 Span::styled(
                     " / ",
                     Style::default()
                         .fg(Theme::FG)
                         .add_modifier(Modifier::BOLD | Modifier::REVERSED),
                 ),
-                Span::raw(format!(" {}", buf.input)),
-                Span::raw("_"),
             ];
+            spans.extend(cursor_spans(buf));
             Some(Line::from(spans))
         }
         Mode::Input { prompt, buf, .. } => {
-            let spans = vec![
+            let mut spans = vec![
                 Span::styled(
                     format!(" {prompt} "),
                     Style::default()
                         .fg(Theme::FG)
                         .add_modifier(Modifier::BOLD | Modifier::REVERSED),
                 ),
-                Span::raw(format!(" {}", buf.input)),
-                Span::raw("_"),
             ];
+            spans.extend(cursor_spans(buf));
             Some(Line::from(spans))
         }
         Mode::Confirm { prompt, .. } => {
@@ -203,9 +228,8 @@ fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<
                         .fg(Theme::FG)
                         .add_modifier(Modifier::BOLD | Modifier::REVERSED),
                 ),
-                Span::raw(format!(" {}", cmd.buf.input)),
-                Span::raw("_"),
             ];
+            spans.extend(cursor_spans(&cmd.buf));
             // Ghost completion text (dimmed, after cursor) — only when NOT actively cycling
             if cmd.completion.is_none() {
                 if let Some(ghost) = crate::command::compute_ghost(&cmd.buf.input, board, &card_tags, &card_assignees, &state.cached_trash_ids) {
@@ -215,5 +239,56 @@ fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<
             Some(Line::from(spans))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buf(input: &str, cursor: usize) -> TextBuffer {
+        TextBuffer { input: input.to_string(), cursor }
+    }
+
+    #[test]
+    fn cursor_at_end_shows_reversed_space() {
+        let b = buf("hello", 5);
+        let spans = cursor_spans(&b);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), " hello");
+        assert_eq!(spans[1].content.as_ref(), " ");
+        assert!(spans[1].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn cursor_in_middle_reverses_char() {
+        let b = buf("hello", 2);
+        let spans = cursor_spans(&b);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), " he");
+        assert_eq!(spans[1].content.as_ref(), "l");
+        assert!(spans[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(spans[2].content.as_ref(), "lo");
+    }
+
+    #[test]
+    fn cursor_at_start_reverses_first_char() {
+        let b = buf("hello", 0);
+        let spans = cursor_spans(&b);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), " ");
+        assert_eq!(spans[1].content.as_ref(), "h");
+        assert!(spans[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(spans[2].content.as_ref(), "ello");
+    }
+
+    #[test]
+    fn empty_input_shows_reversed_space() {
+        let b = buf("", 0);
+        let spans = cursor_spans(&b);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), " ");
+        assert_eq!(spans[1].content.as_ref(), " ");
+        assert!(spans[1].style.add_modifier.contains(Modifier::REVERSED));
     }
 }
