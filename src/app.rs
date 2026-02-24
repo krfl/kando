@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::board::age::run_auto_close;
-use crate::board::storage::{find_kando_dir, load_board, load_local_config, load_trash, save_board, trash_card, restore_card, TrashEntry};
+use crate::board::storage::{append_activity, find_kando_dir, load_board, load_local_config, load_trash, save_board, trash_card, restore_card, TrashEntry};
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
@@ -351,13 +351,27 @@ fn handle_auto_close(
     let closed = run_auto_close(board, Utc::now());
     if !closed.is_empty() {
         save_board(kando_dir, board)?;
+        let target_name = board.columns.iter()
+            .find(|c| c.slug == board.policies.auto_close_target)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| board.policies.auto_close_target.clone());
+        for card in &closed {
+            let from_name = board.columns.iter()
+                .find(|c| c.slug == card.from_col_slug)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| card.from_col_slug.clone());
+            append_activity(kando_dir, "auto-close", &card.id, &card.title,
+                &[("from", &from_name), ("to", &target_name)]);
+        }
+        let n = closed.len();
+        let sync_msg = format!("Auto-close {} stale card{}", n, if n == 1 { "" } else { "s" });
         if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, kando_dir, "Auto-close stale cards");
+            sync::commit_and_push(sync_state, kando_dir, &sync_msg);
         }
         messages.push(format!(
             "{} card{} auto-closed",
-            closed.len(),
-            if closed.len() == 1 { "" } else { "s" }
+            n,
+            if n == 1 { "" } else { "s" }
         ));
     }
 
@@ -414,13 +428,19 @@ fn try_move_card(
         return Ok(None);
     }
 
+    let card_id = board.columns[from].cards[card_idx].id.clone();
+    let card_title = board.columns[from].cards[card_idx].title.clone();
+    let from_name = board.columns[from].name.clone();
+    let to_name = board.columns[to].name.clone();
     board.move_card(from, card_idx, to);
     board.columns[to].sort_cards();
     state.focused_column = to;
     state.clamp_selection_filtered(board);
     save_board(kando_dir, board)?;
+    append_activity(kando_dir, "move", &card_id, &card_title,
+        &[("from", &from_name), ("to", &to_name)]);
     state.notify("Card moved");
-    Ok(Some("Move card".into()))
+    Ok(Some(format!("Move card #{card_id} \"{card_title}\" from {from_name} to {to_name}")))
 }
 
 /// Main TUI application loop.
@@ -938,10 +958,14 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 // Always reload — the user may have saved before the editor exited
                 *board = load_board(kando_dir)?;
                 if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
+                    let card_title = board.columns[col_idx].cards[card_idx].title.clone();
+                    let col_name = board.columns[col_idx].name.clone();
                     board.columns[col_idx].cards[card_idx].touch();
                     board.columns[col_idx].sort_cards();
                     save_board(kando_dir, board)?;
-                    sync_message = Some("Edit card".into());
+                    append_activity(kando_dir, "edit", &card_id, &card_title,
+                        &[("column", &col_name)]);
+                    sync_message = Some(format!("Edit card #{card_id} \"{card_title}\""));
                 }
                 state.clamp_selection_filtered(board);
 
@@ -963,12 +987,18 @@ fn handle_card_action<B: ratatui::backend::Backend>(
             let col_idx = state.focused_column;
             let card_idx = state.selected_card;
             if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                let card_id = card.id.clone();
+                let card_title = card.title.clone();
                 card.priority = card.priority.next();
                 card.touch();
-                let priority_str = format!("Priority: {}", card.priority);
+                let new_priority = card.priority.as_str().to_string();
+                let priority_str = format!("Priority: {new_priority}");
                 board.columns[col_idx].sort_cards();
+                let col_name = board.columns[col_idx].name.clone();
                 save_board(kando_dir, board)?;
-                sync_message = Some("Change priority".into());
+                append_activity(kando_dir, "priority", &card_id, &card_title,
+                    &[("column", &col_name), ("priority", &new_priority)]);
+                sync_message = Some(format!("Update priority of #{card_id} \"{card_title}\" to {new_priority}"));
                 state.clamp_selection_filtered(board);
                 state.notify(priority_str);
             }
@@ -1018,12 +1048,20 @@ fn handle_card_action<B: ratatui::backend::Backend>(
             let col_idx = state.focused_column;
             let card_idx = state.selected_card;
             if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                let card_id = card.id.clone();
+                let card_title = card.title.clone();
                 card.blocked = !card.blocked;
                 card.touch();
-                let msg = if card.blocked { "Card blocked" } else { "Blocker removed" };
+                let blocked = card.blocked;
+                let msg = if blocked { "Card blocked" } else { "Blocker removed" };
                 board.columns[col_idx].sort_cards();
+                let col_name = board.columns[col_idx].name.clone();
                 save_board(kando_dir, board)?;
-                sync_message = Some("Toggle blocker".into());
+                let blocked_str = if blocked { "true" } else { "false" };
+                let action_str = if blocked { "Block" } else { "Unblock" };
+                append_activity(kando_dir, "blocker", &card_id, &card_title,
+                    &[("column", &col_name), ("blocked", blocked_str)]);
+                sync_message = Some(format!("{action_str} #{card_id} \"{card_title}\""));
                 state.clamp_selection_filtered(board);
                 state.notify(msg);
             }
@@ -1306,13 +1344,18 @@ fn handle_input_confirm(
             let title = buf.input.trim().to_string();
             if !title.is_empty() {
                 let id = board.next_card_id();
-                let card = Card::new(id, title);
+                let col_name = board.columns.get(state.focused_column)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                let card = Card::new(id.clone(), title.clone());
                 if let Some(col) = board.columns.get_mut(state.focused_column) {
                     col.cards.push(card);
                     col.sort_cards();
                 }
                 save_board(kando_dir, board)?;
-                sync_message = Some("Create card".into());
+                append_activity(kando_dir, "create", &id, &title,
+                    &[("column", &col_name)]);
+                sync_message = Some(format!("Create card #{id} \"{title}\" in {col_name}"));
                 state.notify("Card created");
             }
         }
@@ -1326,6 +1369,12 @@ fn handle_input_confirm(
                 .map(|t| t.trim().to_lowercase())
                 .filter(|t| !t.is_empty())
                 .collect();
+            let (card_id, card_title, col_name) = board.columns
+                .get(state.focused_column)
+                .and_then(|col| col.cards.get(state.selected_card).map(|card| {
+                    (card.id.clone(), card.title.clone(), col.name.clone())
+                }))
+                .unwrap_or_default();
             if let Some(col) = board.columns.get_mut(state.focused_column) {
                 if let Some(card) = col.cards.get_mut(state.selected_card) {
                     card.tags = tags;
@@ -1334,7 +1383,9 @@ fn handle_input_confirm(
                 col.sort_cards();
             }
             save_board(kando_dir, board)?;
-            sync_message = Some("Update tags".into());
+            append_activity(kando_dir, "tags", &card_id, &card_title,
+                &[("column", &col_name)]);
+            sync_message = Some(format!("Update tags on #{card_id} \"{card_title}\""));
             state.clamp_selection_filtered(board);
             state.notify("Tags updated");
         }
@@ -1348,6 +1399,12 @@ fn handle_input_confirm(
                 .map(|a| a.trim().to_lowercase())
                 .filter(|a| !a.is_empty())
                 .collect();
+            let (card_id, card_title, col_name) = board.columns
+                .get(state.focused_column)
+                .and_then(|col| col.cards.get(state.selected_card).map(|card| {
+                    (card.id.clone(), card.title.clone(), col.name.clone())
+                }))
+                .unwrap_or_default();
             if let Some(col) = board.columns.get_mut(state.focused_column) {
                 if let Some(card) = col.cards.get_mut(state.selected_card) {
                     card.assignees = assignees;
@@ -1356,7 +1413,9 @@ fn handle_input_confirm(
                 col.sort_cards();
             }
             save_board(kando_dir, board)?;
-            sync_message = Some("Update assignees".into());
+            append_activity(kando_dir, "assignees", &card_id, &card_title,
+                &[("column", &col_name)]);
+            sync_message = Some(format!("Update assignees on #{card_id} \"{card_title}\""));
             state.clamp_selection_filtered(board);
             state.notify("Assignees updated");
         }
@@ -1406,12 +1465,18 @@ fn handle_input_confirm(
                         let col_idx = state.focused_column;
                         let card_idx = state.selected_card;
                         if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                            let card_id = card.id.clone();
+                            let card_title = card.title.clone();
                             card.priority = *priority;
                             card.touch();
-                            let priority_str = format!("Priority: {}", card.priority);
+                            let new_priority = card.priority.as_str().to_string();
+                            let priority_str = format!("Priority: {new_priority}");
                             board.columns[col_idx].sort_cards();
+                            let col_name = board.columns[col_idx].name.clone();
                             save_board(kando_dir, board)?;
-                            sync_message = Some("Change priority".into());
+                            append_activity(kando_dir, "priority", &card_id, &card_title,
+                                &[("column", &col_name), ("priority", &new_priority)]);
+                            sync_message = Some(format!("Update priority of #{card_id} \"{card_title}\" to {new_priority}"));
                             state.clamp_selection_filtered(board);
                             state.notify(priority_str);
                         }
@@ -1428,12 +1493,20 @@ fn handle_input_confirm(
                             let card_idx = state.selected_card.min(
                                 board.columns[from].cards.len().saturating_sub(1)
                             );
+                            let card_id = board.columns[from].cards.get(card_idx)
+                                .map(|c| c.id.clone()).unwrap_or_default();
+                            let card_title = board.columns[from].cards.get(card_idx)
+                                .map(|c| c.title.clone()).unwrap_or_default();
+                            let from_name = board.columns[from].name.clone();
+                            let to_name = col_name.clone();
                             board.move_card(from, card_idx, to);
                             board.columns[to].sort_cards();
                             state.focused_column = to;
                             state.clamp_selection_filtered(board);
                             save_board(kando_dir, board)?;
-                            sync_message = Some("Move card".into());
+                            append_activity(kando_dir, "move", &card_id, &card_title,
+                                &[("from", &from_name), ("to", &to_name)]);
+                            sync_message = Some(format!("Move card #{card_id} \"{card_title}\" from {from_name} to {to_name}"));
                             state.notify(format!("Moved to {col_name}"));
                         }
                     }
@@ -1494,6 +1567,9 @@ fn handle_undo(
             // last_delete was already consumed by .take() above; just clear the session flag.
             state.deleted_this_session = false;
             *board = load_board(kando_dir)?;
+            let target_col_name = board.columns[target_col].name.clone();
+            append_activity(kando_dir, "restore", &entry.id, &entry.title,
+                &[("column", &target_col_name)]);
             if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
                 state.focused_column = col_idx;
                 state.selected_card = card_idx;
@@ -1505,12 +1581,12 @@ fn handle_undo(
                 state.notify(format!(
                     "Restored: {} (original column gone, moved to {})",
                     entry.title,
-                    board.columns[target_col].name,
+                    target_col_name,
                 ));
             } else {
                 state.notify(format!("Restored: {}", entry.title));
             }
-            Ok(Some("Restore card".into()))
+            Ok(Some(format!("Restore card #{} \"{}\" to {}", entry.id, entry.title, target_col_name)))
         }
         Err(e) => {
             // Do NOT clear last_delete — let the user retry
@@ -1542,13 +1618,16 @@ fn handle_confirm(
                     let id = id.clone();
                     if let Some((col_idx, card_idx)) = board.find_card(&id) {
                         let col_slug = board.columns[col_idx].slug.clone();
+                        let col_name = board.columns[col_idx].name.clone();
                         let card_title = board.columns[col_idx].cards[card_idx].title.clone();
                         // Trash the file BEFORE removing from board (save_board deletes orphans)
                         match trash_card(kando_dir, &col_slug, &id, &card_title) {
                             Ok(entry) => {
                                 board.columns[col_idx].cards.remove(card_idx);
                                 save_board(kando_dir, board)?;
-                                sync_message = Some("Delete card".into());
+                                append_activity(kando_dir, "delete", &id, &card_title,
+                                    &[("column", &col_name)]);
+                                sync_message = Some(format!("Delete card #{id} \"{card_title}\" from {col_name}"));
                                 state.clamp_selection_filtered(board);
                                 state.last_delete = Some(entry);
                                 state.deleted_this_session = true;
@@ -1565,12 +1644,20 @@ fn handle_confirm(
                     ..
                 } => {
                     let (from, ci, to) = (*from_col, *card_idx, *to_col);
+                    let card_id = board.columns[from].cards.get(ci)
+                        .map(|c| c.id.clone()).unwrap_or_default();
+                    let card_title = board.columns[from].cards.get(ci)
+                        .map(|c| c.title.clone()).unwrap_or_default();
+                    let from_name = board.columns[from].name.clone();
+                    let to_name = board.columns[to].name.clone();
                     board.move_card(from, ci, to);
                     board.columns[to].sort_cards();
                     state.focused_column = to;
                     state.clamp_selection_filtered(board);
                     save_board(kando_dir, board)?;
-                    sync_message = Some("Move card".into());
+                    append_activity(kando_dir, "move", &card_id, &card_title,
+                        &[("from", &from_name), ("to", &to_name)]);
+                    sync_message = Some(format!("Move card #{card_id} \"{card_title}\" from {from_name} to {to_name}"));
                     state.notify("Card moved");
                 }
                 _ => {}
@@ -2009,7 +2096,7 @@ mod tests {
             on_confirm: InputTarget::NewCardTitle,
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
-        assert_eq!(sync.as_deref(), Some("Create card"));
+        assert_eq!(sync.as_deref(), Some("Create card #1 \"My task\" in Backlog"));
         assert_eq!(board.columns[0].cards.len(), 1);
         assert_eq!(board.columns[0].cards[0].title, "My task");
         assert_eq!(state.notification.as_deref(), Some("Card created"));
@@ -2043,7 +2130,7 @@ mod tests {
             on_confirm: InputTarget::EditTags,
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
-        assert_eq!(sync.as_deref(), Some("Update tags"));
+        assert_eq!(sync.as_deref(), Some("Update tags on #001 \"Test\""));
         assert_eq!(board.columns[0].cards[0].tags, vec!["bug", "ui", "feature"]);
     }
 
@@ -2059,7 +2146,7 @@ mod tests {
             on_confirm: ConfirmTarget::DeleteCard("001".into()),
         };
         let sync = handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
-        assert_eq!(sync.as_deref(), Some("Delete card"));
+        assert_eq!(sync.as_deref(), Some("Delete card #001 \"Doomed\" from Backlog"));
         assert!(board.columns[0].cards.is_empty());
         assert_eq!(state.notification.as_deref(), Some("Card deleted (u to undo)"));
         assert!(matches!(state.mode, Mode::Normal));
@@ -2092,7 +2179,7 @@ mod tests {
             on_confirm: ConfirmTarget::WipLimitMove { from_col: 0, card_idx: 0, to_col: 1 },
         };
         let sync = handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
-        assert_eq!(sync.as_deref(), Some("Move card"));
+        assert_eq!(sync.as_deref(), Some("Move card #001 \"Card\" from Backlog to In Progress"));
         assert!(board.columns[0].cards.is_empty());
         assert_eq!(board.columns[1].cards.len(), 1);
         assert_eq!(state.focused_column, 1);
@@ -2176,7 +2263,7 @@ mod tests {
             &mut board, &mut state, Action::CyclePriority,
             &mut terminal, &kando_dir, false,
         ).unwrap();
-        assert_eq!(sync.as_deref(), Some("Change priority"));
+        assert_eq!(sync.as_deref(), Some("Update priority of #001 \"Test\" to high"));
         assert_eq!(board.columns[0].cards[0].priority, Priority::High);
     }
 
@@ -2193,7 +2280,7 @@ mod tests {
             &mut board, &mut state, Action::ToggleBlocker,
             &mut terminal, &kando_dir, false,
         ).unwrap();
-        assert_eq!(sync.as_deref(), Some("Toggle blocker"));
+        assert_eq!(sync.as_deref(), Some("Block #001 \"Test\""));
         assert!(board.columns[0].cards[0].blocked);
         assert_eq!(state.notification.as_deref(), Some("Card blocked"));
     }
@@ -2240,7 +2327,7 @@ mod tests {
 
         // Undo via production code path
         let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
-        assert_eq!(sync.as_deref(), Some("Restore card"));
+        assert_eq!(sync.as_deref(), Some("Restore card #001 \"Undone\" to Backlog"));
 
         // Card is back in the first column
         assert_eq!(board.columns[0].cards.len(), 1);
@@ -2395,7 +2482,7 @@ mod tests {
         // last_delete for 001 must still be set — u should still work
         assert_eq!(state.last_delete.as_ref().unwrap().id, "001");
         let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
-        assert_eq!(sync.as_deref(), Some("Restore card"));
+        assert_eq!(sync.as_deref(), Some("Restore card #001 \"Alpha\" to Backlog"));
         assert!(board.columns[0].cards.iter().any(|c| c.id == "001"));
     }
 

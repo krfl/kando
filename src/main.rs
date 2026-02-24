@@ -94,6 +94,8 @@ enum Command {
         #[command(subcommand)]
         action: Option<TrashAction>,
     },
+    /// Stream activity log to stdout (JSONL, one entry per line)
+    Log,
 }
 
 #[derive(Subcommand)]
@@ -157,6 +159,7 @@ fn main() {
         Some(Command::Doctor) => cmd_doctor(&cwd),
         Some(Command::Metrics { weeks, csv }) => cmd_metrics(&cwd, weeks, csv),
         Some(Command::Trash { action }) => cmd_trash(&cwd, action),
+        Some(Command::Log) => cmd_log(&cwd),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
 
@@ -793,9 +796,140 @@ fn cmd_metrics(cwd: &Path, weeks: Option<u32>, csv: bool) -> color_eyre::Result<
     Ok(())
 }
 
+fn cmd_log(cwd: &Path) -> color_eyre::Result<()> {
+    use std::io::{self, BufRead, BufWriter, ErrorKind, Write};
+
+    let kando_dir = find_kando_dir(cwd)?;
+    let log_path = kando_dir.join("activity.log");
+
+    let file = match std::fs::File::open(&log_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).wrap_err("failed to open activity.log"),
+    };
+
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    for line in io::BufReader::new(file).lines() {
+        let line = line.wrap_err("error reading activity.log")?;
+        match writeln!(out, "{line}") {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => return Err(e).wrap_err("error writing to stdout"),
+        }
+    }
+    // Flush explicitly — BufWriter silently drops flush errors on drop.
+    // Treat BrokenPipe as a clean exit (consumer closed the pipe).
+    if let Err(e) = out.flush() {
+        if e.kind() != ErrorKind::BrokenPipe {
+            return Err(e).wrap_err("error flushing stdout");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_tui(cwd: &Path, nerd_font_flag: bool) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
     let result = app::run(&mut terminal, cwd, nerd_font_flag);
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn make_kando_dir(parent: &Path) -> PathBuf {
+        let kando_dir = parent.join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+        kando_dir
+    }
+
+    #[test]
+    fn cmd_log_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = cmd_log(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_log_no_activity_log_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        make_kando_dir(dir.path());
+        assert!(cmd_log(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_log_empty_activity_log_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = make_kando_dir(dir.path());
+        fs::write(kando_dir.join("activity.log"), "").unwrap();
+        assert!(cmd_log(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_log_valid_jsonl_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = make_kando_dir(dir.path());
+        fs::write(
+            kando_dir.join("activity.log"),
+            "{\"action\":\"create\",\"id\":\"1\"}\n{\"action\":\"move\",\"id\":\"1\"}\n",
+        ).unwrap();
+        assert!(cmd_log(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_log_no_trailing_newline_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = make_kando_dir(dir.path());
+        // BufReader::lines() must still yield the final line without a \n
+        fs::write(kando_dir.join("activity.log"), "{\"action\":\"create\"}").unwrap();
+        assert!(cmd_log(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_log_non_utf8_content_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = make_kando_dir(dir.path());
+        fs::write(kando_dir.join("activity.log"), b"\xFF\xFE{}\n").unwrap();
+        let err = cmd_log(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("error reading activity.log"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn cmd_log_nested_cwd_finds_kando_in_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = make_kando_dir(dir.path());
+        // Write a real log so we confirm the file was reached via the ancestor walk
+        fs::write(kando_dir.join("activity.log"), "{\"action\":\"create\"}\n").unwrap();
+        let nested = dir.path().join("sub").join("sub2");
+        fs::create_dir_all(&nested).unwrap();
+        assert!(cmd_log(&nested).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cmd_log_unreadable_file_returns_err() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = make_kando_dir(dir.path());
+        let log_path = kando_dir.join("activity.log");
+        fs::write(&log_path, "{\"action\":\"test\"}\n").unwrap();
+        fs::set_permissions(&log_path, fs::Permissions::from_mode(0o000)).unwrap();
+        // Skip when running as root (permission bits are ignored)
+        if fs::File::open(&log_path).is_ok() {
+            eprintln!("skipping cmd_log_unreadable_file_returns_err: running as root");
+            return;
+        }
+        let err = cmd_log(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("failed to open activity.log"),
+            "unexpected error: {err:#}"
+        );
+    }
 }

@@ -547,6 +547,86 @@ fn save_trash_meta(kando_dir: &Path, meta: &TrashMeta) -> Result<(), StorageErro
 }
 
 // ---------------------------------------------------------------------------
+// Activity log (.kando/activity.log — committed, append-only JSONL)
+// ---------------------------------------------------------------------------
+
+/// Escape a string as a JSON-encoded string value (including surrounding quotes).
+///
+/// ASCII control characters (U+0000–U+001F) are written as `\uXXXX`.
+/// All other characters, including non-ASCII Unicode, are written as raw UTF-8,
+/// which is valid JSON per RFC 8259 §8.1.  Surrogate-pair encoding for code
+/// points above U+FFFF is intentionally not performed; standard JSON parsers
+/// handle raw UTF-8 correctly.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"'  => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Append a single JSONL event to `.kando/activity.log`.
+///
+/// The common fields are `ts`, `action`, `id`, and `title`.  `extras` is a
+/// slice of `(key, value)` pairs that are appended after them.  The write is
+/// best-effort: any I/O error is silently discarded so a log failure never
+/// interrupts normal board operations.
+pub fn append_activity(
+    kando_dir: &Path,
+    action: &str,
+    card_id: &str,
+    card_title: &str,
+    extras: &[(&str, &str)],
+) {
+    let _ = try_append_activity(kando_dir, action, card_id, card_title, extras);
+}
+
+fn try_append_activity(
+    kando_dir: &Path,
+    action: &str,
+    card_id: &str,
+    card_title: &str,
+    extras: &[(&str, &str)],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let mut line = format!(
+        "{{\"ts\":{},\"action\":{},\"id\":{},\"title\":{}",
+        json_escape(&ts),
+        json_escape(action),
+        json_escape(card_id),
+        json_escape(card_title),
+    );
+    for (k, v) in extras {
+        line.push(',');
+        line.push_str(&json_escape(k));
+        line.push(':');
+        line.push_str(&json_escape(v));
+    }
+    line.push('}');
+
+    let path = kando_dir.join("activity.log");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)?;
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Local config (.kando/local.toml — gitignored, per-user preferences)
 // ---------------------------------------------------------------------------
 
@@ -1389,5 +1469,201 @@ mod tests {
         save_local_config(&kando_dir, &crate::config::LocalConfig::default()).unwrap();
         let gitignore = fs::read_to_string(kando_dir.join(".gitignore")).unwrap();
         assert_eq!(gitignore, "*.log\nlocal.toml\n");
+    }
+
+    // ── json_escape tests ──
+
+    #[test]
+    fn json_escape_empty_string() {
+        assert_eq!(super::json_escape(""), "\"\"");
+    }
+
+    #[test]
+    fn json_escape_plain_ascii() {
+        assert_eq!(super::json_escape("hello"), "\"hello\"");
+    }
+
+    #[test]
+    fn json_escape_double_quote() {
+        assert_eq!(super::json_escape("say \"hi\""), "\"say \\\"hi\\\"\"");
+    }
+
+    #[test]
+    fn json_escape_backslash() {
+        // One backslash → JSON-escaped as two backslashes, wrapped in quotes
+        assert_eq!(super::json_escape("\\"), "\"\\\\\"");
+    }
+
+    #[test]
+    fn json_escape_newline_cr_tab() {
+        assert_eq!(super::json_escape("a\nb\rc\td"), "\"a\\nb\\rc\\td\"");
+    }
+
+    #[test]
+    fn json_escape_control_char_x01() {
+        assert_eq!(super::json_escape("\x01"), "\"\\u0001\"");
+    }
+
+    #[test]
+    fn json_escape_nul_byte() {
+        assert_eq!(super::json_escape("\x00"), "\"\\u0000\"");
+    }
+
+    #[test]
+    fn json_escape_non_ascii_unicode_passthrough() {
+        assert_eq!(super::json_escape("héllo"), "\"héllo\"");
+        assert_eq!(super::json_escape("日本語"), "\"日本語\"");
+        assert_eq!(super::json_escape("🎉"), "\"🎉\"");
+    }
+
+    #[test]
+    fn json_escape_mixed_special_chars() {
+        // tab + double-quote + backslash + newline
+        assert_eq!(
+            super::json_escape("\t\"a\\b\"\n"),
+            "\"\\t\\\"a\\\\b\\\"\\n\""
+        );
+    }
+
+    // ── append_activity / try_append_activity tests ──
+
+    #[test]
+    fn append_activity_creates_log_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        append_activity(&kando_dir, "create", "42", "My Task", &[]);
+
+        assert!(kando_dir.join("activity.log").exists());
+    }
+
+    #[test]
+    fn append_activity_line_contains_required_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        append_activity(&kando_dir, "create", "42", "My Task", &[]);
+
+        let content = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        let line = content.trim();
+        assert!(line.starts_with('{'), "line should be a JSON object");
+        assert!(line.ends_with('}'), "line should be a JSON object");
+        assert!(line.contains("\"action\":\"create\""), "missing action");
+        assert!(line.contains("\"id\":\"42\""), "missing id");
+        assert!(line.contains("\"title\":\"My Task\""), "missing title");
+        assert!(line.contains("\"ts\":\""), "missing ts");
+    }
+
+    #[test]
+    fn append_activity_second_call_appends_new_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        append_activity(&kando_dir, "create", "1", "First", &[]);
+        append_activity(&kando_dir, "delete", "2", "Second", &[]);
+
+        let content = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"action\":\"create\""));
+        assert!(lines[1].contains("\"action\":\"delete\""));
+    }
+
+    #[test]
+    fn append_activity_extras_appear_in_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        append_activity(&kando_dir, "move", "1", "Task", &[("from", "Backlog"), ("to", "Done")]);
+
+        let content = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        assert!(content.contains("\"from\":\"Backlog\""));
+        assert!(content.contains("\"to\":\"Done\""));
+    }
+
+    #[test]
+    fn append_activity_special_chars_in_title_escaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        append_activity(&kando_dir, "create", "1", "Task \"with\" quotes", &[]);
+
+        let content = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        assert!(content.contains("\"title\":\"Task \\\"with\\\" quotes\""));
+    }
+
+    #[test]
+    fn append_activity_io_error_is_silently_swallowed() {
+        // Non-existent parent directory — should not panic
+        let dir = tempfile::tempdir().unwrap();
+        let nonexistent = dir.path().join("no-such-dir").join(".kando");
+        append_activity(&nonexistent, "create", "1", "Task", &[]);
+        // If we reach here without panicking the test passes
+    }
+
+    #[test]
+    fn append_activity_empty_extras_produces_four_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        append_activity(&kando_dir, "action", "id-val", "title-val", &[]);
+
+        let content = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        let line = content.trim();
+        let key_count = ["\"ts\":", "\"action\":", "\"id\":", "\"title\":"]
+            .iter()
+            .filter(|&&k| line.contains(k))
+            .count();
+        assert_eq!(key_count, 4, "all four required fields (ts, action, id, title) should be present");
+    }
+
+    #[test]
+    fn append_activity_timestamp_is_iso8601() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        append_activity(&kando_dir, "test", "1", "T", &[]);
+
+        let content = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        // Extract the value of "ts":"..."
+        let prefix = "\"ts\":\"";
+        let ts_start = content.find(prefix).unwrap() + prefix.len();
+        let ts_end = ts_start + content[ts_start..].find('"').unwrap();
+        let ts = &content[ts_start..ts_end];
+        assert_eq!(ts.len(), 20, "timestamp should be YYYY-MM-DDTHH:MM:SSZ");
+        assert!(ts.contains('T'), "timestamp should contain T separator");
+        assert!(ts.ends_with('Z'), "timestamp should end with Z");
+    }
+
+    // ── append_activity integration: one entry per auto-closed card ──
+
+    #[test]
+    fn append_activity_auto_close_entries_per_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir(&kando_dir).unwrap();
+
+        // Simulate what handle_auto_close does: one append_activity per closed card
+        let cards = [("1", "Alpha", "backlog"), ("2", "Beta", "in-progress")];
+        for (id, title, from) in &cards {
+            append_activity(&kando_dir, "auto-close", id, title, &[("from", from)]);
+        }
+
+        let content = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "one log entry per auto-closed card");
+        assert!(lines[0].contains("\"action\":\"auto-close\""));
+        assert!(lines[0].contains("\"id\":\"1\""));
+        assert!(lines[0].contains("\"from\":\"backlog\""));
+        assert!(lines[1].contains("\"action\":\"auto-close\""));
+        assert!(lines[1].contains("\"id\":\"2\""));
+        assert!(lines[1].contains("\"from\":\"in-progress\""));
     }
 }

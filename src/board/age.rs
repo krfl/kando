@@ -51,8 +51,18 @@ pub fn should_auto_close(card: &Card, policies: &Policies, now: DateTime<Utc>) -
     days_since_update >= policies.auto_close_days
 }
 
-/// Run auto-close on the board. Returns the IDs of cards that were moved.
-pub fn run_auto_close(board: &mut Board, now: DateTime<Utc>) -> Vec<String> {
+/// A card that was moved to the auto-close target column.
+#[derive(Debug)]
+pub struct ClosedCard {
+    pub id: String,
+    pub title: String,
+    pub from_col_slug: String,
+}
+
+/// Run the auto-close policy on the board.
+///
+/// Returns one [`ClosedCard`] per card that was moved to the auto-close target.
+pub fn run_auto_close(board: &mut Board, now: DateTime<Utc>) -> Vec<ClosedCard> {
     let auto_close_days = board.policies.auto_close_days;
     if auto_close_days == 0 {
         return Vec::new();
@@ -84,8 +94,9 @@ pub fn run_auto_close(board: &mut Board, now: DateTime<Utc>) -> Vec<String> {
     // Move in reverse order to preserve indices
     let mut closed_ids = Vec::new();
     for &(col_idx, card_idx) in to_move.iter().rev() {
+        let from_col_slug = board.columns[col_idx].slug.clone();
         let card = board.columns[col_idx].cards.remove(card_idx);
-        closed_ids.push(card.id.clone());
+        closed_ids.push(ClosedCard { id: card.id.clone(), title: card.title.clone(), from_col_slug });
         board.columns[target_col].cards.push(card);
     }
 
@@ -221,7 +232,9 @@ mod tests {
         ], policies);
 
         let closed = run_auto_close(&mut board, now);
-        assert_eq!(closed, vec!["1"]);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].id, "1");
+        assert_eq!(closed[0].from_col_slug, "backlog");
         assert_eq!(board.columns[0].cards.len(), 0); // removed from backlog
         assert_eq!(board.columns[2].cards.len(), 1); // moved to archive
         assert_eq!(board.columns[2].cards[0].id, "1");
@@ -404,5 +417,138 @@ mod tests {
             ..Card::new("1".into(), "Test".into())
         };
         assert_eq!(staleness(&card, &policies, now), Staleness::VeryStale);
+    }
+
+    // ── ClosedCard / run_auto_close additions ──
+
+    #[test]
+    fn run_auto_close_closed_card_title_is_correct() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut stale = Card::new("7".into(), "Important Work".into());
+        stale.updated = Utc.with_ymd_and_hms(2025, 4, 1, 12, 0, 0).unwrap();
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![stale]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].title, "Important Work");
+    }
+
+    #[test]
+    fn run_auto_close_at_exact_boundary_is_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // Exactly 30 days ago — should meet the >= threshold
+        let mut card = Card::new("1".into(), "Boundary".into());
+        card.updated = Utc.with_ymd_and_hms(2025, 5, 16, 12, 0, 0).unwrap();
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert_eq!(closed.len(), 1, "card at exact threshold should be moved");
+    }
+
+    #[test]
+    fn run_auto_close_one_day_short_not_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // 29 days ago — one day short of the 30-day threshold
+        let mut card = Card::new("1".into(), "Almost Stale".into());
+        card.updated = Utc.with_ymd_and_hms(2025, 5, 17, 12, 0, 0).unwrap();
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert!(closed.is_empty(), "card 29 days old should not be moved at 30-day threshold");
+        assert_eq!(board.columns[0].cards.len(), 1);
+    }
+
+    #[test]
+    fn run_auto_close_multiple_stale_same_column_all_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 4, 1, 12, 0, 0).unwrap();
+        let mut c1 = Card::new("1".into(), "First".into());
+        c1.updated = old;
+        let mut c2 = Card::new("2".into(), "Second".into());
+        c2.updated = old;
+        let mut c3 = Card::new("3".into(), "Third".into());
+        c3.updated = old;
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![c1, c2, c3]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert_eq!(closed.len(), 3);
+        assert_eq!(board.columns[0].cards.len(), 0);
+        assert_eq!(board.columns[1].cards.len(), 3);
+    }
+
+    #[test]
+    fn run_auto_close_from_col_slug_reflects_source_column() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 4, 1, 12, 0, 0).unwrap();
+        let mut card_a = Card::new("1".into(), "A".into());
+        card_a.updated = old;
+        let mut card_b = Card::new("2".into(), "B".into());
+        card_b.updated = old;
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![card_a]),
+            make_column("in-progress", "In Progress", vec![card_b]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let mut closed = run_auto_close(&mut board, now);
+        assert_eq!(closed.len(), 2);
+        closed.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(closed[0].from_col_slug, "backlog");
+        assert_eq!(closed[1].from_col_slug, "in-progress");
+    }
+
+    #[test]
+    fn run_auto_close_empty_board_no_panic() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+        let mut board = make_board(vec![], policies);
+        let closed = run_auto_close(&mut board, now);
+        assert!(closed.is_empty());
     }
 }
