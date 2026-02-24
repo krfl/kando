@@ -32,8 +32,8 @@ pub struct Policies {
     #[serde(default = "default_auto_close_target")]
     pub auto_close_target: String,
     /// Cards untouched for this many days get a visual warning.
-    #[serde(default = "default_bubble_up_days")]
-    pub bubble_up_days: u32,
+    #[serde(rename = "stale_days", alias = "bubble_up_days", default = "default_stale_days")]
+    pub stale_days: u32,
     /// Trash entries older than this many days are permanently purged. 0 = never.
     #[serde(default = "default_trash_purge_days")]
     pub trash_purge_days: u32,
@@ -45,7 +45,7 @@ fn default_auto_close_days() -> u32 {
 fn default_auto_close_target() -> String {
     "archive".to_string()
 }
-fn default_bubble_up_days() -> u32 {
+fn default_stale_days() -> u32 {
     7
 }
 fn default_trash_purge_days() -> u32 {
@@ -57,7 +57,7 @@ impl Default for Policies {
         Self {
             auto_close_days: default_auto_close_days(),
             auto_close_target: default_auto_close_target(),
-            bubble_up_days: default_bubble_up_days(),
+            stale_days: default_stale_days(),
             trash_purge_days: default_trash_purge_days(),
         }
     }

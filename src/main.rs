@@ -12,7 +12,7 @@ use color_eyre::eyre::{bail, WrapErr};
 
 use clap::{Parser, Subcommand};
 
-use board::storage::{find_kando_dir, init_board, load_board, save_board};
+use board::storage::{append_activity, find_kando_dir, init_board, load_board, save_board, trash_card};
 use board::{Card, Priority};
 
 #[derive(Parser)]
@@ -60,6 +60,40 @@ enum Command {
         #[arg(short, long)]
         column: Option<String>,
     },
+    /// Soft-delete (trash) a card by ID
+    Delete {
+        /// Card ID (e.g. 001)
+        card_id: String,
+    },
+    /// Edit a card's fields, or open in $EDITOR when no flags are given
+    Edit {
+        /// Card ID (e.g. 001)
+        card_id: String,
+        /// New title
+        #[arg(long)]
+        title: Option<String>,
+        /// New priority (low, normal, high, urgent)
+        #[arg(long)]
+        priority: Option<Priority>,
+        /// Add tags (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        tag_add: Vec<String>,
+        /// Remove tags (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        tag_remove: Vec<String>,
+        /// Add assignees (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        assignee_add: Vec<String>,
+        /// Remove assignees (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        assignee_remove: Vec<String>,
+        /// Mark as blocked
+        #[arg(long, conflicts_with = "unblocked")]
+        blocked: bool,
+        /// Clear blocked status
+        #[arg(long)]
+        unblocked: bool,
+    },
     /// Move a card to a different column
     Move {
         /// Card ID (e.g. 001)
@@ -94,6 +128,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<TrashAction>,
     },
+    /// Print the raw card file (frontmatter + body) to stdout
+    Show {
+        /// Card ID (e.g. 001)
+        card_id: String,
+    },
     /// Stream activity log to stdout (JSONL, one entry per line)
     Log,
 }
@@ -118,6 +157,34 @@ enum ConfigSetting {
         /// WIP limit (0 to remove)
         limit: u32,
     },
+    /// Set how many days of inactivity before a staleness indicator appears (0 to disable)
+    StaleDays {
+        /// Days of inactivity
+        days: u32,
+    },
+    /// Set how many days of inactivity before a card is auto-closed (0 to disable)
+    AutoCloseDays {
+        /// Days of inactivity
+        days: u32,
+    },
+    /// Set the column that auto-closed cards are moved to
+    AutoCloseTarget {
+        /// Column slug (e.g. archive)
+        column: String,
+    },
+    /// Set how many days trashed cards are kept before purging (0 to keep forever)
+    TrashPurgeDays {
+        /// Days to keep trash
+        days: u32,
+    },
+    /// Enable or disable Nerd Font icons
+    NerdFont {
+        /// on or off
+        #[arg(value_parser = ["on", "off"])]
+        value: String,
+    },
+    /// Show all current board settings
+    Show,
 }
 
 fn main() {
@@ -149,16 +216,46 @@ fn main() {
             priority,
         }) => cmd_add(&cwd, &title, tags, assignee, priority),
         Some(Command::List { tag, column }) => cmd_list(&cwd, tag.as_deref(), column.as_deref(), cli.nerd_font),
+        Some(Command::Delete { card_id }) => cmd_delete(&cwd, &card_id),
+        Some(Command::Edit {
+            card_id,
+            title,
+            priority,
+            tag_add,
+            tag_remove,
+            assignee_add,
+            assignee_remove,
+            blocked,
+            unblocked,
+        }) => cmd_edit(
+            &cwd,
+            &card_id,
+            title.as_deref(),
+            priority,
+            tag_add,
+            tag_remove,
+            assignee_add,
+            assignee_remove,
+            blocked,
+            unblocked,
+        ),
         Some(Command::Move { card_id, column }) => cmd_move(&cwd, &card_id, &column),
         Some(Command::Tags) => cmd_tags(&cwd),
         Some(Command::Sync) => cmd_sync(&cwd),
         Some(Command::Config { setting }) => match setting {
             ConfigSetting::Wip { column, limit } => cmd_config_wip(&cwd, &column, limit),
+            ConfigSetting::StaleDays { days } => cmd_config_stale_days(&cwd, days),
+            ConfigSetting::AutoCloseDays { days } => cmd_config_auto_close_days(&cwd, days),
+            ConfigSetting::AutoCloseTarget { column } => cmd_config_auto_close_target(&cwd, &column),
+            ConfigSetting::TrashPurgeDays { days } => cmd_config_trash_purge_days(&cwd, days),
+            ConfigSetting::NerdFont { value } => cmd_config_nerd_font(&cwd, &value),
+            ConfigSetting::Show => cmd_config_show(&cwd),
         },
         Some(Command::SyncStatus) => cmd_sync_status(&cwd),
         Some(Command::Doctor) => cmd_doctor(&cwd),
         Some(Command::Metrics { weeks, csv }) => cmd_metrics(&cwd, weeks, csv),
         Some(Command::Trash { action }) => cmd_trash(&cwd, action),
+        Some(Command::Show { card_id }) => cmd_show(&cwd, &card_id),
         Some(Command::Log) => cmd_log(&cwd),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
@@ -516,6 +613,256 @@ fn cmd_config_wip(cwd: &Path, column: &str, limit: u32) -> color_eyre::Result<()
     Ok(())
 }
 
+fn cmd_delete(cwd: &Path, card_id: &str) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+
+    let (col_idx, card_idx) = board
+        .find_card(card_id)
+        .ok_or_else(|| color_eyre::eyre::eyre!("Card '{}' not found", card_id))?;
+
+    let col_slug = board.columns[col_idx].slug.clone();
+    let col_name = board.columns[col_idx].name.clone();
+    let card_title = board.columns[col_idx].cards[card_idx].title.clone();
+
+    // Trash the file BEFORE removing from board (save_board deletes orphaned files)
+    trash_card(&kando_dir, &col_slug, card_id, &card_title)?;
+    board.columns[col_idx].cards.remove(card_idx);
+    save_board(&kando_dir, &board)?;
+    append_activity(&kando_dir, "delete", card_id, &card_title, &[("column", &col_name)]);
+
+    println!("Deleted {card_id} ({card_title}) from {col_name}");
+    println!("Restore with: kando trash restore {card_id}");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_edit(
+    cwd: &Path,
+    card_id: &str,
+    title: Option<&str>,
+    priority: Option<Priority>,
+    tag_add: Vec<String>,
+    tag_remove: Vec<String>,
+    assignee_add: Vec<String>,
+    assignee_remove: Vec<String>,
+    blocked: bool,
+    unblocked: bool,
+) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+
+    let has_flags = title.is_some()
+        || priority.is_some()
+        || !tag_add.is_empty()
+        || !tag_remove.is_empty()
+        || !assignee_add.is_empty()
+        || !assignee_remove.is_empty()
+        || blocked
+        || unblocked;
+
+    let (col_idx, card_idx) = board
+        .find_card(card_id)
+        .ok_or_else(|| color_eyre::eyre::eyre!("Card '{}' not found", card_id))?;
+
+    if has_flags {
+        let card = &mut board.columns[col_idx].cards[card_idx];
+
+        if let Some(t) = title {
+            card.title = t.to_string();
+        }
+        if let Some(p) = priority {
+            card.priority = p;
+        }
+        for tag in tag_add {
+            let tag = tag.trim().to_lowercase();
+            if !tag.is_empty() && !card.tags.contains(&tag) {
+                card.tags.push(tag);
+            }
+        }
+        for tag in &tag_remove {
+            let tag = tag.trim().to_lowercase();
+            card.tags.retain(|t| t != &tag);
+        }
+        for assignee in assignee_add {
+            let a = assignee.trim().to_lowercase();
+            if !a.is_empty() && !card.assignees.contains(&a) {
+                card.assignees.push(a);
+            }
+        }
+        for assignee in &assignee_remove {
+            let assignee = assignee.trim().to_lowercase();
+            card.assignees.retain(|a| a != &assignee);
+        }
+        if blocked {
+            card.blocked = true;
+        }
+        if unblocked {
+            card.blocked = false;
+        }
+        card.touch();
+
+        let card_title = card.title.clone();
+        let col_name = board.columns[col_idx].name.clone();
+        board.columns[col_idx].sort_cards();
+        save_board(&kando_dir, &board)?;
+        append_activity(&kando_dir, "edit", card_id, &card_title, &[("column", &col_name)]);
+        println!("Updated {card_id}: {card_title}");
+    } else {
+        // No flags — open in $EDITOR
+        let col_slug = board.columns[col_idx].slug.clone();
+        let card_path = kando_dir
+            .join("columns")
+            .join(&col_slug)
+            .join(format!("{card_id}.md"));
+
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+        let editor = editor.trim().to_string();
+        if editor.is_empty() {
+            color_eyre::eyre::bail!("$EDITOR is not set");
+        }
+
+        // Split $EDITOR on whitespace so "code --wait" works, and exec directly
+        // (no shell interpolation) to avoid injection via crafted $EDITOR values.
+        let mut editor_parts = editor.split_whitespace();
+        let editor_bin = editor_parts.next().unwrap(); // checked non-empty above
+        let status = std::process::Command::new(editor_bin)
+            .args(editor_parts)
+            .arg(&card_path)
+            .status()
+            .wrap_err("Failed to launch editor")?;
+
+        // Reload to pick up changes made in editor, then touch and save
+        let mut board = load_board(&kando_dir)?;
+        if let Some((ci, ki)) = board.find_card(card_id) {
+            let card_title = board.columns[ci].cards[ki].title.clone();
+            let col_name = board.columns[ci].name.clone();
+            board.columns[ci].cards[ki].touch();
+            board.columns[ci].sort_cards();
+            save_board(&kando_dir, &board)?;
+            append_activity(&kando_dir, "edit", card_id, &card_title, &[("column", &col_name)]);
+
+            if status.success() {
+                println!("Updated {card_id}: {card_title}");
+            } else {
+                eprintln!("warning: editor exited with {status}");
+            }
+        } else {
+            eprintln!("warning: card {card_id} not found after editing; changes may not have been saved");
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_config_stale_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    board.policies.stale_days = days;
+    save_board(&kando_dir, &board)?;
+    if days == 0 {
+        println!("Staleness indicators disabled.");
+    } else {
+        println!("Staleness threshold set to {days} days.");
+    }
+    Ok(())
+}
+
+fn cmd_config_auto_close_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    board.policies.auto_close_days = days;
+    save_board(&kando_dir, &board)?;
+    if days == 0 {
+        println!("Auto-close disabled.");
+    } else {
+        println!("Auto-close threshold set to {days} days.");
+    }
+    Ok(())
+}
+
+fn cmd_config_auto_close_target(cwd: &Path, column: &str) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    board
+        .columns
+        .iter()
+        .find(|c| c.slug == column)
+        .ok_or_else(|| color_eyre::eyre::eyre!("Column '{}' not found", column))?;
+    board.policies.auto_close_target = column.to_string();
+    save_board(&kando_dir, &board)?;
+    println!("Auto-close target set to '{column}'.");
+    Ok(())
+}
+
+fn cmd_config_trash_purge_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    board.policies.trash_purge_days = days;
+    save_board(&kando_dir, &board)?;
+    if days == 0 {
+        println!("Trash auto-purge disabled (trashed cards kept forever).");
+    } else {
+        println!("Trash auto-purge set to {days} days.");
+    }
+    Ok(())
+}
+
+fn cmd_config_nerd_font(cwd: &Path, value: &str) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    board.nerd_font = value == "on";
+    save_board(&kando_dir, &board)?;
+    println!("Nerd Font icons {}.", if board.nerd_font { "enabled" } else { "disabled" });
+    Ok(())
+}
+
+fn cmd_config_show(cwd: &Path) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let board = load_board(&kando_dir)?;
+    let p = &board.policies;
+
+    println!("\nBoard Settings");
+    println!("{}", "─".repeat(40));
+    println!("  Board name:          {}", board.name);
+    println!("  Nerd Font icons:     {}", if board.nerd_font { "on" } else { "off" });
+    println!();
+    println!("Policies");
+    println!("{}", "─".repeat(40));
+    if p.stale_days == 0 {
+        println!("  stale-days:          disabled");
+    } else {
+        println!("  stale-days:          {} days", p.stale_days);
+    }
+    if p.auto_close_days == 0 {
+        println!("  auto-close-days:     disabled");
+        println!("  auto-close-target:   (n/a — auto-close disabled)");
+    } else {
+        println!("  auto-close-days:     {} days", p.auto_close_days);
+        println!("  auto-close-target:   {}", p.auto_close_target);
+    }
+    if p.trash_purge_days == 0 {
+        println!("  trash-purge-days:    disabled (keep forever)");
+    } else {
+        println!("  trash-purge-days:    {} days", p.trash_purge_days);
+    }
+    println!();
+    println!("WIP Limits");
+    println!("{}", "─".repeat(40));
+    let any_wip = board.columns.iter().any(|c| c.wip_limit.is_some());
+    if any_wip {
+        for col in &board.columns {
+            if let Some(limit) = col.wip_limit {
+                println!("  {:<20} {}", col.name, limit);
+            }
+        }
+    } else {
+        println!("  (none configured)");
+    }
+    println!();
+    Ok(())
+}
+
 fn cmd_sync_status(cwd: &Path) -> color_eyre::Result<()> {
     use board::sync;
 
@@ -796,6 +1143,40 @@ fn cmd_metrics(cwd: &Path, weeks: Option<u32>, csv: bool) -> color_eyre::Result<
     Ok(())
 }
 
+fn cmd_show(cwd: &Path, card_id: &str) -> color_eyre::Result<()> {
+    use std::io::{BufWriter, ErrorKind, Write};
+
+    let kando_dir = find_kando_dir(cwd)?;
+    let board = load_board(&kando_dir)?;
+
+    let (col_idx, _) = board
+        .find_card(card_id)
+        .ok_or_else(|| color_eyre::eyre::eyre!("Card '{}' not found", card_id))?;
+
+    let col_slug = &board.columns[col_idx].slug;
+    let card_path = kando_dir
+        .join("columns")
+        .join(col_slug)
+        .join(format!("{card_id}.md"));
+
+    let content = std::fs::read_to_string(&card_path)
+        .wrap_err_with(|| format!("failed to read card file: {}", card_path.display()))?;
+
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    match write!(out, "{content}") {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+        Err(e) => return Err(e).wrap_err("error writing to stdout"),
+    }
+    match out.flush() {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+        Err(e) => return Err(e).wrap_err("error flushing stdout"),
+    }
+    Ok(())
+}
+
 fn cmd_log(cwd: &Path) -> color_eyre::Result<()> {
     use std::io::{self, BufRead, BufWriter, ErrorKind, Write};
 
@@ -931,5 +1312,483 @@ mod tests {
             format!("{err:#}").contains("failed to open activity.log"),
             "unexpected error: {err:#}"
         );
+    }
+
+    // ── cmd_show tests ──
+
+    #[test]
+    fn cmd_show_prints_card_file_contents() {
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        let mut card = Card::new(id.clone(), "My pipe card".into());
+        card.body = "Some description for piping.".into();
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        // The file should exist and cmd_show should not error
+        assert!(cmd_show(dir.path(), &id).is_ok());
+
+        // Verify the on-disk file has the expected structure
+        let col_slug = &board.columns[0].slug;
+        let content = fs::read_to_string(
+            kando_dir.join("columns").join(col_slug).join(format!("{id}.md"))
+        ).unwrap();
+        assert!(content.contains("---"), "file should have frontmatter delimiters");
+        assert!(content.contains("My pipe card"), "file should contain card title");
+        assert!(content.contains("Some description for piping."), "file should contain body");
+    }
+
+    #[test]
+    fn cmd_show_card_not_found_returns_err() {
+        use board::storage::init_board;
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let result = cmd_show(dir.path(), "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_show_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = cmd_show(dir.path(), "001");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_show_card_in_non_first_column() {
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        // Locate the "In Progress" column by slug to avoid coupling to index order.
+        let col_idx = board.columns.iter().position(|c| c.slug == "in-progress")
+            .expect("in-progress column not found");
+        let id = board.next_card_id();
+        board.columns[col_idx].cards.push(Card::new(id.clone(), "In Progress card".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        let result = cmd_show(dir.path(), &id);
+        assert!(result.is_ok(), "cmd_show should find a card in a non-first column");
+    }
+
+    #[test]
+    fn cmd_show_file_missing_from_disk() {
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id.clone(), "Ghost card".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        // Delete the .md file from disk while the card remains in the board
+        let col_slug = board.columns[0].slug.clone();
+        let card_path = kando_dir.join("columns").join(&col_slug).join(format!("{id}.md"));
+        fs::remove_file(&card_path).unwrap();
+
+        let result = cmd_show(dir.path(), &id);
+        assert!(result.is_err(), "cmd_show should error when .md file is missing from disk");
+    }
+
+    #[test]
+    fn cmd_show_card_with_empty_body() {
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        // Card::new already initializes body to String::new(); use it directly.
+        board.columns[0].cards.push(Card::new(id.clone(), "No body".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        // Verify the serialized file has frontmatter delimiters even with no body.
+        let col_slug = board.columns[0].slug.clone();
+        let on_disk = fs::read_to_string(
+            kando_dir.join("columns").join(&col_slug).join(format!("{id}.md"))
+        ).unwrap();
+        assert!(on_disk.contains("---"), "file must have frontmatter delimiters even with empty body");
+        assert!(on_disk.contains("No body"), "file must contain the card title");
+
+        let result = cmd_show(dir.path(), &id);
+        assert!(result.is_ok(), "cmd_show should succeed for a card with an empty body");
+    }
+
+    #[test]
+    fn cmd_show_card_with_unicode_and_multiline_body() {
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        let mut card = Card::new(id.clone(), "Unicode card".into());
+        card.body = "Line 1\nLine 2\nEmoji: 🚀🦀\nCJK: 日本語\nArabic: مرحبا".into();
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        // Verify the file content is correct before calling cmd_show
+        let col_slug = board.columns[0].slug.clone();
+        let on_disk = fs::read_to_string(
+            kando_dir.join("columns").join(&col_slug).join(format!("{id}.md"))
+        ).unwrap();
+        assert!(on_disk.contains("🚀🦀"), "file should contain emoji");
+        assert!(on_disk.contains("日本語"), "file should contain CJK characters");
+        assert!(on_disk.contains("مرحبا"), "file should contain Arabic RTL text");
+
+        let result = cmd_show(dir.path(), &id);
+        assert!(result.is_ok(), "cmd_show should succeed for a card with unicode and multiline body");
+    }
+
+    #[test]
+    fn cmd_show_disambiguates_prefix_matches() {
+        // Verify exact-match semantics: a query that is a strict prefix of an
+        // existing card ID (but not itself a card ID) must return an error.
+        // This catches any hypothetical "prefix expansion" or starts_with matching.
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+
+        // Create only card "10" — there is no card with ID "1".
+        board.next_card_id = 10;
+        let id_ten = board.next_card_id(); // "10"
+        board.columns[0].cards.push(Card::new(id_ten.clone(), "Card ten".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        // Exact match must succeed.
+        assert!(cmd_show(dir.path(), &id_ten).is_ok(), "card '10' should be found by exact ID");
+
+        // "1" is a strict prefix of "10" but is not a card ID — must return an error,
+        // not silently return card "10"'s content.
+        assert!(
+            cmd_show(dir.path(), "1").is_err(),
+            "prefix '1' of card '10' must not match; exact ID matching only"
+        );
+    }
+
+    #[test]
+    fn cmd_show_card_id_with_leading_trailing_whitespace_returns_err() {
+        // cmd_show does not trim the card_id — whitespace-padded IDs should not
+        // match valid card IDs, preventing silent ID mismatches.
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id(); // "1"
+        board.columns[0].cards.push(Card::new(id.clone(), "Card".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        // Padded IDs must return a not-found error, not an I/O or parse error.
+        let leading_err = cmd_show(dir.path(), &format!(" {id}"))
+            .expect_err("leading-space ID should not match any card");
+        assert!(
+            format!("{leading_err:#}").contains("not found"),
+            "expected a not-found error, got: {leading_err:#}"
+        );
+
+        let trailing_err = cmd_show(dir.path(), &format!("{id} "))
+            .expect_err("trailing-space ID should not match any card");
+        assert!(
+            format!("{trailing_err:#}").contains("not found"),
+            "expected a not-found error, got: {trailing_err:#}"
+        );
+    }
+
+    // Note: cmd_show_output_matches_file_contents_exactly is not implemented as a
+    // unit test because cmd_show writes directly to the process stdout (locked).
+    // Capturing stdout in a unit test requires either a writer parameter or running
+    // cmd_show as a subprocess. The existing cmd_show_prints_card_file_contents
+    // test validates that the on-disk file contains the expected title and body;
+    // since cmd_show calls `write!(out, "{content}")` with a `String` (whose
+    // Display impl is a verbatim pass-through), the bytes that reach stdout are
+    // identical to the file contents. End-to-end coverage is provided by
+    // cmd_show_card_in_non_first_column and cmd_show_card_with_unicode_and_multiline_body.
+
+    // ── Test helpers ──
+
+    fn setup_board_with_card(parent: &Path) -> (std::path::PathBuf, String) {
+        use board::storage::{init_board, save_board};
+        init_board(parent, "Test", None).unwrap();
+        let kando_dir = parent.join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        let mut card = Card::new(id.clone(), "Test card".into());
+        card.tags = vec!["bug".into()];
+        card.assignees = vec!["alice".into()];
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+        (kando_dir, id)
+    }
+
+    // ── cmd_delete tests ──
+
+    #[test]
+    fn cmd_delete_happy_path_card_removed_from_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, id) = setup_board_with_card(dir.path());
+        cmd_delete(dir.path(), &id).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.find_card(&id).is_none(), "card should be gone from board after delete");
+    }
+
+    #[test]
+    fn cmd_delete_card_moved_to_trash_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_delete(dir.path(), &id).unwrap();
+        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        assert!(trash_file.exists(), "card file should be in trash, not permanently deleted");
+        // Also verify the trash metadata entry was recorded
+        let entries = board::storage::load_trash(&kando_dir);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, id);
+    }
+
+    #[test]
+    fn cmd_delete_activity_log_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_delete(dir.path(), &id).unwrap();
+        let log = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one activity log entry");
+        let line = lines[0];
+        assert!(line.contains("\"action\":\"delete\""), "activity log should record delete action");
+        assert!(line.contains(&format!("\"id\":\"{id}\"")), "activity log should record card id");
+    }
+
+    #[test]
+    fn cmd_delete_card_not_found_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_card(dir.path());
+        let result = cmd_delete(dir.path(), "nonexistent");
+        assert!(result.is_err(), "deleting a non-existent card should return Err");
+    }
+
+    // ── cmd_edit tests ──
+
+    #[test]
+    fn cmd_edit_title_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_edit(dir.path(), &id, Some("New Title"), None, vec![], vec![], vec![], vec![], false, false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert_eq!(board.columns[ci].cards[ki].title, "New Title");
+    }
+
+    #[test]
+    fn cmd_edit_priority_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_edit(dir.path(), &id, None, Some(Priority::High), vec![], vec![], vec![], vec![], false, false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert_eq!(board.columns[ci].cards[ki].priority, Priority::High);
+    }
+
+    #[test]
+    fn cmd_edit_tag_add_normalizes_to_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_edit(dir.path(), &id, None, None, vec!["URGENT".into()], vec![], vec![], vec![], false, false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert!(board.columns[ci].cards[ki].tags.contains(&"urgent".to_string()), "tag should be stored as lowercase");
+    }
+
+    #[test]
+    fn cmd_edit_tag_remove_normalizes_to_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path()); // card has "bug" tag
+        cmd_edit(dir.path(), &id, None, None, vec![], vec!["BUG".into()], vec![], vec![], false, false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert!(!board.columns[ci].cards[ki].tags.contains(&"bug".to_string()), "tag should be removed despite mixed case input");
+    }
+
+    #[test]
+    fn cmd_edit_add_existing_tag_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path()); // card has "bug" tag
+        cmd_edit(dir.path(), &id, None, None, vec!["bug".into()], vec![], vec![], vec![], false, false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        let count = board.columns[ci].cards[ki].tags.iter().filter(|t| t.as_str() == "bug").count();
+        assert_eq!(count, 1, "adding an existing tag should not duplicate it");
+    }
+
+    #[test]
+    fn cmd_edit_remove_nonexistent_tag_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        let result = cmd_edit(dir.path(), &id, None, None, vec![], vec!["nonexistent".into()], vec![], vec![], false, false);
+        assert!(result.is_ok(), "removing a non-existent tag should not error");
+        // Existing tags must not be disturbed
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert_eq!(board.columns[ci].cards[ki].tags, vec!["bug".to_string()],
+            "existing tags should be unmodified after removing a non-existent tag");
+    }
+
+    #[test]
+    fn cmd_edit_blocked_sets_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert!(board.columns[ci].cards[ki].blocked, "blocked flag should be set");
+    }
+
+    #[test]
+    fn cmd_edit_unblocked_clears_flag() {
+        use board::storage::save_board;
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        // Pre-set blocked = true
+        let mut board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        board.columns[ci].cards[ki].blocked = true;
+        save_board(&kando_dir, &board).unwrap();
+
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, true).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert!(!board.columns[ci].cards[ki].blocked, "blocked flag should be cleared by --unblocked");
+    }
+
+    #[test]
+    fn cmd_edit_blocked_and_unblocked_both_true_unblocked_wins() {
+        // At the CLI level, clap's conflicts_with prevents this.
+        // At the function level, unblocked runs after blocked so it wins.
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, true).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert!(!board.columns[ci].cards[ki].blocked, "when both blocked and unblocked are true, unblocked wins");
+    }
+
+    #[test]
+    fn cmd_edit_card_not_found_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_card(dir.path());
+        let result = cmd_edit(dir.path(), "nonexistent", Some("Title"), None, vec![], vec![], vec![], vec![], false, false);
+        assert!(result.is_err(), "editing a non-existent card should return Err");
+    }
+
+    // ── cmd_config_* tests ──
+
+    #[test]
+    fn cmd_config_stale_days_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_config_stale_days(dir.path(), 21).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.stale_days, 21);
+    }
+
+    #[test]
+    fn cmd_config_auto_close_days_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_config_auto_close_days(dir.path(), 14).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.auto_close_days, 14);
+    }
+
+    #[test]
+    fn cmd_config_auto_close_target_valid_column_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        // Use a slug from the actual board rather than hardcoding "archive"
+        let board = load_board(&kando_dir).unwrap();
+        let slug = board.columns.last().unwrap().slug.clone();
+        cmd_config_auto_close_target(dir.path(), &slug).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.auto_close_target, slug);
+    }
+
+    #[test]
+    fn cmd_config_auto_close_target_invalid_column_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let result = cmd_config_auto_close_target(dir.path(), "nonexistent-column");
+        assert!(result.is_err(), "setting auto-close target to a non-existent column should error");
+    }
+
+    #[test]
+    fn cmd_config_trash_purge_days_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_config_trash_purge_days(dir.path(), 7).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.trash_purge_days, 7);
+    }
+
+    #[test]
+    fn cmd_config_nerd_font_on_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_config_nerd_font(dir.path(), "on").unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.nerd_font, "nerd_font should be true after 'on'");
+    }
+
+    #[test]
+    fn cmd_config_nerd_font_off_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        cmd_config_nerd_font(dir.path(), "on").unwrap();
+        // Verify "on" actually worked before testing "off"
+        assert!(load_board(&kando_dir).unwrap().nerd_font, "precondition: nerd_font should be true after 'on'");
+        cmd_config_nerd_font(dir.path(), "off").unwrap();
+        assert!(!load_board(&kando_dir).unwrap().nerd_font, "nerd_font should be false after 'off'");
+    }
+
+    #[test]
+    fn cmd_config_show_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        assert!(cmd_config_show(dir.path()).is_ok(), "cmd_config_show should not error");
+    }
+
+    #[test]
+    fn bubble_up_days_alias_deserializes_as_stale_days() {
+        // Simulate a legacy config.toml that uses the old field name "bubble_up_days".
+        // Use a non-default value (42) so that a broken alias would produce the default (7), not 42.
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let config_path = kando_dir.join("config.toml");
+
+        // Write a non-default value via the normal API (serializes as "stale_days = 42")
+        cmd_config_stale_days(dir.path(), 42).unwrap();
+
+        // Patch the specific "stale_days = 42" line to use the legacy key
+        let content = fs::read_to_string(&config_path).unwrap();
+        let patched = content.replace("stale_days = 42", "bubble_up_days = 42");
+        fs::write(&config_path, patched).unwrap();
+
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.stale_days, 42,
+            "legacy bubble_up_days = 42 should deserialize as stale_days = 42 via serde alias");
     }
 }

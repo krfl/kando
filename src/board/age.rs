@@ -29,13 +29,13 @@ pub enum Staleness {
 
 /// Determine how stale a card is relative to the bubble-up policy.
 pub fn staleness(card: &Card, policies: &Policies, now: DateTime<Utc>) -> Staleness {
-    if policies.bubble_up_days == 0 {
+    if policies.stale_days == 0 {
         return Staleness::Fresh;
     }
     let days_since_update = (now - card.updated).num_days().max(0) as u32;
-    if days_since_update >= policies.bubble_up_days * 2 {
+    if days_since_update >= policies.stale_days * 2 {
         Staleness::VeryStale
-    } else if days_since_update >= policies.bubble_up_days {
+    } else if days_since_update >= policies.stale_days {
         Staleness::Stale
     } else {
         Staleness::Fresh
@@ -134,7 +134,7 @@ mod tests {
     fn test_staleness() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
         let policies = Policies {
-            bubble_up_days: 7,
+            stale_days: 7,
             ..Default::default()
         };
 
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn staleness_disabled_when_zero() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        let policies = Policies { bubble_up_days: 0, ..Default::default() };
+        let policies = Policies { stale_days: 0, ..Default::default() };
         let old = Card {
             updated: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
             ..Card::new("1".into(), "Ancient".into())
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn staleness_boundary_exact_threshold() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        let policies = Policies { bubble_up_days: 7, ..Default::default() };
+        let policies = Policies { stale_days: 7, ..Default::default() };
         // Exactly 7 days ago → Stale (>=)
         let card = Card {
             updated: Utc.with_ymd_and_hms(2025, 6, 8, 12, 0, 0).unwrap(),
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn staleness_boundary_exact_double() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        let policies = Policies { bubble_up_days: 7, ..Default::default() };
+        let policies = Policies { stale_days: 7, ..Default::default() };
         // Exactly 14 days ago → VeryStale (>= 2x)
         let card = Card {
             updated: Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap(),
