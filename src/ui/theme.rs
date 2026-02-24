@@ -73,7 +73,7 @@ impl Theme {
     // Column
     pub const COLUMN_HEADER: Color = Color::Reset;
     pub const COLUMN_BORDER: Color = Color::Reset;
-    pub const COLUMN_FOCUSED_BORDER: Color = Color::Reset;
+    pub const COLUMN_FOCUSED_BORDER: Color = Color::Cyan;
 
     // Card
     pub const CARD_BORDER: Color = Color::Reset;
@@ -207,6 +207,11 @@ mod tests {
     #[test]
     fn tag_color_empty_string_no_panic() {
         let _ = Theme::tag_color("");
+    }
+
+    #[test]
+    fn column_focused_border_is_cyan() {
+        assert_eq!(Theme::COLUMN_FOCUSED_BORDER, Color::Cyan);
     }
 
     #[test]
