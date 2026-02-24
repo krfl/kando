@@ -5,7 +5,8 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use ratatui::widgets::{
-    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, BorderType, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
 };
 use ratatui::Frame;
 
@@ -132,7 +133,7 @@ fn render_column(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color).add_modifier(focused_mod))
-        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_type(BorderType::Rounded)
         .title(header_line)
         .padding(Padding::new(1, 1, 0, 0));
 
@@ -223,11 +224,7 @@ fn render_card(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .border_type(if is_selected {
-            ratatui::widgets::BorderType::Thick
-        } else {
-            ratatui::widgets::BorderType::Plain
-        });
+        .border_type(if is_selected { BorderType::Thick } else { BorderType::Rounded });
 
     let inner = block.inner(area);
     f.render_widget(block, area);
