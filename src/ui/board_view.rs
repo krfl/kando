@@ -1,6 +1,6 @@
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -124,7 +124,10 @@ fn render_column(
         wip_text,
     ]);
 
-    let border_color = if is_focused {
+    // True when this column should render at full brightness:
+    // either it is the focused column, or focus mode is off.
+    let highlight = is_focused || !state.focus_mode;
+    let border_color = if highlight {
         Theme::COLUMN_FOCUSED_BORDER
     } else {
         Theme::COLUMN_BORDER
@@ -176,7 +179,7 @@ fn render_column(
         let card_area = Rect::new(inner.x, y, inner.width, card_height);
 
         let is_selected = is_focused && state.selected_card == real_idx;
-        render_card(f, card_area, card, is_selected, policies, now, icons);
+        render_card(f, card_area, card, is_selected, highlight, policies, now, icons);
     }
 
     // Scroll indicator
@@ -187,15 +190,18 @@ fn render_column(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_card(
     f: &mut Frame,
     area: Rect,
     card: &Card,
     is_selected: bool,
+    is_col_focused: bool,
     policies: &crate::board::Policies,
     now: chrono::DateTime<Utc>,
     icons: &Icons,
 ) {
+    debug_assert!(!is_selected || is_col_focused, "a card cannot be selected in an unfocused column");
     if area.width < 4 || area.height < 3 {
         return;
     }
@@ -203,8 +209,12 @@ fn render_card(
     let stale = staleness(card, policies, now);
     let age_str = format_age(card.created, now);
 
+    // Priority: blocked → unfocused → selected → staleness.
+    // Blocked always shows BLOCKER color regardless of focus.
     let border_color = if card.blocked {
         Theme::BLOCKER
+    } else if !is_col_focused {
+        Theme::DIM
     } else if is_selected {
         Theme::CARD_SELECTED_BORDER
     } else {
@@ -235,6 +245,11 @@ fn render_card(
 
     // Build the right-side glyphs for line 1
     let mut right_glyphs: Vec<Span> = Vec::new();
+
+    // Text content (title, assignees, tags) dims when the column is unfocused.
+    let focused_color = |semantic: Color| -> Color {
+        if is_col_focused { semantic } else { Theme::DIM }
+    };
 
     // Staleness glyph
     match stale {
@@ -323,7 +338,9 @@ fn render_card(
     };
     let title_line = Line::from(Span::styled(
         title,
-        Style::default().fg(Theme::CARD_TITLE).add_modifier(selected_mod),
+        Style::default()
+            .fg(focused_color(Theme::CARD_TITLE))
+            .add_modifier(selected_mod),
     ));
 
     // Render lines
@@ -350,7 +367,9 @@ fn render_card(
             }
             spans.push(Span::styled(
                 format!("@{assignee}"),
-                Style::default().fg(Theme::ASSIGNEE).add_modifier(selected_mod),
+                Style::default()
+                    .fg(focused_color(Theme::ASSIGNEE))
+                    .add_modifier(selected_mod),
             ));
             need_sep = true;
         }
@@ -360,7 +379,9 @@ fn render_card(
             }
             spans.push(Span::styled(
                 tag.as_str(),
-                Style::default().fg(Theme::tag_color(tag)).add_modifier(selected_mod),
+                Style::default()
+                    .fg(focused_color(Theme::tag_color(tag)))
+                    .add_modifier(selected_mod),
             ));
             need_sep = true;
         }

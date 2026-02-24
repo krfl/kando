@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::board::age::run_auto_close;
-use crate::board::storage::{find_kando_dir, load_board, load_trash, save_board, trash_card, restore_card, TrashEntry};
+use crate::board::storage::{find_kando_dir, load_board, load_local_config, load_trash, save_board, trash_card, restore_card, TrashEntry};
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
@@ -188,6 +188,8 @@ pub struct AppState {
     pub cached_trash_ids: Vec<(String, String)>, // (id, title)
     /// Use Nerd Font glyphs instead of ASCII icons.
     pub nerd_font: bool,
+    /// Dim unfocused columns and their cards. Persisted in .kando/local.toml.
+    pub focus_mode: bool,
 }
 
 impl AppState {
@@ -209,6 +211,7 @@ impl AppState {
             deleted_this_session: false,
             cached_trash_ids: Vec::new(),
             nerd_font: false,
+            focus_mode: false,
         }
     }
 
@@ -428,6 +431,12 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
     // CLI --nerd-font flag overrides config; otherwise use board config value
     state.nerd_font = nerd_font_flag || board.nerd_font;
+
+    // Load per-user local preferences (focus mode, etc.)
+    match load_local_config(&kando_dir) {
+        Ok(cfg) => state.focus_mode = cfg.focus_mode,
+        Err(e) => state.notify_error(format!("local.toml: {e}")),
+    }
 
     // Initialize git sync if configured
     if let Some(ref branch) = board.sync_branch {

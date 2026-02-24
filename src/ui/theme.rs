@@ -72,8 +72,11 @@ impl Theme {
 
     // Column
     pub const COLUMN_HEADER: Color = Color::Reset;
-    pub const COLUMN_BORDER: Color = Color::Reset;
-    pub const COLUMN_FOCUSED_BORDER: Color = Color::Cyan;
+    /// Unfocused column borders recede to DarkGray.
+    pub const COLUMN_BORDER: Color = Color::DarkGray;
+    /// Focused column border uses the terminal default fg; Modifier::BOLD
+    /// in board_view carries the visual emphasis.
+    pub const COLUMN_FOCUSED_BORDER: Color = Color::Reset;
 
     // Card
     pub const CARD_BORDER: Color = Color::Reset;
@@ -210,8 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn column_focused_border_is_cyan() {
-        assert_eq!(Theme::COLUMN_FOCUSED_BORDER, Color::Cyan);
+    fn column_focused_border_is_reset() {
+        assert_eq!(Theme::COLUMN_FOCUSED_BORDER, Color::Reset);
+    }
+
+    #[test]
+    fn column_border_is_dimmed() {
+        assert_eq!(Theme::COLUMN_BORDER, Color::DarkGray);
     }
 
     #[test]

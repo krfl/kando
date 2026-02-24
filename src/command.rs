@@ -4,7 +4,7 @@
 //! and runtime configuration changes.
 
 use crate::app::{AppState, TextBuffer};
-use crate::board::storage::{save_board, load_trash, restore_card, load_board};
+use crate::board::storage::{save_board, load_trash, restore_card, load_board, save_local_config};
 use crate::board::Board;
 
 // ---------------------------------------------------------------------------
@@ -25,6 +25,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo { name: "col",      description: "Column visibility" },
     CommandInfo { name: "count",    description: "Card counts" },
     CommandInfo { name: "find",     description: "Find card" },
+    CommandInfo { name: "focus",    description: "Toggle focus mode (dim unfocused columns)" },
     CommandInfo { name: "metrics",  description: "Board metrics" },
     CommandInfo { name: "move",     description: "Move card to column" },
     CommandInfo { name: "priority", description: "Set priority" },
@@ -41,9 +42,11 @@ pub const COMMANDS: &[CommandInfo] = &[
 
 /// All recognized command names (for completion), derived from COMMANDS.
 const COMMAND_NAMES: &[&str] = &[
-    "assign", "col", "count", "find", "metrics", "move", "priority",
+    "assign", "col", "count", "find", "focus", "metrics", "move", "priority",
     "quit", "reload", "rename", "restore", "sort", "tag", "unassign", "untag", "wip",
 ];
+
+const FOCUS_ARGS: &[&str] = &["on", "off"];
 
 const PRIORITY_NAMES: &[&str] = &["low", "normal", "high", "urgent"];
 const SORT_FIELDS: &[&str] = &["priority", "created", "updated", "title"];
@@ -154,6 +157,7 @@ fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String]
                 vec![] // WIP limit is a number — no completion
             }
         }
+        "focus" => FOCUS_ARGS.iter().map(|s| s.to_string()).collect(),
         "restore" => trash_ids.iter().map(|(id, _)| id.clone()).collect(),
         _ => vec![], // find, rename, reload, count — no arg completion
     };
@@ -366,6 +370,7 @@ pub fn execute_command(
         "wip" => cmd_wip(board, state, rest, kando_dir),
         "sort" => cmd_sort(board, state, rest, kando_dir),
         "find" => cmd_find(board, state, rest),
+        "focus" => cmd_focus(state, rest, kando_dir),
         "col" => cmd_col(board, state, rest, kando_dir),
         "restore" => cmd_restore(board, state, rest, kando_dir),
         "reload" => cmd_reload(board, state, kando_dir),
@@ -980,6 +985,31 @@ fn cmd_reload(
 }
 
 /// :count — Show card counts per column.
+fn cmd_focus(
+    state: &mut AppState,
+    args: &str,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let new_mode = match args.trim() {
+        "on"  => true,
+        "off" => false,
+        ""    => !state.focus_mode,
+        other => {
+            state.notify_error(format!("focus: expected on, off, or no argument; got '{other}'"));
+            return Ok(None);
+        }
+    };
+    state.focus_mode = new_mode;
+    let mut cfg = crate::board::storage::load_local_config(kando_dir).unwrap_or_default();
+    cfg.focus_mode = new_mode;
+    if let Err(e) = save_local_config(kando_dir, &cfg) {
+        state.notify_error(format!("focus mode set but could not save: {e}"));
+    } else {
+        state.notify(if new_mode { "Focus mode on" } else { "Focus mode off" });
+    }
+    Ok(None)
+}
+
 fn cmd_count(board: &Board, state: &mut AppState) -> color_eyre::Result<Option<String>> {
     let counts: Vec<String> = board
         .columns
@@ -1804,5 +1834,89 @@ mod tests {
     #[test]
     fn current_token_partial_arg() {
         assert_eq!(current_token("move back"), "back");
+    }
+
+    // -----------------------------------------------------------------------
+    // :focus command
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cmd_focus_on_sets_focus_mode_true() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focus_mode = false;
+        let result = execute_command(&mut board, &mut state, "focus on", &kando_dir).unwrap();
+        assert!(result.is_none());
+        assert!(state.focus_mode);
+        assert!(state.notification.as_ref().unwrap().contains("on"));
+        let cfg = crate::board::storage::load_local_config(&kando_dir).unwrap();
+        assert!(cfg.focus_mode);
+    }
+
+    #[test]
+    fn cmd_focus_off_sets_focus_mode_false() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focus_mode = true;
+        execute_command(&mut board, &mut state, "focus off", &kando_dir).unwrap();
+        assert!(!state.focus_mode);
+        assert!(state.notification.as_ref().unwrap().contains("off"));
+        let cfg = crate::board::storage::load_local_config(&kando_dir).unwrap();
+        assert!(!cfg.focus_mode);
+    }
+
+    #[test]
+    fn cmd_focus_toggle_from_false_to_true() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focus_mode = false;
+        execute_command(&mut board, &mut state, "focus", &kando_dir).unwrap();
+        assert!(state.focus_mode);
+        assert!(state.notification.as_ref().unwrap().contains("on"));
+    }
+
+    #[test]
+    fn cmd_focus_toggle_from_true_to_false() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focus_mode = true;
+        execute_command(&mut board, &mut state, "focus", &kando_dir).unwrap();
+        assert!(!state.focus_mode);
+        assert!(state.notification.as_ref().unwrap().contains("off"));
+    }
+
+    #[test]
+    fn cmd_focus_invalid_arg_notifies_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focus_mode = false;
+        execute_command(&mut board, &mut state, "focus sideways", &kando_dir).unwrap();
+        assert!(!state.focus_mode, "focus_mode must not change on invalid arg");
+        assert_eq!(state.notification_level, crate::app::NotificationLevel::Error);
+        assert!(state.notification.as_ref().unwrap().contains("sideways"));
+        assert!(!kando_dir.join("local.toml").exists(), "local.toml must not be written on invalid arg");
+    }
+
+    #[test]
+    fn cmd_focus_on_when_already_on_succeeds() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focus_mode = true;
+        execute_command(&mut board, &mut state, "focus on", &kando_dir).unwrap();
+        assert!(state.focus_mode);
+        assert_eq!(state.notification_level, crate::app::NotificationLevel::Info);
+    }
+
+    #[test]
+    fn cmd_focus_returns_ok_none() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let r1 = execute_command(&mut board, &mut state, "focus on", &kando_dir).unwrap();
+        let r2 = execute_command(&mut board, &mut state, "focus off", &kando_dir).unwrap();
+        assert!(r1.is_none(), ":focus must return Ok(None) — not a board mutation");
+        assert!(r2.is_none());
+    }
+
+    #[test]
+    fn cmd_focus_with_trailing_whitespace_treated_as_toggle() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focus_mode = false;
+        // "focus  " — trailing spaces trim to "" which is the toggle branch
+        execute_command(&mut board, &mut state, "focus  ", &kando_dir).unwrap();
+        assert!(state.focus_mode);
+        assert_eq!(state.notification_level, crate::app::NotificationLevel::Info);
     }
 }
