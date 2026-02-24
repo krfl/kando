@@ -394,11 +394,18 @@ pub fn format_text(metrics: &BoardMetrics) -> String {
 
     // WIP
     out.push_str(&format!("WIP per Column (Active: {})\n", metrics.active_wip_total));
+    let max_name_len = metrics
+        .wip_per_column
+        .iter()
+        .map(|w| w.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(10);
     for entry in &metrics.wip_per_column {
         if let Some(limit) = entry.wip_limit {
-            out.push_str(&format!("  {}: {}/{}\n", entry.name, entry.count, limit));
+            out.push_str(&format!("  {:<width$} {}/{}\n", entry.name, entry.count, limit, width = max_name_len));
         } else {
-            out.push_str(&format!("  {}: {}\n", entry.name, entry.count));
+            out.push_str(&format!("  {:<width$} {}\n", entry.name, entry.count, width = max_name_len));
         }
     }
     if metrics.blocked_count > 0 {
@@ -419,7 +426,7 @@ pub fn format_text(metrics: &BoardMetrics) -> String {
             };
             let bar: String = "\u{2588}".repeat(bar_len);
             let arrival = metrics.arrival_per_week.get(i).map_or(0, |(_, c)| *c);
-            out.push_str(&format!("  {label} {bar} {count}  (arrived: {arrival})\n"));
+            out.push_str(&format!("  {:<10} {bar} {count}  (arrived: {arrival})\n", label));
         }
         if let Some(stddev) = metrics.throughput_stddev {
             out.push_str(&format!("  Variability: stddev {:.1} cards/week\n", stddev));
@@ -1199,5 +1206,94 @@ mod tests {
         ]);
         let metrics = compute_metrics(&board, None);
         assert!(metrics.throughput_stddev.is_none());
+    }
+
+    // ── Math helper tests ──
+
+    #[test]
+    fn avg_empty_returns_zero() {
+        assert_eq!(avg(&[]), 0.0);
+    }
+
+    #[test]
+    fn avg_single_value() {
+        assert_eq!(avg(&[5.0]), 5.0);
+    }
+
+    #[test]
+    fn avg_multiple_values() {
+        assert!((avg(&[2.0, 4.0, 6.0]) - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn median_empty_returns_zero() {
+        assert_eq!(median(&[]), 0.0);
+    }
+
+    #[test]
+    fn median_single_value() {
+        assert_eq!(median(&[5.0]), 5.0);
+    }
+
+    #[test]
+    fn median_odd_count() {
+        assert_eq!(median(&[1.0, 2.0, 3.0]), 2.0);
+    }
+
+    #[test]
+    fn percentile_empty_returns_zero() {
+        assert_eq!(percentile(&[], 85), 0.0);
+    }
+
+    #[test]
+    fn percentile_single_value() {
+        assert_eq!(percentile(&[10.0], 85), 10.0);
+    }
+
+    #[test]
+    fn percentile_0_returns_first() {
+        assert_eq!(percentile(&[1.0, 2.0, 3.0], 0), 1.0);
+    }
+
+    #[test]
+    fn percentile_100_returns_last() {
+        assert_eq!(percentile(&[1.0, 2.0, 3.0], 100), 3.0);
+    }
+
+    // ── Week helper tests ──
+
+    #[test]
+    fn format_week_output() {
+        let d = NaiveDate::from_ymd_opt(2025, 1, 6).unwrap(); // Monday of W02
+        assert_eq!(format_week(d.iso_week()), "2025-W02");
+    }
+
+    #[test]
+    fn monday_of_week_is_monday() {
+        let d = NaiveDate::from_ymd_opt(2025, 6, 12).unwrap(); // Thursday
+        let mon = monday_of_week(d.iso_week());
+        assert_eq!(mon.weekday(), chrono::Weekday::Mon);
+        assert_eq!(mon, NaiveDate::from_ymd_opt(2025, 6, 9).unwrap());
+    }
+
+    #[test]
+    fn fill_week_gaps_inserts_missing() {
+        use std::collections::BTreeMap;
+        let d1 = NaiveDate::from_ymd_opt(2025, 6, 2).unwrap(); // W23
+        let d3 = NaiveDate::from_ymd_opt(2025, 6, 16).unwrap(); // W25
+        let mut counts = BTreeMap::new();
+        counts.insert(d1.iso_week(), 3);
+        counts.insert(d3.iso_week(), 1);
+        let result = fill_week_gaps(&counts);
+        assert_eq!(result.len(), 3); // W23, W24, W25
+        assert_eq!(result[0].1, 3);
+        assert_eq!(result[1].1, 0); // gap filled
+        assert_eq!(result[2].1, 1);
+    }
+
+    #[test]
+    fn oldest_card_created_empty_board() {
+        let board = make_board(vec![make_column("backlog", "Backlog", vec![])]);
+        assert!(oldest_card_created(&board).is_none());
     }
 }

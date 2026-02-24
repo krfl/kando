@@ -181,6 +181,47 @@ mod tests {
     }
 
     #[test]
+    fn priority_color_all_variants() {
+        assert_eq!(Theme::priority_color(Priority::Low), Color::Green);
+        assert_eq!(Theme::priority_color(Priority::Normal), Color::Reset);
+        assert_eq!(Theme::priority_color(Priority::High), Color::Yellow);
+        assert_eq!(Theme::priority_color(Priority::Urgent), Color::Red);
+    }
+
+    #[test]
+    fn tag_color_deterministic() {
+        let c1 = Theme::tag_color("bug");
+        let c2 = Theme::tag_color("bug");
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn tag_color_different_tags_may_differ() {
+        // Not guaranteed but very likely for distinct strings
+        let c1 = Theme::tag_color("bug");
+        let c2 = Theme::tag_color("feature");
+        // At minimum both should be valid colors (not panic)
+        let _ = (c1, c2);
+    }
+
+    #[test]
+    fn tag_color_empty_string_no_panic() {
+        let _ = Theme::tag_color("");
+    }
+
+    #[test]
+    fn dim_style_uses_dim_color() {
+        let s = Theme::dim_style();
+        assert_eq!(s.fg, Some(Theme::DIM));
+    }
+
+    #[test]
+    fn status_style_uses_fg_color() {
+        let s = Theme::status_style();
+        assert_eq!(s.fg, Some(Theme::FG));
+    }
+
+    #[test]
     fn all_icon_fields_are_non_empty() {
         for nerd_font in [false, true] {
             let i = icons(nerd_font);

@@ -332,4 +332,368 @@ mod tests {
         let action = map_key(key(KeyCode::Char('x')), &Mode::Metrics { scroll: 0 });
         assert_eq!(action, Action::None);
     }
+
+    // ── Normal mode bindings ──
+
+    #[test]
+    fn normal_h_moves_left() {
+        assert_eq!(map_key(key(KeyCode::Char('h')), &Mode::Normal), Action::FocusPrevColumn);
+        assert_eq!(map_key(key(KeyCode::Left), &Mode::Normal), Action::FocusPrevColumn);
+    }
+
+    #[test]
+    fn normal_l_moves_right() {
+        assert_eq!(map_key(key(KeyCode::Char('l')), &Mode::Normal), Action::FocusNextColumn);
+        assert_eq!(map_key(key(KeyCode::Right), &Mode::Normal), Action::FocusNextColumn);
+    }
+
+    #[test]
+    fn normal_j_selects_next() {
+        assert_eq!(map_key(key(KeyCode::Char('j')), &Mode::Normal), Action::SelectNextCard);
+        assert_eq!(map_key(key(KeyCode::Down), &Mode::Normal), Action::SelectNextCard);
+    }
+
+    #[test]
+    fn normal_k_selects_prev() {
+        assert_eq!(map_key(key(KeyCode::Char('k')), &Mode::Normal), Action::SelectPrevCard);
+        assert_eq!(map_key(key(KeyCode::Up), &Mode::Normal), Action::SelectPrevCard);
+    }
+
+    #[test]
+    fn normal_shift_h_l_moves_card() {
+        assert_eq!(map_key(key(KeyCode::Char('H')), &Mode::Normal), Action::MoveCardPrevColumn);
+        assert_eq!(map_key(key(KeyCode::Char('L')), &Mode::Normal), Action::MoveCardNextColumn);
+    }
+
+    #[test]
+    fn normal_enter_opens_detail() {
+        assert_eq!(map_key(key(KeyCode::Enter), &Mode::Normal), Action::OpenCardDetail);
+    }
+
+    #[test]
+    fn normal_slash_starts_filter() {
+        assert_eq!(map_key(key(KeyCode::Char('/')), &Mode::Normal), Action::StartFilter);
+    }
+
+    #[test]
+    fn normal_colon_enters_command() {
+        assert_eq!(map_key(key(KeyCode::Char(':')), &Mode::Normal), Action::EnterCommandMode);
+    }
+
+    #[test]
+    fn normal_g_enters_goto() {
+        assert_eq!(map_key(key(KeyCode::Char('g')), &Mode::Normal), Action::EnterGotoMode);
+    }
+
+    #[test]
+    fn normal_space_enters_space_mode() {
+        assert_eq!(map_key(key(KeyCode::Char(' ')), &Mode::Normal), Action::EnterSpaceMode);
+    }
+
+    #[test]
+    fn normal_q_quits() {
+        assert_eq!(map_key(key(KeyCode::Char('q')), &Mode::Normal), Action::Quit);
+    }
+
+    #[test]
+    fn normal_u_undoes() {
+        assert_eq!(map_key(key(KeyCode::Char('u')), &Mode::Normal), Action::Undo);
+    }
+
+    #[test]
+    fn normal_unmapped_key_is_noop() {
+        assert_eq!(map_key(key(KeyCode::Char('x')), &Mode::Normal), Action::None);
+    }
+
+    // ── Input mode bindings ──
+
+    fn key_ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn input_enter_confirms() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key(KeyCode::Enter), &mode), Action::InputConfirm);
+    }
+
+    #[test]
+    fn input_esc_cancels() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::InputCancel);
+    }
+
+    #[test]
+    fn input_ctrl_a_homes() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key_ctrl(KeyCode::Char('a')), &mode), Action::InputHome);
+    }
+
+    #[test]
+    fn input_ctrl_e_ends() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key_ctrl(KeyCode::Char('e')), &mode), Action::InputEnd);
+    }
+
+    #[test]
+    fn input_ctrl_w_deletes_word() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key_ctrl(KeyCode::Char('w')), &mode), Action::InputDeleteWord);
+    }
+
+    #[test]
+    fn input_char_inserts() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key(KeyCode::Char('a')), &mode), Action::InputChar('a'));
+    }
+
+    #[test]
+    fn input_backspace_deletes() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key(KeyCode::Backspace), &mode), Action::InputBackspace);
+    }
+
+    #[test]
+    fn input_left_right_moves() {
+        let mode = Mode::Input {
+            prompt: "Title".into(),
+            buf: crate::app::TextBuffer::empty(),
+            on_confirm: crate::app::InputTarget::NewCardTitle,
+        };
+        assert_eq!(map_key(key(KeyCode::Left), &mode), Action::InputLeft);
+        assert_eq!(map_key(key(KeyCode::Right), &mode), Action::InputRight);
+    }
+
+    // ── Command mode bindings ──
+
+    #[test]
+    fn command_tab_completes() {
+        let mode = Mode::Command { cmd: crate::command::CommandState::new() };
+        assert_eq!(map_key(key(KeyCode::Tab), &mode), Action::InputComplete);
+        assert_eq!(map_key(key(KeyCode::BackTab), &mode), Action::InputCompleteBack);
+    }
+
+    #[test]
+    fn command_enter_confirms() {
+        let mode = Mode::Command { cmd: crate::command::CommandState::new() };
+        assert_eq!(map_key(key(KeyCode::Enter), &mode), Action::InputConfirm);
+    }
+
+    // ── Goto mode bindings ──
+
+    #[test]
+    fn goto_digit_jumps() {
+        assert_eq!(map_key(key(KeyCode::Char('1')), &Mode::Goto), Action::JumpToColumn(0));
+        assert_eq!(map_key(key(KeyCode::Char('3')), &Mode::Goto), Action::JumpToColumn(2));
+    }
+
+    #[test]
+    fn goto_g_jumps_first() {
+        assert_eq!(map_key(key(KeyCode::Char('g')), &Mode::Goto), Action::JumpToFirstCard);
+    }
+
+    #[test]
+    fn goto_e_jumps_last() {
+        assert_eq!(map_key(key(KeyCode::Char('e')), &Mode::Goto), Action::JumpToLastCard);
+    }
+
+    #[test]
+    fn goto_b_jumps_backlog() {
+        assert_eq!(map_key(key(KeyCode::Char('b')), &Mode::Goto), Action::JumpToBacklog);
+    }
+
+    #[test]
+    fn goto_d_jumps_done() {
+        assert_eq!(map_key(key(KeyCode::Char('d')), &Mode::Goto), Action::JumpToDone);
+    }
+
+    // ── Space mode bindings ──
+
+    #[test]
+    fn space_n_new_card() {
+        assert_eq!(map_key(key(KeyCode::Char('n')), &Mode::Space), Action::NewCard);
+    }
+
+    #[test]
+    fn space_d_delete_card() {
+        assert_eq!(map_key(key(KeyCode::Char('d')), &Mode::Space), Action::DeleteCard);
+    }
+
+    #[test]
+    fn space_e_edit_external() {
+        assert_eq!(map_key(key(KeyCode::Char('e')), &Mode::Space), Action::EditCardExternal);
+    }
+
+    #[test]
+    fn space_p_pick_priority() {
+        assert_eq!(map_key(key(KeyCode::Char('p')), &Mode::Space), Action::PickPriority);
+    }
+
+    #[test]
+    fn space_m_move_to_column() {
+        assert_eq!(map_key(key(KeyCode::Char('m')), &Mode::Space), Action::MoveToColumn);
+    }
+
+    #[test]
+    fn space_b_toggle_blocker() {
+        assert_eq!(map_key(key(KeyCode::Char('b')), &Mode::Space), Action::ToggleBlocker);
+    }
+
+    // ── View mode bindings ──
+
+    #[test]
+    fn view_h_toggles_hidden() {
+        assert_eq!(map_key(key(KeyCode::Char('h')), &Mode::View), Action::ToggleHiddenColumns);
+    }
+
+    #[test]
+    fn view_esc_cancels() {
+        assert_eq!(map_key(key(KeyCode::Esc), &Mode::View), Action::None);
+    }
+
+    // ── Confirm mode bindings ──
+
+    #[test]
+    fn confirm_y_confirms() {
+        let mode = Mode::Confirm {
+            prompt: "Delete?".into(),
+            on_confirm: crate::app::ConfirmTarget::DeleteCard("1".into()),
+        };
+        assert_eq!(map_key(key(KeyCode::Char('y')), &mode), Action::Confirm);
+        assert_eq!(map_key(key(KeyCode::Enter), &mode), Action::Confirm);
+    }
+
+    #[test]
+    fn confirm_n_denies() {
+        let mode = Mode::Confirm {
+            prompt: "Delete?".into(),
+            on_confirm: crate::app::ConfirmTarget::DeleteCard("1".into()),
+        };
+        assert_eq!(map_key(key(KeyCode::Char('n')), &mode), Action::Deny);
+        assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::Deny);
+    }
+
+    // ── Picker mode bindings ──
+
+    #[test]
+    fn picker_j_k_navigates() {
+        let mode = Mode::Picker {
+            title: "Tags".into(),
+            items: vec![],
+            selected: 0,
+            target: crate::app::PickerTarget::TagFilter,
+        };
+        assert_eq!(map_key(key(KeyCode::Char('j')), &mode), Action::SelectNextCard);
+        assert_eq!(map_key(key(KeyCode::Char('k')), &mode), Action::SelectPrevCard);
+    }
+
+    #[test]
+    fn picker_enter_confirms() {
+        let mode = Mode::Picker {
+            title: "Tags".into(),
+            items: vec![],
+            selected: 0,
+            target: crate::app::PickerTarget::TagFilter,
+        };
+        assert_eq!(map_key(key(KeyCode::Enter), &mode), Action::InputConfirm);
+    }
+
+    // ── FilterMenu mode bindings ──
+
+    #[test]
+    fn filter_menu_t_starts_tag_filter() {
+        assert_eq!(map_key(key(KeyCode::Char('t')), &Mode::FilterMenu), Action::StartTagFilter);
+    }
+
+    #[test]
+    fn filter_menu_a_starts_assignee_filter() {
+        assert_eq!(map_key(key(KeyCode::Char('a')), &Mode::FilterMenu), Action::StartAssigneeFilter);
+    }
+
+    // ── CardDetail mode bindings ──
+
+    #[test]
+    fn detail_e_edits_external() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('e')), &mode), Action::EditCardExternal);
+    }
+
+    #[test]
+    fn detail_t_edits_tags() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('t')), &mode), Action::EditTags);
+    }
+
+    #[test]
+    fn detail_p_cycles_priority() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('p')), &mode), Action::CyclePriority);
+    }
+
+    #[test]
+    fn detail_j_k_navigates_cards() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('j')), &mode), Action::DetailNextCard);
+        assert_eq!(map_key(key(KeyCode::Char('k')), &mode), Action::DetailPrevCard);
+    }
+
+    #[test]
+    fn detail_esc_closes() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::ClosePanel);
+    }
+
+    // ── mode_bindings tests ──
+
+    #[test]
+    fn mode_bindings_goto_returns_bindings() {
+        let bindings = mode_bindings(&Mode::Goto);
+        assert!(!bindings.is_empty());
+    }
+
+    #[test]
+    fn mode_bindings_space_returns_bindings() {
+        let bindings = mode_bindings(&Mode::Space);
+        assert!(!bindings.is_empty());
+    }
+
+    #[test]
+    fn mode_bindings_view_returns_bindings() {
+        let bindings = mode_bindings(&Mode::View);
+        assert!(!bindings.is_empty());
+    }
+
+    #[test]
+    fn mode_bindings_normal_returns_empty() {
+        let bindings = mode_bindings(&Mode::Normal);
+        assert!(bindings.is_empty());
+    }
 }

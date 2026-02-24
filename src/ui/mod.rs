@@ -74,3 +74,60 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centered_rect_basic() {
+        let area = Rect::new(0, 0, 100, 100);
+        let r = centered_rect(area, 80, 60, 0, 0);
+        assert_eq!(r.width, 80);
+        assert_eq!(r.height, 60);
+        assert_eq!(r.x, 10);
+        assert_eq!(r.y, 20);
+    }
+
+    #[test]
+    fn centered_rect_min_width_enforced() {
+        let area = Rect::new(0, 0, 100, 100);
+        // 10% of 100 = 10, but min_w = 50
+        let r = centered_rect(area, 10, 50, 50, 0);
+        assert_eq!(r.width, 50);
+    }
+
+    #[test]
+    fn centered_rect_min_height_enforced() {
+        let area = Rect::new(0, 0, 100, 100);
+        let r = centered_rect(area, 50, 10, 0, 40);
+        assert_eq!(r.height, 40);
+    }
+
+    #[test]
+    fn centered_rect_capped_at_area() {
+        let area = Rect::new(0, 0, 50, 50);
+        // min_w=200 exceeds area width=50, should be clamped
+        let r = centered_rect(area, 100, 100, 200, 200);
+        assert_eq!(r.width, 50);
+        assert_eq!(r.height, 50);
+    }
+
+    #[test]
+    fn centered_rect_zero_area() {
+        let area = Rect::new(0, 0, 0, 0);
+        let r = centered_rect(area, 80, 60, 0, 0);
+        assert_eq!(r.width, 0);
+        assert_eq!(r.height, 0);
+    }
+
+    #[test]
+    fn centered_rect_with_offset() {
+        let area = Rect::new(10, 20, 100, 100);
+        let r = centered_rect(area, 50, 50, 0, 0);
+        assert_eq!(r.width, 50);
+        assert_eq!(r.height, 50);
+        assert_eq!(r.x, 35); // 10 + (100-50)/2
+        assert_eq!(r.y, 45); // 20 + (100-50)/2
+    }
+}

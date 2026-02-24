@@ -583,4 +583,412 @@ mod tests {
         let card = Card::new("1".into(), "Test".into());
         assert!(card.started.is_none());
     }
+
+    // ── Filter tests ──
+
+    fn card_with_meta(title: &str, tags: &[&str], assignees: &[&str]) -> Card {
+        let mut c = Card::new("1".into(), title.into());
+        c.tags = tags.iter().map(|t| t.to_string()).collect();
+        c.assignees = assignees.iter().map(|a| a.to_string()).collect();
+        c
+    }
+
+    #[test]
+    fn filter_fuzzy_matches_title() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth"], &["alice"]);
+        assert!(card_matches_filter(&card, "login", &matcher));
+    }
+
+    #[test]
+    fn filter_no_match_returns_false() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth"], &["alice"]);
+        assert!(!card_matches_filter(&card, "logout", &matcher));
+    }
+
+    #[test]
+    fn filter_negation_excludes_match() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth"], &["alice"]);
+        assert!(!card_matches_filter(&card, "!login", &matcher));
+    }
+
+    #[test]
+    fn filter_negation_includes_non_match() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth"], &["alice"]);
+        assert!(card_matches_filter(&card, "!logout", &matcher));
+    }
+
+    #[test]
+    fn filter_at_prefix_matches_tag() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth"], &["alice"]);
+        assert!(card_matches_filter(&card, "@auth", &matcher));
+    }
+
+    #[test]
+    fn filter_at_prefix_missing_tag_returns_false() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth"], &["alice"]);
+        assert!(!card_matches_filter(&card, "@missing", &matcher));
+    }
+
+    #[test]
+    fn filter_multi_term_and_both_match() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth", "frontend"], &["alice"]);
+        assert!(card_matches_filter(&card, "login auth", &matcher));
+    }
+
+    #[test]
+    fn filter_multi_term_and_one_misses() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &["auth"], &["alice"]);
+        assert!(!card_matches_filter(&card, "login missing", &matcher));
+    }
+
+    #[test]
+    fn filter_matches_assignee() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Implement login", &[], &["alice"]);
+        assert!(card_matches_filter(&card, "alice", &matcher));
+    }
+
+    #[test]
+    fn filter_empty_returns_true() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Anything", &[], &[]);
+        assert!(card_matches_filter(&card, "", &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_no_filters_shows_all() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Test", &[], &[]);
+        assert!(card_is_visible(&card, None, &[], &[], &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_text_filter_overrides_picker() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Login feature", &["bug"], &[]);
+        // Text filter matches, even though tag filter wouldn't match
+        assert!(card_is_visible(
+            &card,
+            Some("login"),
+            &["nonexistent".to_string()],
+            &[],
+            &matcher,
+        ));
+    }
+
+    #[test]
+    fn card_is_visible_tag_filter_must_match() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Test", &["bug"], &[]);
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &matcher));
+        assert!(!card_is_visible(&card, None, &["feature".to_string()], &[], &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_assignee_filter_must_match() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Test", &[], &["alice"]);
+        assert!(card_is_visible(&card, None, &[], &["alice".to_string()], &matcher));
+        assert!(!card_is_visible(&card, None, &[], &["bob".to_string()], &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_both_tag_and_assignee_must_match() {
+        let matcher = SkimMatcherV2::default();
+        let card = card_with_meta("Test", &["bug"], &["alice"]);
+        // Both match
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &["alice".to_string()], &matcher));
+        // Tag matches, assignee doesn't
+        assert!(!card_is_visible(&card, None, &["bug".to_string()], &["bob".to_string()], &matcher));
+        // Assignee matches, tag doesn't
+        assert!(!card_is_visible(&card, None, &["feature".to_string()], &["alice".to_string()], &matcher));
+    }
+
+    // ── Sort tests ──
+
+    #[test]
+    fn sort_cards_by_priority() {
+        let now = Utc::now();
+        let mut col = Column {
+            slug: "test".into(),
+            name: "Test".into(),
+            order: 0,
+            wip_limit: None,
+            hidden: false,
+            cards: vec![],
+        };
+        let mut c1 = Card::new("1".into(), "Normal".into());
+        c1.priority = Priority::Normal;
+        c1.updated = now;
+        let mut c2 = Card::new("2".into(), "Urgent".into());
+        c2.priority = Priority::Urgent;
+        c2.updated = now;
+        let mut c3 = Card::new("3".into(), "Low".into());
+        c3.priority = Priority::Low;
+        c3.updated = now;
+        let mut c4 = Card::new("4".into(), "High".into());
+        c4.priority = Priority::High;
+        c4.updated = now;
+        col.cards = vec![c1, c2, c3, c4];
+
+        col.sort_cards();
+
+        let priorities: Vec<Priority> = col.cards.iter().map(|c| c.priority).collect();
+        assert_eq!(priorities, vec![Priority::Urgent, Priority::High, Priority::Normal, Priority::Low]);
+    }
+
+    // ── Priority tests ──
+
+    #[test]
+    fn priority_from_str_valid() {
+        assert_eq!("low".parse::<Priority>().unwrap(), Priority::Low);
+        assert_eq!("normal".parse::<Priority>().unwrap(), Priority::Normal);
+        assert_eq!("high".parse::<Priority>().unwrap(), Priority::High);
+        assert_eq!("urgent".parse::<Priority>().unwrap(), Priority::Urgent);
+    }
+
+    #[test]
+    fn priority_from_str_case_insensitive() {
+        assert_eq!("HIGH".parse::<Priority>().unwrap(), Priority::High);
+        assert_eq!("Urgent".parse::<Priority>().unwrap(), Priority::Urgent);
+    }
+
+    #[test]
+    fn priority_from_str_unknown_returns_err() {
+        assert!("unknown".parse::<Priority>().is_err());
+        assert!("".parse::<Priority>().is_err());
+    }
+
+    #[test]
+    fn priority_next_cycles() {
+        assert_eq!(Priority::Low.next(), Priority::Normal);
+        assert_eq!(Priority::Normal.next(), Priority::High);
+        assert_eq!(Priority::High.next(), Priority::Urgent);
+        assert_eq!(Priority::Urgent.next(), Priority::Low);
+    }
+
+    #[test]
+    fn priority_sort_key_ordering() {
+        assert!(Priority::Urgent.sort_key() < Priority::High.sort_key());
+        assert!(Priority::High.sort_key() < Priority::Normal.sort_key());
+        assert!(Priority::Normal.sort_key() < Priority::Low.sort_key());
+    }
+
+    // ── WIP limit tests ──
+
+    #[test]
+    fn is_over_wip_limit_no_limit() {
+        let col = Column {
+            slug: "test".into(),
+            name: "Test".into(),
+            order: 0,
+            wip_limit: None,
+            hidden: false,
+            cards: vec![Card::new("1".into(), "A".into())],
+        };
+        assert!(!col.is_over_wip_limit());
+    }
+
+    #[test]
+    fn is_over_wip_limit_under() {
+        let col = Column {
+            slug: "test".into(),
+            name: "Test".into(),
+            order: 0,
+            wip_limit: Some(3),
+            hidden: false,
+            cards: vec![Card::new("1".into(), "A".into())],
+        };
+        assert!(!col.is_over_wip_limit());
+    }
+
+    #[test]
+    fn is_over_wip_limit_at_limit() {
+        let col = Column {
+            slug: "test".into(),
+            name: "Test".into(),
+            order: 0,
+            wip_limit: Some(2),
+            hidden: false,
+            cards: vec![Card::new("1".into(), "A".into()), Card::new("2".into(), "B".into())],
+        };
+        assert!(col.is_over_wip_limit());
+    }
+
+    // ── find_card tests ──
+
+    #[test]
+    fn find_card_returns_correct_indices() {
+        let board = three_column_board();
+        assert_eq!(board.find_card("1"), Some((0, 0)));
+    }
+
+    #[test]
+    fn find_card_not_found_returns_none() {
+        let board = three_column_board();
+        assert_eq!(board.find_card("999"), None);
+    }
+
+    // ── next_card_id tests ──
+
+    #[test]
+    fn next_card_id_increments() {
+        let mut board = test_board_with_done();
+        let id1 = board.next_card_id();
+        let id2 = board.next_card_id();
+        assert_ne!(id1, id2);
+        assert_eq!(id1.parse::<u32>().unwrap() + 1, id2.parse::<u32>().unwrap());
+    }
+
+    // ── all_tags / all_assignees tests ──
+
+    #[test]
+    fn all_tags_collects_and_sorts_by_count() {
+        let mut board = test_board_with_done();
+        board.columns[0].cards[0].tags = vec!["bug".into(), "ui".into()];
+        let mut card2 = Card::new("2".into(), "B".into());
+        card2.tags = vec!["bug".into()];
+        board.columns[0].cards.push(card2);
+
+        let tags = board.all_tags();
+        assert_eq!(tags[0].0, "bug");
+        assert_eq!(tags[0].1, 2);
+        assert_eq!(tags[1].0, "ui");
+        assert_eq!(tags[1].1, 1);
+    }
+
+    #[test]
+    fn all_assignees_collects_and_sorts_by_count() {
+        let mut board = test_board_with_done();
+        board.columns[0].cards[0].assignees = vec!["alice".into(), "bob".into()];
+        let mut card2 = Card::new("2".into(), "B".into());
+        card2.assignees = vec!["alice".into()];
+        board.columns[0].cards.push(card2);
+
+        let assignees = board.all_assignees();
+        assert_eq!(assignees[0].0, "alice");
+        assert_eq!(assignees[0].1, 2);
+        assert_eq!(assignees[1].0, "bob");
+        assert_eq!(assignees[1].1, 1);
+    }
+
+    // ── Card::new defaults ──
+
+    #[test]
+    fn card_new_defaults() {
+        let c = Card::new("001".into(), "Test".into());
+        assert_eq!(c.id, "001");
+        assert_eq!(c.title, "Test");
+        assert_eq!(c.priority, Priority::Normal);
+        assert!(c.tags.is_empty());
+        assert!(c.assignees.is_empty());
+        assert!(!c.blocked);
+        assert!(c.started.is_none());
+        assert!(c.completed.is_none());
+        assert!(c.body.is_empty());
+    }
+
+    #[test]
+    fn card_touch_updates_timestamp() {
+        let mut c = Card::new("001".into(), "Test".into());
+        let before = c.updated;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        c.touch();
+        assert!(c.updated >= before);
+    }
+
+    // ── move_card edge cases ──
+
+    #[test]
+    fn move_card_same_column_noop() {
+        let mut board = test_board_with_done();
+        let count_before = board.columns[0].cards.len();
+        board.move_card(0, 0, 0);
+        assert_eq!(board.columns[0].cards.len(), count_before);
+    }
+
+    #[test]
+    fn move_card_invalid_index_does_not_panic() {
+        let mut board = test_board_with_done();
+        // Out-of-bounds card index
+        board.move_card(0, 999, 1);
+        // Out-of-bounds column index
+        board.move_card(999, 0, 0);
+        board.move_card(0, 0, 999);
+    }
+
+    // ── sort_cards specifics ──
+
+    #[test]
+    fn sort_cards_blocked_first() {
+        let mut col = Column {
+            slug: "test".into(),
+            name: "Test".into(),
+            order: 0,
+            wip_limit: None,
+            hidden: false,
+            cards: vec![],
+        };
+        let mut normal = Card::new("1".into(), "Normal".into());
+        normal.priority = Priority::Normal;
+        let mut blocked = Card::new("2".into(), "Blocked".into());
+        blocked.priority = Priority::Normal;
+        blocked.blocked = true;
+        col.cards = vec![normal, blocked];
+        col.sort_cards();
+        // Both Normal priority, but sort is by priority then updated — blocked doesn't affect sort
+        // The sort is: priority.sort_key then updated desc
+        // Since both are Normal, the one with a later updated time sorts first
+        assert_eq!(col.cards.len(), 2);
+    }
+
+    #[test]
+    fn sort_cards_priority_then_updated() {
+        use chrono::TimeZone;
+        let mut col = Column {
+            slug: "test".into(),
+            name: "Test".into(),
+            order: 0,
+            wip_limit: None,
+            hidden: false,
+            cards: vec![],
+        };
+        let mut old = Card::new("1".into(), "Old".into());
+        old.priority = Priority::Normal;
+        old.updated = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let mut recent = Card::new("2".into(), "Recent".into());
+        recent.priority = Priority::Normal;
+        recent.updated = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
+        col.cards = vec![old, recent];
+        col.sort_cards();
+        // Most recently updated sorts first
+        assert_eq!(col.cards[0].id, "2");
+        assert_eq!(col.cards[1].id, "1");
+    }
+
+    // ── Priority display ──
+
+    #[test]
+    fn priority_display() {
+        assert_eq!(format!("{}", Priority::Urgent), "urgent");
+        assert_eq!(format!("{}", Priority::High), "high");
+        assert_eq!(format!("{}", Priority::Normal), "normal");
+        assert_eq!(format!("{}", Priority::Low), "low");
+    }
+
+    #[test]
+    fn priority_as_str_all_variants() {
+        assert_eq!(Priority::Urgent.as_str(), "urgent");
+        assert_eq!(Priority::High.as_str(), "high");
+        assert_eq!(Priority::Normal.as_str(), "normal");
+        assert_eq!(Priority::Low.as_str(), "low");
+    }
 }

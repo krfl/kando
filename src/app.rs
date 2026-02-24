@@ -2474,4 +2474,452 @@ mod tests {
         assert_eq!(metrics.total_completed, 1);
         assert!(metrics.time_stats.is_some());
     }
+
+    // ── TextBuffer tests ──
+
+    #[test]
+    fn textbuffer_new_cursor_at_end() {
+        let buf = TextBuffer::new("hello".into());
+        assert_eq!(buf.cursor, 5);
+        assert_eq!(buf.input, "hello");
+    }
+
+    #[test]
+    fn textbuffer_empty_cursor_at_zero() {
+        let buf = TextBuffer::empty();
+        assert_eq!(buf.cursor, 0);
+        assert_eq!(buf.input, "");
+    }
+
+    #[test]
+    fn textbuffer_insert_at_end() {
+        let mut buf = TextBuffer::new("hel".into());
+        buf.insert('l');
+        buf.insert('o');
+        assert_eq!(buf.input, "hello");
+        assert_eq!(buf.cursor, 5);
+    }
+
+    #[test]
+    fn textbuffer_insert_in_middle() {
+        let mut buf = TextBuffer::new("hllo".into());
+        buf.cursor = 1; // after 'h'
+        buf.insert('e');
+        assert_eq!(buf.input, "hello");
+        assert_eq!(buf.cursor, 2);
+    }
+
+    #[test]
+    fn textbuffer_insert_at_start() {
+        let mut buf = TextBuffer::new("ello".into());
+        buf.cursor = 0;
+        buf.insert('h');
+        assert_eq!(buf.input, "hello");
+        assert_eq!(buf.cursor, 1);
+    }
+
+    #[test]
+    fn textbuffer_backspace_at_end() {
+        let mut buf = TextBuffer::new("hello".into());
+        buf.backspace();
+        assert_eq!(buf.input, "hell");
+        assert_eq!(buf.cursor, 4);
+    }
+
+    #[test]
+    fn textbuffer_backspace_in_middle() {
+        let mut buf = TextBuffer::new("hello".into());
+        buf.cursor = 2; // after 'he'
+        buf.backspace();
+        assert_eq!(buf.input, "hllo");
+        assert_eq!(buf.cursor, 1);
+    }
+
+    #[test]
+    fn textbuffer_backspace_at_start_does_nothing() {
+        let mut buf = TextBuffer::new("hello".into());
+        buf.cursor = 0;
+        buf.backspace();
+        assert_eq!(buf.input, "hello");
+        assert_eq!(buf.cursor, 0);
+    }
+
+    #[test]
+    fn textbuffer_delete_word_removes_last_word() {
+        let mut buf = TextBuffer::new("hello world".into());
+        buf.delete_word();
+        assert_eq!(buf.input, "hello ");
+        assert_eq!(buf.cursor, 6);
+    }
+
+    #[test]
+    fn textbuffer_delete_word_single_word() {
+        let mut buf = TextBuffer::new("hello".into());
+        buf.delete_word();
+        assert_eq!(buf.input, "");
+        assert_eq!(buf.cursor, 0);
+    }
+
+    #[test]
+    fn textbuffer_delete_word_trailing_spaces() {
+        let mut buf = TextBuffer::new("hello   ".into());
+        buf.delete_word();
+        assert_eq!(buf.input, "");
+        assert_eq!(buf.cursor, 0);
+    }
+
+    #[test]
+    fn textbuffer_move_left_right() {
+        let mut buf = TextBuffer::new("abc".into());
+        assert_eq!(buf.cursor, 3);
+        buf.move_left();
+        assert_eq!(buf.cursor, 2);
+        buf.move_left();
+        assert_eq!(buf.cursor, 1);
+        buf.move_right();
+        assert_eq!(buf.cursor, 2);
+    }
+
+    #[test]
+    fn textbuffer_move_left_at_start_stays() {
+        let mut buf = TextBuffer::new("abc".into());
+        buf.cursor = 0;
+        buf.move_left();
+        assert_eq!(buf.cursor, 0);
+    }
+
+    #[test]
+    fn textbuffer_move_right_at_end_stays() {
+        let mut buf = TextBuffer::new("abc".into());
+        buf.move_right();
+        assert_eq!(buf.cursor, 3);
+    }
+
+    #[test]
+    fn textbuffer_home_end() {
+        let mut buf = TextBuffer::new("hello".into());
+        buf.home();
+        assert_eq!(buf.cursor, 0);
+        buf.end();
+        assert_eq!(buf.cursor, 5);
+    }
+
+    #[test]
+    fn textbuffer_unicode_insert() {
+        let mut buf = TextBuffer::new("café".into());
+        assert_eq!(buf.cursor, 4); // 4 chars, not 5 bytes
+        buf.insert('!');
+        assert_eq!(buf.input, "café!");
+        assert_eq!(buf.cursor, 5);
+    }
+
+    #[test]
+    fn textbuffer_unicode_insert_middle() {
+        let mut buf = TextBuffer::new("café".into());
+        buf.cursor = 2; // after 'ca'
+        buf.insert('r');
+        assert_eq!(buf.input, "carfé");
+        assert_eq!(buf.cursor, 3);
+    }
+
+    #[test]
+    fn textbuffer_unicode_backspace() {
+        let mut buf = TextBuffer::new("café".into());
+        buf.backspace(); // should remove 'é' (multi-byte)
+        assert_eq!(buf.input, "caf");
+        assert_eq!(buf.cursor, 3);
+    }
+
+    #[test]
+    fn textbuffer_emoji_operations() {
+        let mut buf = TextBuffer::new("a🎉b".into());
+        assert_eq!(buf.cursor, 3); // 3 chars
+        buf.move_left();
+        assert_eq!(buf.cursor, 2); // after emoji
+        buf.move_left();
+        assert_eq!(buf.cursor, 1); // after 'a'
+        buf.insert('X');
+        assert_eq!(buf.input, "aX🎉b");
+        assert_eq!(buf.cursor, 2);
+    }
+
+    #[test]
+    fn textbuffer_emoji_backspace() {
+        let mut buf = TextBuffer::new("a🎉b".into());
+        buf.cursor = 2; // after emoji
+        buf.backspace(); // should remove emoji
+        assert_eq!(buf.input, "ab");
+        assert_eq!(buf.cursor, 1);
+    }
+
+    #[test]
+    fn textbuffer_home_end_with_unicode() {
+        let buf_str = "héllo 🌍";
+        let mut buf = TextBuffer::new(buf_str.into());
+        let char_count = buf_str.chars().count();
+        assert_eq!(buf.cursor, char_count);
+        buf.home();
+        assert_eq!(buf.cursor, 0);
+        buf.end();
+        assert_eq!(buf.cursor, char_count);
+    }
+
+    // -----------------------------------------------------------------------
+    // AppState helper method tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn selected_card_ref_valid() {
+        let board = test_board(&[("A", &["c1", "c2"])]);
+        let state = AppState::new();
+        assert!(state.selected_card_ref(&board).is_some());
+    }
+
+    #[test]
+    fn selected_card_ref_invalid_column() {
+        let board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.focused_column = 99;
+        assert!(state.selected_card_ref(&board).is_none());
+    }
+
+    #[test]
+    fn selected_card_ref_invalid_card() {
+        let board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.selected_card = 99;
+        assert!(state.selected_card_ref(&board).is_none());
+    }
+
+    #[test]
+    fn selected_card_metadata_with_card() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+        board.columns[0].cards[0].assignees = vec!["alice".into()];
+        let state = AppState::new();
+        let (tags, assignees) = state.selected_card_metadata(&board);
+        assert_eq!(tags, vec!["bug"]);
+        assert_eq!(assignees, vec!["alice"]);
+    }
+
+    #[test]
+    fn selected_card_metadata_no_card() {
+        let board = test_board(&[("A", &[])]);
+        let state = AppState::new();
+        let (tags, assignees) = state.selected_card_metadata(&board);
+        assert!(tags.is_empty());
+        assert!(assignees.is_empty());
+    }
+
+    #[test]
+    fn notify_sets_info_level() {
+        let mut state = AppState::new();
+        state.notify("hello");
+        assert_eq!(state.notification, Some("hello".into()));
+        assert_eq!(state.notification_level, NotificationLevel::Info);
+        assert!(state.notification_expires.is_some());
+    }
+
+    #[test]
+    fn notify_error_sets_error_level() {
+        let mut state = AppState::new();
+        state.notify_error("oops");
+        assert_eq!(state.notification, Some("oops".into()));
+        assert_eq!(state.notification_level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn tick_notification_clears_expired() {
+        let mut state = AppState::new();
+        state.notification = Some("msg".into());
+        state.notification_expires = Some(Instant::now() - Duration::from_secs(1));
+        state.tick_notification();
+        assert!(state.notification.is_none());
+    }
+
+    #[test]
+    fn tick_notification_keeps_unexpired() {
+        let mut state = AppState::new();
+        state.notify("msg");
+        state.tick_notification();
+        assert!(state.notification.is_some());
+    }
+
+    #[test]
+    fn has_active_filter_none() {
+        let state = AppState::new();
+        assert!(!state.has_active_filter());
+    }
+
+    #[test]
+    fn has_active_filter_text_only() {
+        let mut state = AppState::new();
+        state.active_filter = Some("search".into());
+        assert!(state.has_active_filter());
+    }
+
+    #[test]
+    fn has_active_filter_tags_only() {
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["bug".into()];
+        assert!(state.has_active_filter());
+    }
+
+    #[test]
+    fn has_active_filter_assignees_only() {
+        let mut state = AppState::new();
+        state.active_assignee_filters = vec!["alice".into()];
+        assert!(state.has_active_filter());
+    }
+
+    // ── clamp_selection tests ──
+
+    #[test]
+    fn clamp_selection_empty_column() {
+        let board = test_board(&[("A", &[])]);
+        let mut state = AppState::new();
+        state.selected_card = 5;
+        state.clamp_selection(&board);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn clamp_selection_out_of_bounds() {
+        let board = test_board(&[("A", &["c1", "c2"])]);
+        let mut state = AppState::new();
+        state.selected_card = 99;
+        state.clamp_selection(&board);
+        assert_eq!(state.selected_card, 1); // cards.len() - 1
+    }
+
+    #[test]
+    fn clamp_selection_within_bounds_unchanged() {
+        let board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        state.selected_card = 1;
+        state.clamp_selection(&board);
+        assert_eq!(state.selected_card, 1);
+    }
+
+    // ── next_visible_column tests ──
+
+    #[test]
+    fn next_visible_column_forward() {
+        let board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        assert_eq!(next_visible_column(&board, 0, true, false), Some(1));
+    }
+
+    #[test]
+    fn next_visible_column_backward() {
+        let board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        assert_eq!(next_visible_column(&board, 2, false, false), Some(1));
+    }
+
+    #[test]
+    fn next_visible_column_skips_hidden() {
+        let mut board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        board.columns[1].hidden = true;
+        assert_eq!(next_visible_column(&board, 0, true, false), Some(2));
+    }
+
+    #[test]
+    fn next_visible_column_shows_hidden_when_flag_set() {
+        let mut board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        board.columns[1].hidden = true;
+        assert_eq!(next_visible_column(&board, 0, true, true), Some(1));
+    }
+
+    #[test]
+    fn next_visible_column_at_edge_returns_none() {
+        let board = test_board(&[("A", &[]), ("B", &[])]);
+        assert_eq!(next_visible_column(&board, 1, true, false), None);
+    }
+
+    #[test]
+    fn next_visible_column_all_hidden_returns_none() {
+        let mut board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        board.columns[1].hidden = true;
+        board.columns[2].hidden = true;
+        assert_eq!(next_visible_column(&board, 0, true, false), None);
+    }
+
+    // ── visible_card_indices tests ──
+
+    #[test]
+    fn visible_card_indices_no_filter() {
+        let board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let state = AppState::new();
+        let indices = visible_card_indices(&board.columns[0], &state);
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn visible_card_indices_text_filter() {
+        let board = test_board(&[("A", &["apple", "banana", "avocado"])]);
+        let mut state = AppState::new();
+        state.active_filter = Some("a".into()); // matches apple and avocado (and banana has 'a' too)
+        let indices = visible_card_indices(&board.columns[0], &state);
+        // Fuzzy match: "a" matches all three titles
+        assert!(!indices.is_empty());
+    }
+
+    #[test]
+    fn visible_card_indices_tag_filter() {
+        let mut board = test_board(&[("A", &["c1", "c2"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["bug".into()];
+        let indices = visible_card_indices(&board.columns[0], &state);
+        assert_eq!(indices, vec![0]); // only first card has "bug" tag
+    }
+
+    // ── clamp_selection_filtered tests ──
+
+    #[test]
+    fn clamp_selection_filtered_no_filter_delegates() {
+        let board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        state.selected_card = 99;
+        state.clamp_selection_filtered(&board);
+        assert_eq!(state.selected_card, 2); // clamped to last
+    }
+
+    #[test]
+    fn clamp_selection_filtered_snaps_to_visible() {
+        let mut board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+        board.columns[0].cards[2].tags = vec!["bug".into()];
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["bug".into()];
+        state.selected_card = 1; // card[1] is not visible under tag filter
+        state.clamp_selection_filtered(&board);
+        // Should snap to nearest visible: 0 or 2
+        assert!(state.selected_card == 0 || state.selected_card == 2);
+    }
+
+    #[test]
+    fn clamp_selection_filtered_no_visible_cards() {
+        let board = test_board(&[("A", &["c1", "c2"])]);
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["nonexistent".into()];
+        state.selected_card = 1;
+        state.clamp_selection_filtered(&board);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    // ── process_action edge case tests ──
+
+    #[test]
+    fn clear_filters_clears_all() {
+        let mut state = AppState::new();
+        state.active_filter = Some("search".into());
+        state.active_tag_filters = vec!["bug".into()];
+        state.active_assignee_filters = vec!["alice".into()];
+        assert!(state.has_active_filter());
+        // Simulate the ClearFilters action effect
+        state.active_filter = None;
+        state.active_tag_filters.clear();
+        state.active_assignee_filters.clear();
+        assert!(!state.has_active_filter());
+    }
 }

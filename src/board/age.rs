@@ -175,4 +175,234 @@ mod tests {
         };
         assert!(!should_auto_close(&old, &disabled, now));
     }
+
+    // ── run_auto_close tests ──
+
+    fn make_column(slug: &str, name: &str, cards: Vec<Card>) -> super::super::Column {
+        super::super::Column {
+            slug: slug.into(),
+            name: name.into(),
+            order: 0,
+            wip_limit: None,
+            hidden: false,
+            cards,
+        }
+    }
+
+    fn make_board(columns: Vec<super::super::Column>, policies: Policies) -> Board {
+        Board {
+            name: "Test".into(),
+            next_card_id: 100,
+            policies,
+            sync_branch: None,
+            tutorial_shown: true,
+            nerd_font: false,
+            created_at: None,
+            columns,
+        }
+    }
+
+    #[test]
+    fn run_auto_close_moves_stale_cards() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut stale_card = Card::new("1".into(), "Stale".into());
+        stale_card.updated = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap(); // 45 days ago
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![stale_card]),
+            make_column("in-progress", "In Progress", vec![]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert_eq!(closed, vec!["1"]);
+        assert_eq!(board.columns[0].cards.len(), 0); // removed from backlog
+        assert_eq!(board.columns[2].cards.len(), 1); // moved to archive
+        assert_eq!(board.columns[2].cards[0].id, "1");
+    }
+
+    #[test]
+    fn run_auto_close_skips_fresh_cards() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut fresh_card = Card::new("1".into(), "Fresh".into());
+        fresh_card.updated = Utc.with_ymd_and_hms(2025, 6, 10, 12, 0, 0).unwrap(); // 5 days ago
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![fresh_card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert!(closed.is_empty());
+        assert_eq!(board.columns[0].cards.len(), 1); // still in backlog
+    }
+
+    #[test]
+    fn run_auto_close_skips_cards_in_target_column() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut old_card = Card::new("1".into(), "Old".into());
+        old_card.updated = Utc.with_ymd_and_hms(2025, 4, 1, 12, 0, 0).unwrap();
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("archive", "Archive", vec![old_card]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert!(closed.is_empty());
+        assert_eq!(board.columns[1].cards.len(), 1); // stays in archive
+    }
+
+    #[test]
+    fn run_auto_close_disabled_when_zero() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut stale_card = Card::new("1".into(), "Stale".into());
+        stale_card.updated = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+
+        let policies = Policies {
+            auto_close_days: 0,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![stale_card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert!(closed.is_empty());
+        assert_eq!(board.columns[0].cards.len(), 1); // untouched
+    }
+
+    #[test]
+    fn run_auto_close_no_target_column_returns_empty() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut stale_card = Card::new("1".into(), "Stale".into());
+        stale_card.updated = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "nonexistent".to_string(),
+            ..Default::default()
+        };
+
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![stale_card]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert!(closed.is_empty());
+    }
+
+    #[test]
+    fn run_auto_close_multiple_stale_across_columns() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let mut stale1 = Card::new("1".into(), "Stale1".into());
+        stale1.updated = Utc.with_ymd_and_hms(2025, 4, 1, 12, 0, 0).unwrap();
+        let mut stale2 = Card::new("2".into(), "Stale2".into());
+        stale2.updated = Utc.with_ymd_and_hms(2025, 4, 1, 12, 0, 0).unwrap();
+
+        let policies = Policies {
+            auto_close_days: 30,
+            auto_close_target: "archive".to_string(),
+            ..Default::default()
+        };
+
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![stale1]),
+            make_column("in-progress", "In Progress", vec![stale2]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let closed = run_auto_close(&mut board, now);
+        assert_eq!(closed.len(), 2);
+        assert_eq!(board.columns[2].cards.len(), 2); // both in archive
+    }
+
+    // ── format_age boundary tests ──
+
+    #[test]
+    fn format_age_boundary_14_days() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // 13 days → still "Xd"
+        let d13 = Utc.with_ymd_and_hms(2025, 6, 2, 12, 0, 0).unwrap();
+        assert_eq!(format_age(d13, now), "13d");
+        // 14 days → switches to weeks
+        let d14 = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        assert_eq!(format_age(d14, now), "2w");
+    }
+
+    #[test]
+    fn format_age_boundary_60_days() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // 59 days → still weeks
+        let d59 = Utc.with_ymd_and_hms(2025, 4, 17, 12, 0, 0).unwrap();
+        assert_eq!(format_age(d59, now), "8w");
+        // 60 days → switches to months
+        let d60 = Utc.with_ymd_and_hms(2025, 4, 16, 12, 0, 0).unwrap();
+        assert_eq!(format_age(d60, now), "2mo");
+    }
+
+    #[test]
+    fn format_age_future_date_returns_new() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let future = Utc.with_ymd_and_hms(2025, 7, 1, 12, 0, 0).unwrap();
+        assert_eq!(format_age(future, now), "new");
+    }
+
+    // ── staleness boundary tests ──
+
+    #[test]
+    fn staleness_disabled_when_zero() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { bubble_up_days: 0, ..Default::default() };
+        let old = Card {
+            updated: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            ..Card::new("1".into(), "Ancient".into())
+        };
+        assert_eq!(staleness(&old, &policies, now), Staleness::Fresh);
+    }
+
+    #[test]
+    fn staleness_boundary_exact_threshold() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { bubble_up_days: 7, ..Default::default() };
+        // Exactly 7 days ago → Stale (>=)
+        let card = Card {
+            updated: Utc.with_ymd_and_hms(2025, 6, 8, 12, 0, 0).unwrap(),
+            ..Card::new("1".into(), "Test".into())
+        };
+        assert_eq!(staleness(&card, &policies, now), Staleness::Stale);
+    }
+
+    #[test]
+    fn staleness_boundary_exact_double() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { bubble_up_days: 7, ..Default::default() };
+        // Exactly 14 days ago → VeryStale (>= 2x)
+        let card = Card {
+            updated: Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap(),
+            ..Card::new("1".into(), "Test".into())
+        };
+        assert_eq!(staleness(&card, &policies, now), Staleness::VeryStale);
+    }
 }

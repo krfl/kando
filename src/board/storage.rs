@@ -1027,4 +1027,167 @@ mod tests {
         let still_trashed = kando_dir.join(".trash/002.md");
         assert!(still_trashed.exists());
     }
+
+    // ── validate_slug tests ──
+
+    #[test]
+    fn validate_slug_valid_simple() {
+        assert!(validate_slug("backlog").is_ok());
+    }
+
+    #[test]
+    fn validate_slug_valid_with_hyphens() {
+        assert!(validate_slug("in-progress").is_ok());
+    }
+
+    #[test]
+    fn validate_slug_valid_with_digits() {
+        assert!(validate_slug("col1").is_ok());
+        assert!(validate_slug("1col").is_ok());
+    }
+
+    #[test]
+    fn validate_slug_empty_returns_err() {
+        assert!(validate_slug("").is_err());
+    }
+
+    #[test]
+    fn validate_slug_uppercase_returns_err() {
+        assert!(validate_slug("MyColumn").is_err());
+    }
+
+    #[test]
+    fn validate_slug_spaces_returns_err() {
+        assert!(validate_slug("my column").is_err());
+    }
+
+    #[test]
+    fn validate_slug_special_chars_returns_err() {
+        assert!(validate_slug("col@name").is_err());
+    }
+
+    #[test]
+    fn validate_slug_leading_hyphen_returns_err() {
+        assert!(validate_slug("-col").is_err());
+    }
+
+    #[test]
+    fn validate_slug_underscore_returns_err() {
+        assert!(validate_slug("my_col").is_err());
+    }
+
+    // ── parse_frontmatter edge cases ──
+
+    #[test]
+    fn parse_frontmatter_empty_returns_none() {
+        assert!(parse_frontmatter("").is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_no_closing_delimiter() {
+        assert!(parse_frontmatter("---\nid = \"1\"\ntitle = \"X\"\n").is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_only_delimiters_returns_none() {
+        // "---\n---\n" has no content between delimiters; parse requires "\n---" which
+        // needs at least one line of frontmatter content.
+        assert!(parse_frontmatter("---\n---\n").is_none());
+    }
+
+    #[test]
+    fn parse_frontmatter_minimal_content() {
+        let result = parse_frontmatter("---\nkey = \"val\"\n---\n");
+        assert!(result.is_some());
+        let (fm, body) = result.unwrap();
+        assert!(fm.contains("key"));
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn parse_frontmatter_no_opening_delimiter() {
+        assert!(parse_frontmatter("id = \"1\"\n---\n").is_none());
+    }
+
+    // ── serialize_card edge cases ──
+
+    #[test]
+    fn serialize_card_blocked_roundtrip() {
+        let mut card = Card::new("001".into(), "Blocked".into());
+        card.blocked = true;
+        let text = serialize_card(&card);
+        assert!(text.contains("blocked = true"));
+        // Roundtrip
+        let (fm, _body) = parse_frontmatter(&text).unwrap();
+        let loaded: Card = toml::from_str(&fm).unwrap();
+        assert!(loaded.blocked);
+    }
+
+    #[test]
+    fn serialize_card_with_assignees_roundtrip() {
+        let mut card = Card::new("001".into(), "Team".into());
+        card.assignees = vec!["alice".into(), "bob".into()];
+        let text = serialize_card(&card);
+        assert!(text.contains("assignees = "));
+        let (fm, _body) = parse_frontmatter(&text).unwrap();
+        let loaded: Card = toml::from_str(&fm).unwrap();
+        assert_eq!(loaded.assignees, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn serialize_card_with_started_completed_roundtrip() {
+        use chrono::TimeZone;
+        let mut card = Card::new("001".into(), "Done".into());
+        card.started = Some(Utc.with_ymd_and_hms(2025, 6, 1, 10, 0, 0).unwrap());
+        card.completed = Some(Utc.with_ymd_and_hms(2025, 6, 10, 10, 0, 0).unwrap());
+        let text = serialize_card(&card);
+        assert!(text.contains("started = "));
+        assert!(text.contains("completed = "));
+        let (fm, _body) = parse_frontmatter(&text).unwrap();
+        let loaded: Card = toml::from_str(&fm).unwrap();
+        assert!(loaded.started.is_some());
+        assert!(loaded.completed.is_some());
+    }
+
+    #[test]
+    fn serialize_card_empty_body_no_trailing_content() {
+        let card = Card::new("001".into(), "No body".into());
+        let text = serialize_card(&card);
+        // Should end right after the closing ---
+        assert!(text.ends_with("---\n"));
+    }
+
+    #[test]
+    fn serialize_card_body_gets_trailing_newline() {
+        let mut card = Card::new("001".into(), "Has body".into());
+        card.body = "Some text".into();
+        let text = serialize_card(&card);
+        assert!(text.ends_with("Some text\n"));
+    }
+
+    #[test]
+    fn serialize_card_all_fields_roundtrip() {
+        use chrono::TimeZone;
+        let mut card = Card::new("999".into(), "Full card".into());
+        card.priority = Priority::Urgent;
+        card.tags = vec!["bug".into(), "critical".into()];
+        card.assignees = vec!["alice".into()];
+        card.blocked = true;
+        card.started = Some(Utc.with_ymd_and_hms(2025, 5, 1, 0, 0, 0).unwrap());
+        card.completed = Some(Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap());
+        card.body = "Full description.\n\nMultiple paragraphs.".into();
+
+        let text = serialize_card(&card);
+        let (fm, body) = parse_frontmatter(&text).unwrap();
+        let loaded: Card = toml::from_str(&fm).unwrap();
+        assert_eq!(loaded.id, "999");
+        assert_eq!(loaded.title, "Full card");
+        assert_eq!(loaded.priority, Priority::Urgent);
+        assert_eq!(loaded.tags, vec!["bug", "critical"]);
+        assert_eq!(loaded.assignees, vec!["alice"]);
+        assert!(loaded.blocked);
+        assert!(loaded.started.is_some());
+        assert!(loaded.completed.is_some());
+        assert_eq!(body, card.body);
+    }
 }

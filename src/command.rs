@@ -1358,4 +1358,451 @@ mod tests {
         assert!(items.iter().any(|(n, _)| n == "find"));
         assert!(items.iter().any(|(n, _)| n == "rename"));
     }
+
+    // -- execute_command tests (with tempdir) ---------------------------------
+
+    /// Create a board with a card in backlog for command testing.
+    fn setup_board_with_card() -> (tempfile::TempDir, std::path::PathBuf, Board, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test card".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let state = AppState::new();
+        (dir, kando_dir, board, state)
+    }
+
+    #[test]
+    fn cmd_empty_input_returns_none() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "", &kando_dir).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn cmd_unknown_notifies_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "foobar", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Unknown command"));
+    }
+
+    #[test]
+    fn cmd_quit_sets_flag() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "quit", &kando_dir).unwrap();
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn cmd_q_alias_sets_flag() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "q", &kando_dir).unwrap();
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn cmd_metrics_enters_metrics_mode() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "metrics", &kando_dir).unwrap();
+        assert!(matches!(state.mode, crate::app::Mode::Metrics { .. }));
+    }
+
+    #[test]
+    fn cmd_move_success() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "move done", &kando_dir).unwrap();
+        assert!(result.is_some());
+        assert_eq!(board.columns[0].cards.len(), 0);
+        assert!(board.columns.iter().find(|c| c.slug == "done").unwrap().cards.len() > 0);
+    }
+
+    #[test]
+    fn cmd_move_no_card() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // Focus on an empty column
+        state.focused_column = board.columns.len() - 1; // done column (empty)
+        execute_command(&mut board, &mut state, "move backlog", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("No card"));
+    }
+
+    #[test]
+    fn cmd_move_unknown_column() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "move nonexistent", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Unknown column"));
+    }
+
+    #[test]
+    fn cmd_mv_alias_works() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "mv done", &kando_dir).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn cmd_tag_adds_tags() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "tag bug,ui", &kando_dir).unwrap();
+        assert!(result.is_some());
+        let card = &board.columns[0].cards[0];
+        assert!(card.tags.contains(&"bug".to_string()));
+        assert!(card.tags.contains(&"ui".to_string()));
+    }
+
+    #[test]
+    fn cmd_tag_deduplicates() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        execute_command(&mut board, &mut state, "tag bug", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("already present"));
+    }
+
+    #[test]
+    fn cmd_tag_no_card() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.focused_column = board.columns.len() - 1; // empty done column
+        execute_command(&mut board, &mut state, "tag bug", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("No card"));
+    }
+
+    #[test]
+    fn cmd_tag_empty_args() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "tag", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_tag_strips_at_prefix() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "tag @feature", &kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert!(card.tags.contains(&"feature".to_string()));
+    }
+
+    #[test]
+    fn cmd_untag_removes_tags() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].cards[0].tags = vec!["bug".into(), "ui".into()];
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        execute_command(&mut board, &mut state, "untag bug", &kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert!(!card.tags.contains(&"bug".to_string()));
+        assert!(card.tags.contains(&"ui".to_string()));
+    }
+
+    #[test]
+    fn cmd_untag_star_clears_all() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].cards[0].tags = vec!["a".into(), "b".into()];
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        execute_command(&mut board, &mut state, "untag *", &kando_dir).unwrap();
+        assert!(board.columns[0].cards[0].tags.is_empty());
+    }
+
+    #[test]
+    fn cmd_untag_star_no_tags() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "untag *", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("No tags"));
+    }
+
+    #[test]
+    fn cmd_untag_not_found() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "untag nonexistent", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn cmd_assign_adds_assignees() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "assign alice,bob", &kando_dir).unwrap();
+        assert!(result.is_some());
+        let card = &board.columns[0].cards[0];
+        assert!(card.assignees.contains(&"alice".to_string()));
+        assert!(card.assignees.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn cmd_assign_deduplicates() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].cards[0].assignees = vec!["alice".into()];
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        execute_command(&mut board, &mut state, "assign alice", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("already assigned"));
+    }
+
+    #[test]
+    fn cmd_unassign_removes() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].cards[0].assignees = vec!["alice".into(), "bob".into()];
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        execute_command(&mut board, &mut state, "unassign alice", &kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert!(!card.assignees.contains(&"alice".to_string()));
+        assert!(card.assignees.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn cmd_unassign_star_clears_all() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].cards[0].assignees = vec!["x".into(), "y".into()];
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        execute_command(&mut board, &mut state, "unassign *", &kando_dir).unwrap();
+        assert!(board.columns[0].cards[0].assignees.is_empty());
+    }
+
+    #[test]
+    fn cmd_unassign_star_none() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "unassign *", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("No assignees"));
+    }
+
+    #[test]
+    fn cmd_unassign_not_found() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "unassign nobody", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Not assigned"));
+    }
+
+    #[test]
+    fn cmd_priority_sets_level() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "priority urgent", &kando_dir).unwrap();
+        assert!(result.is_some());
+        // Card may have been re-sorted, find it
+        let card = board.columns[0].cards.iter().find(|c| c.id == "001").unwrap();
+        assert_eq!(card.priority, crate::board::Priority::Urgent);
+    }
+
+    #[test]
+    fn cmd_priority_invalid() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "priority foo", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("unknown priority"));
+    }
+
+    #[test]
+    fn cmd_priority_empty() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "priority", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_pri_alias_works() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "pri high", &kando_dir).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn cmd_rename_changes_title() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "rename New Title", &kando_dir).unwrap();
+        assert!(result.is_some());
+        let card = board.columns[0].cards.iter().find(|c| c.id == "001").unwrap();
+        assert_eq!(card.title, "New Title");
+    }
+
+    #[test]
+    fn cmd_rename_empty_notifies_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "rename", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_wip_set_limit() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "wip backlog 5", &kando_dir).unwrap();
+        assert!(result.is_some());
+        assert_eq!(board.columns[0].wip_limit, Some(5));
+    }
+
+    #[test]
+    fn cmd_wip_remove_limit() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].wip_limit = Some(3);
+        let result = execute_command(&mut board, &mut state, "wip backlog 0", &kando_dir).unwrap();
+        assert!(result.is_some());
+        assert_eq!(board.columns[0].wip_limit, None);
+    }
+
+    #[test]
+    fn cmd_wip_invalid_number() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "wip backlog abc", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("number"));
+    }
+
+    #[test]
+    fn cmd_wip_no_args() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "wip", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_sort_by_priority() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "sort priority", &kando_dir).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn cmd_sort_by_title() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "sort title", &kando_dir).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn cmd_sort_default_is_priority() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "sort", &kando_dir).unwrap();
+        assert!(result.is_some());
+        assert!(state.notification.as_ref().unwrap().contains("priority"));
+    }
+
+    #[test]
+    fn cmd_sort_unknown_field() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "sort foo", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Unknown sort field"));
+    }
+
+    #[test]
+    fn cmd_col_jump() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col done", &kando_dir).unwrap();
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        assert_eq!(state.focused_column, done_idx);
+    }
+
+    #[test]
+    fn cmd_col_hide() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let result = execute_command(&mut board, &mut state, "col backlog hide", &kando_dir).unwrap();
+        assert!(result.is_some());
+        assert!(board.columns[0].hidden);
+    }
+
+    #[test]
+    fn cmd_col_show() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].hidden = true;
+        let result = execute_command(&mut board, &mut state, "col backlog show", &kando_dir).unwrap();
+        assert!(result.is_some());
+        assert!(!board.columns[0].hidden);
+    }
+
+    #[test]
+    fn cmd_col_unknown_subcmd() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col backlog foo", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Unknown subcommand"));
+    }
+
+    #[test]
+    fn cmd_col_no_args() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_reload_reloads() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "reload", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("reloaded"));
+    }
+
+    #[test]
+    fn cmd_restore_empty_id() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "restore", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_restore_not_in_trash() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "restore nonexistent", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("not found in trash"));
+    }
+
+    #[test]
+    fn cmd_restore_card_success() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // Trash the card first
+        let col_slug = board.columns[0].slug.clone();
+        crate::board::storage::trash_card(&kando_dir, &col_slug, "001", "Test card").unwrap();
+        board.columns[0].cards.retain(|c| c.id != "001");
+
+        // Restore it
+        let result = execute_command(&mut board, &mut state, "restore 001", &kando_dir).unwrap();
+        assert!(result.is_some());
+        assert!(board.find_card("001").is_some());
+    }
+
+    #[test]
+    fn cmd_find_jumps_to_card() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // Add a card to in-progress
+        board.columns[1].cards.push(Card::new("002".into(), "Other task".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+
+        execute_command(&mut board, &mut state, "find Other", &kando_dir).unwrap();
+        assert_eq!(state.focused_column, 1);
+    }
+
+    #[test]
+    fn cmd_find_not_found() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "find zzzzz", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("No card matching"));
+    }
+
+    #[test]
+    fn cmd_execute_clears_last_delete_on_mutation() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        state.last_delete = Some(crate::board::storage::TrashEntry {
+            id: "999".into(),
+            title: "Old".into(),
+            from_column: "backlog".into(),
+            deleted: String::new(),
+        });
+        state.deleted_this_session = true;
+        // tag is a mutation that returns Some
+        execute_command(&mut board, &mut state, "tag bug", &kando_dir).unwrap();
+        assert!(state.last_delete.is_none());
+        assert!(!state.deleted_this_session);
+    }
+
+    // -- current_token tests --------------------------------------------------
+
+    #[test]
+    fn current_token_empty() {
+        assert_eq!(current_token(""), "");
+    }
+
+    #[test]
+    fn current_token_partial() {
+        assert_eq!(current_token("mo"), "mo");
+    }
+
+    #[test]
+    fn current_token_after_space() {
+        assert_eq!(current_token("move "), "");
+    }
+
+    #[test]
+    fn current_token_partial_arg() {
+        assert_eq!(current_token("move back"), "back");
+    }
 }

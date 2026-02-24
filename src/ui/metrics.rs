@@ -86,7 +86,14 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: u16, _no
     lines.push(Line::from(""));
 
     let max_wip = metrics.wip_per_column.iter().map(|w| w.count).max().unwrap_or(1).max(1);
-    let bar_max = (inner.width as usize).saturating_sub(30).min(40);
+    let max_name_len = metrics
+        .wip_per_column
+        .iter()
+        .map(|w| w.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(10);
+    let bar_max = (inner.width as usize).saturating_sub(max_name_len + 19).min(40);
     for entry in &metrics.wip_per_column {
         let bar_len = if entry.count > 0 {
             (entry.count * bar_max) / max_wip
@@ -113,12 +120,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: u16, _no
             format!(" {}", entry.count)
         };
 
-        let active_marker = if entry.is_active { "" } else { " " };
-        let name_label = if entry.is_active {
-            format!("  {:<14}", entry.name)
-        } else {
-            format!("  {:<14}{}", entry.name, active_marker)
-        };
+        let name_label = format!("  {:<width$} ", entry.name, width = max_name_len);
 
         lines.push(Line::from(vec![
             Span::styled(name_label, label),
@@ -232,11 +234,11 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: u16, _no
         lines.push(Line::from(Span::styled("Work Item Age", heading)));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  In-progress: ", label),
+            Span::styled("  In-progress:  ", label),
             Span::styled(format!("{} items", wia.count), value),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("  Average age: ", label),
+            Span::styled("  Average age:  ", label),
             Span::styled(format!("{:.1} days", wia.avg_age_days), value),
         ]));
         if !wia.aging_cards.is_empty() {
