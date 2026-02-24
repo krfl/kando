@@ -23,11 +23,11 @@ pub const NERD_ICONS: Icons = Icons {
     priority_high: "\u{f0e7}",      // nf-fa-bolt
     priority_urgent: "\u{f06d}",    // nf-fa-fire
     stale: "\u{f017}",              // nf-fa-clock
-    very_stale: "\u{f017} \u{f017}", // double clock with space to prevent overlap
+    very_stale: "\u{f071}",          // nf-fa-warning
     blocker: "\u{f05e}",            // nf-fa-ban
     chevron: "\u{f054}",            // nf-fa-chevron_right
     sync_online: "\u{f021}",        // nf-fa-refresh
-    sync_offline: "\u{f071}",       // nf-fa-warning
+    sync_offline: "\u{f127}",       // nf-fa-chain_broken
 };
 
 pub const ASCII_ICONS: Icons = Icons {
@@ -35,7 +35,7 @@ pub const ASCII_ICONS: Icons = Icons {
     priority_high: "!",
     priority_urgent: "!!",
     stale: "~",
-    very_stale: "~~",
+    very_stale: "?",
     blocker: "X",
     chevron: ">",
     sync_online: "*",
@@ -80,18 +80,18 @@ impl Theme {
 
     // Card
     pub const CARD_BORDER: Color = Color::Reset;
-    pub const CARD_SELECTED_BORDER: Color = Color::Reset;
     pub const CARD_TITLE: Color = Color::Reset;
 
     // Functional glyph colors (these are the only colored elements besides tags)
     pub const PRIORITY_LOW: Color = Color::Green;
     pub const PRIORITY_HIGH: Color = Color::Yellow;
     pub const PRIORITY_URGENT: Color = Color::Red;
-    pub const BUBBLE_UP_WARN: Color = Color::Yellow;
-    /// Staleness critical: kept in the yellow family to avoid visual parity
-    /// with `BLOCKER` (Red). LightYellow differentiates from `BUBBLE_UP_WARN`
-    /// (Yellow) without implying a block — preventing alarm-fatigue confusion.
-    pub const BUBBLE_UP_CRITICAL: Color = Color::LightYellow;
+    pub const STALE: Color = Color::Yellow;
+    /// LightRed conveys escalation beyond Stale (Yellow) without reaching the
+    /// full alarm of `BLOCKER` / `WIP_OVER` (Red). LightRed is typically
+    /// rendered as salmon/bright-orange, keeping the semantic gap between
+    /// "very stale" and "actively blocking".
+    pub const VERY_STALE: Color = Color::LightRed;
     pub const BLOCKER: Color = Color::Red;
 
     // WIP limit glyphs
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(i.chevron, ">");
         assert_eq!(i.blocker, "X");
         assert_eq!(i.priority_urgent, "!!");
-        assert_eq!(i.very_stale, "~~");
+        assert_eq!(i.very_stale, "?");
     }
 
     #[test]
@@ -216,23 +216,23 @@ mod tests {
     }
 
     #[test]
-    fn bubble_up_colors_are_in_yellow_family() {
-        // Red is reserved for BLOCKER. Staleness must not share that color.
-        assert_eq!(Theme::BUBBLE_UP_WARN, Color::Yellow);
-        assert_eq!(Theme::BUBBLE_UP_CRITICAL, Color::LightYellow);
-        assert_ne!(Theme::BUBBLE_UP_CRITICAL, Theme::BLOCKER);
+    fn bubble_up_colors_escalate_without_matching_blocker() {
+        // Stale is Yellow; VeryStale escalates to LightRed (salmon, not full red).
+        assert_eq!(Theme::STALE, Color::Yellow);
+        assert_eq!(Theme::VERY_STALE, Color::LightRed);
+        // LightRed must remain distinct from the hard-error Red used for blockers/WIP.
+        assert_ne!(Theme::VERY_STALE, Theme::BLOCKER);
+        assert_ne!(Theme::VERY_STALE, Theme::WIP_OVER);
     }
 
     #[test]
-    fn very_stale_nerd_icon_has_space_between_clocks() {
-        // Without the space the two nerd-font clock glyphs visually overlap.
-        // The space must be between the two glyphs, not leading or trailing.
-        let parts: Vec<&str> = NERD_ICONS.very_stale.split(' ').collect();
-        assert_eq!(parts.len(), 2, "expected exactly one space between two glyphs");
-        assert!(
-            !parts[0].is_empty() && !parts[1].is_empty(),
-            "space must be between glyphs, not leading/trailing"
-        );
+    fn very_stale_nerd_icon_is_warning_triangle() {
+        // VeryStale uses the warning triangle (U+F071) — a distinct shape from
+        // the Stale clock (U+F017), making the two levels unambiguous at a glance.
+        assert_eq!(NERD_ICONS.very_stale, "\u{f071}");
+        assert_ne!(NERD_ICONS.very_stale, NERD_ICONS.stale);
+        // Guard against accidental glyph reuse — sync_offline uses chain_broken (U+F127).
+        assert_ne!(NERD_ICONS.very_stale, NERD_ICONS.sync_offline);
     }
 
     #[test]
@@ -271,5 +271,41 @@ mod tests {
             assert!(!i.sync_online.is_empty());
             assert!(!i.sync_offline.is_empty());
         }
+    }
+
+    #[test]
+    fn sync_offline_nerd_icon_is_broken_chain() {
+        assert_eq!(NERD_ICONS.sync_offline, "\u{f127}");
+    }
+
+    #[test]
+    fn sync_offline_ascii_icon_is_exclamation() {
+        let i = icons(false);
+        assert_eq!(i.sync_offline, "!");
+    }
+
+    #[test]
+    fn nerd_icons_are_all_distinct() {
+        let i = icons(true);
+        let glyphs = [
+            i.priority_low,
+            i.priority_high,
+            i.priority_urgent,
+            i.stale,
+            i.very_stale,
+            i.blocker,
+            i.chevron,
+            i.sync_online,
+            i.sync_offline,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for g in &glyphs {
+            assert!(seen.insert(g), "duplicate nerd icon: {g:?}");
+        }
+    }
+
+    #[test]
+    fn bubble_up_levels_are_distinct_colors() {
+        assert_ne!(Theme::STALE, Theme::VERY_STALE);
     }
 }

@@ -246,7 +246,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: u16, _no
                 Span::styled("  Aging (>P85): ", label),
                 Span::styled(
                     format!("{} card(s)", wia.aging_cards.len()),
-                    Style::default().fg(Theme::BUBBLE_UP_WARN).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Theme::STALE).add_modifier(Modifier::BOLD),
                 ),
             ]));
             for card in &wia.aging_cards {
@@ -254,7 +254,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: u16, _no
                     Span::styled("    ", dim),
                     Span::styled(
                         format!("#{} \"{}\" in {} ({:.1}d)", card.id, card.title, card.column, card.age_days),
-                        Style::default().fg(Theme::BUBBLE_UP_WARN),
+                        Style::default().fg(Theme::STALE),
                     ),
                 ]));
             }

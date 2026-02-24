@@ -21,8 +21,8 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
         Theme::BLOCKER
     } else {
         match stale {
-            Staleness::VeryStale => Theme::BUBBLE_UP_CRITICAL,
-            Staleness::Stale => Theme::BUBBLE_UP_WARN,
+            Staleness::VeryStale => Theme::VERY_STALE,
+            Staleness::Stale => Theme::STALE,
             Staleness::Fresh => Theme::FG,
         }
     };
