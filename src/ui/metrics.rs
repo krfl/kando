@@ -107,7 +107,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: u16, _no
             .wip_limit
             .is_some_and(|l| entry.count as u32 >= l);
         let color = if over_limit {
-            Theme::BUBBLE_UP_CRITICAL
+            Theme::WIP_OVER
         } else if entry.count == 0 {
             Theme::DIM
         } else {
@@ -126,7 +126,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: u16, _no
             Span::styled(name_label, label),
             Span::styled(bar, Style::default().fg(color)),
             Span::styled(count_str, if over_limit {
-                Style::default().fg(Theme::BUBBLE_UP_CRITICAL).add_modifier(Modifier::BOLD)
+                Style::default().fg(Theme::WIP_OVER).add_modifier(Modifier::BOLD)
             } else {
                 value
             }),

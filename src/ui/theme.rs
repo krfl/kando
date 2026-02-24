@@ -23,7 +23,7 @@ pub const NERD_ICONS: Icons = Icons {
     priority_high: "\u{f0e7}",      // nf-fa-bolt
     priority_urgent: "\u{f06d}",    // nf-fa-fire
     stale: "\u{f017}",              // nf-fa-clock
-    very_stale: "\u{f017}\u{f017}", // double clock
+    very_stale: "\u{f017} \u{f017}", // double clock with space to prevent overlap
     blocker: "\u{f05e}",            // nf-fa-ban
     chevron: "\u{f054}",            // nf-fa-chevron_right
     sync_online: "\u{f021}",        // nf-fa-refresh
@@ -88,7 +88,10 @@ impl Theme {
     pub const PRIORITY_HIGH: Color = Color::Yellow;
     pub const PRIORITY_URGENT: Color = Color::Red;
     pub const BUBBLE_UP_WARN: Color = Color::Yellow;
-    pub const BUBBLE_UP_CRITICAL: Color = Color::Red;
+    /// Staleness critical: kept in the yellow family to avoid visual parity
+    /// with `BLOCKER` (Red). LightYellow differentiates from `BUBBLE_UP_WARN`
+    /// (Yellow) without implying a block — preventing alarm-fatigue confusion.
+    pub const BUBBLE_UP_CRITICAL: Color = Color::LightYellow;
     pub const BLOCKER: Color = Color::Red;
 
     // WIP limit glyphs
@@ -210,6 +213,26 @@ mod tests {
     #[test]
     fn tag_color_empty_string_no_panic() {
         let _ = Theme::tag_color("");
+    }
+
+    #[test]
+    fn bubble_up_colors_are_in_yellow_family() {
+        // Red is reserved for BLOCKER. Staleness must not share that color.
+        assert_eq!(Theme::BUBBLE_UP_WARN, Color::Yellow);
+        assert_eq!(Theme::BUBBLE_UP_CRITICAL, Color::LightYellow);
+        assert_ne!(Theme::BUBBLE_UP_CRITICAL, Theme::BLOCKER);
+    }
+
+    #[test]
+    fn very_stale_nerd_icon_has_space_between_clocks() {
+        // Without the space the two nerd-font clock glyphs visually overlap.
+        // The space must be between the two glyphs, not leading or trailing.
+        let parts: Vec<&str> = NERD_ICONS.very_stale.split(' ').collect();
+        assert_eq!(parts.len(), 2, "expected exactly one space between two glyphs");
+        assert!(
+            !parts[0].is_empty() && !parts[1].is_empty(),
+            "space must be between glyphs, not leading/trailing"
+        );
     }
 
     #[test]
