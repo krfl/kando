@@ -440,12 +440,22 @@ fn try_move_card(
 ) -> color_eyre::Result<Option<String>> {
     let to = match next_visible_column(board, state.focused_column, forward, state.show_hidden_columns) {
         Some(to) => to,
-        None => return Ok(None),
+        None => {
+            state.notify(if forward { "Last column" } else { "First column" });
+            return Ok(None);
+        }
     };
     let col = match board.columns.get(state.focused_column) {
         Some(col) if !col.cards.is_empty() => col,
-        _ => return Ok(None),
+        Some(_) => {
+            state.notify("No cards to move");
+            return Ok(None);
+        }
+        None => unreachable!("focused_column always refers to a valid column index"),
     };
+    // The filter guard in handle_card_action guarantees selected_card is a valid
+    // visible index; the clamp is a safety net against any future invariant break.
+    debug_assert!(state.selected_card < col.cards.len(), "selected_card out of range");
     let card_idx = state.selected_card.min(col.cards.len() - 1);
     let from = state.focused_column;
 
@@ -852,6 +862,8 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
                 let visible = visible_card_indices(col, state);
                 if let Some(&first) = visible.first() {
                     state.selected_card = first;
+                } else {
+                    state.notify("No visible cards");
                 }
             }
         }
@@ -860,6 +872,8 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
                 let visible = visible_card_indices(col, state);
                 if let Some(&last) = visible.last() {
                     state.selected_card = last;
+                } else {
+                    state.notify("No visible cards");
                 }
             }
         }
@@ -869,6 +883,8 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
             }) {
                 state.focused_column = idx;
                 state.clamp_selection_filtered(board);
+            } else {
+                state.notify("No 'backlog' column");
             }
         }
         Action::JumpToDone => {
@@ -877,6 +893,8 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
             }) {
                 state.focused_column = idx;
                 state.clamp_selection_filtered(board);
+            } else {
+                state.notify("No 'done' column");
             }
         }
         _ => unreachable!(),
@@ -920,6 +938,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         if let Some(col) = board.columns.get(state.focused_column) {
             let visible = visible_card_indices(col, state);
             if !visible.contains(&state.selected_card) {
+                state.notify("No visible card selected");
                 return Ok(None);
             }
         }
@@ -1150,6 +1169,8 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     if pos + 1 < visible.len() {
                         state.selected_card = visible[pos + 1];
                         state.mode = Mode::CardDetail { scroll: 0 };
+                    } else {
+                        state.notify("Last card");
                     }
                 }
             }
@@ -1161,6 +1182,8 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     if pos > 0 {
                         state.selected_card = visible[pos - 1];
                         state.mode = Mode::CardDetail { scroll: 0 };
+                    } else {
+                        state.notify("First card");
                     }
                 }
             }
@@ -3046,5 +3069,266 @@ mod tests {
         state.active_tag_filters.clear();
         state.active_assignee_filters.clear();
         assert!(!state.has_active_filter());
+    }
+
+    // -----------------------------------------------------------------------
+    // Feature #10: Silent action failure notifications
+    // -----------------------------------------------------------------------
+
+    fn test_terminal() -> ratatui::Terminal<ratatui::backend::TestBackend> {
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap()
+    }
+
+    fn fake_dir() -> &'static std::path::Path {
+        std::path::Path::new("/tmp/fake")
+    }
+
+    // ── Filter guard ──
+
+    #[test]
+    fn filter_guard_notifies_no_visible_card_selected() {
+        let mut board = test_board(&[("A", &["c1", "c2"])]);
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["missing-tag".into()];
+        state.selected_card = 0;
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::CyclePriority, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("No visible card selected"));
+    }
+
+    #[test]
+    fn filter_guard_does_not_block_new_card() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["missing-tag".into()];
+        state.selected_card = 0;
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::NewCard, &mut terminal, fake_dir(), false).unwrap();
+        // Guard exempts NewCard — mode should advance to input prompt
+        assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::NewCardTitle, .. }));
+    }
+
+    #[test]
+    fn filter_guard_does_not_block_detail_nav_selected_not_in_visible_set() {
+        // DetailNextCard/DetailPrevCard are exempt from the filter guard.
+        // When selected_card is not in the visible set, they perform a silent no-op
+        // (no notification, no state change) — distinct from the "last/first card" case.
+        let mut board = test_board(&[("A", &["c1", "c2"])]);
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["missing-tag".into()]; // nothing visible
+        state.selected_card = 0;
+        state.mode = Mode::CardDetail { scroll: 0 };
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::DetailNextCard, &mut terminal, fake_dir(), false).unwrap();
+        assert!(state.notification.is_none());
+        assert_eq!(state.selected_card, 0); // unchanged — no-op
+        handle_card_action(&mut board, &mut state, Action::DetailPrevCard, &mut terminal, fake_dir(), false).unwrap();
+        assert!(state.notification.is_none());
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn filter_guard_passes_when_selected_card_is_visible() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        board.columns[0].cards[0].tags = vec!["special".into()];
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["special".into()];
+        state.selected_card = 0; // card 0 is visible (matches the tag filter)
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::OpenCardDetail, &mut terminal, fake_dir(), false).unwrap();
+        assert!(matches!(state.mode, Mode::CardDetail { .. }));
+        assert!(state.notification.is_none());
+    }
+
+    // ── try_move_card boundary and empty-column ──
+
+    #[test]
+    fn move_card_forward_at_last_column_notifies_last_column() {
+        let mut board = test_board(&[("A", &["c1"]), ("B", &["c2"])]);
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        state.selected_card = 0;
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::MoveCardNextColumn, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("Last column"));
+    }
+
+    #[test]
+    fn move_card_backward_at_first_column_notifies_first_column() {
+        let mut board = test_board(&[("A", &["c1"]), ("B", &["c2"])]);
+        let mut state = AppState::new();
+        state.focused_column = 0;
+        state.selected_card = 0;
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::MoveCardPrevColumn, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("First column"));
+    }
+
+    #[test]
+    fn move_card_from_empty_column_notifies_no_cards_to_move() {
+        // Column A is empty but has a neighbour — boundary check passes, empty check fires.
+        let mut board = test_board(&[("A", &[]), ("B", &["c1"])]);
+        let mut state = AppState::new();
+        state.focused_column = 0;
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::MoveCardNextColumn, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("No cards to move"));
+    }
+
+    #[test]
+    fn move_card_from_empty_last_column_notifies_last_column() {
+        // Column B is empty AND the last column — boundary check fires first, not empty check.
+        let mut board = test_board(&[("A", &["c1"]), ("B", &[])]);
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::MoveCardNextColumn, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("Last column"));
+    }
+
+    // ── Detail view navigation edges ──
+
+    #[test]
+    fn detail_next_card_at_last_card_notifies_last_card() {
+        let mut board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        state.selected_card = 2;
+        state.mode = Mode::CardDetail { scroll: 0 };
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::DetailNextCard, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("Last card"));
+        assert_eq!(state.selected_card, 2);
+    }
+
+    #[test]
+    fn detail_prev_card_at_first_card_notifies_first_card() {
+        let mut board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        state.selected_card = 0;
+        state.mode = Mode::CardDetail { scroll: 0 };
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::DetailPrevCard, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("First card"));
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn detail_next_card_navigates_when_not_at_last() {
+        let mut board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        state.selected_card = 0;
+        state.mode = Mode::CardDetail { scroll: 5 };
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::DetailNextCard, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.selected_card, 1);
+        assert!(matches!(state.mode, Mode::CardDetail { scroll: 0 }));
+        assert!(state.notification.is_none());
+    }
+
+    #[test]
+    fn detail_prev_card_navigates_when_not_at_first() {
+        let mut board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        let mut state = AppState::new();
+        state.selected_card = 2;
+        state.mode = Mode::CardDetail { scroll: 5 };
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::DetailPrevCard, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.selected_card, 1);
+        assert!(matches!(state.mode, Mode::CardDetail { scroll: 0 }));
+        assert!(state.notification.is_none());
+    }
+
+    #[test]
+    fn detail_next_card_at_last_visible_with_filter_notifies() {
+        let mut board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        board.columns[0].cards[0].tags = vec!["keep".into()];
+        board.columns[0].cards[1].tags = vec!["keep".into()];
+        // card 2 has no "keep" tag → visible = [0, 1]; card 1 is last visible
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["keep".into()];
+        state.selected_card = 1;
+        state.mode = Mode::CardDetail { scroll: 0 };
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::DetailNextCard, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("Last card"));
+        assert_eq!(state.selected_card, 1);
+    }
+
+    #[test]
+    fn detail_prev_card_at_first_visible_with_filter_notifies() {
+        let mut board = test_board(&[("A", &["c1", "c2", "c3"])]);
+        board.columns[0].cards[1].tags = vec!["keep".into()];
+        board.columns[0].cards[2].tags = vec!["keep".into()];
+        // card 0 has no "keep" tag → visible = [1, 2]; card 1 is first visible
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["keep".into()];
+        state.selected_card = 1;
+        state.mode = Mode::CardDetail { scroll: 0 };
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board, &mut state, Action::DetailPrevCard, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("First card"));
+        assert_eq!(state.selected_card, 1);
+    }
+
+    // ── Goto failures ──
+
+    fn assert_jump_notifies_no_visible(action: Action) {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["missing-tag".into()];
+        state.selected_card = 0;
+        handle_goto(&board, &mut state, action);
+        assert_eq!(state.notification.as_deref(), Some("No visible cards"));
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn jump_to_first_card_no_visible_cards_notifies() {
+        assert_jump_notifies_no_visible(Action::JumpToFirstCard);
+    }
+
+    #[test]
+    fn jump_to_last_card_no_visible_cards_notifies() {
+        assert_jump_notifies_no_visible(Action::JumpToLastCard);
+    }
+
+    #[test]
+    fn jump_to_backlog_missing_column_notifies() {
+        let board = test_board(&[("Todo", &[]), ("Done", &[])]);
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToBacklog);
+        assert_eq!(state.notification.as_deref(), Some("No 'backlog' column"));
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn jump_to_done_missing_column_notifies() {
+        let board = test_board(&[("Todo", &[]), ("Backlog", &[])]);
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToDone);
+        assert_eq!(state.notification.as_deref(), Some("No 'done' column"));
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn jump_to_backlog_hidden_notifies_when_show_hidden_off() {
+        let mut board = test_board(&[("Backlog", &[])]);
+        board.columns[0].slug = "backlog".into();
+        board.columns[0].hidden = true;
+        let mut state = AppState::new();
+        state.show_hidden_columns = false;
+        handle_goto(&board, &mut state, Action::JumpToBacklog);
+        assert_eq!(state.notification.as_deref(), Some("No 'backlog' column"));
+    }
+
+    #[test]
+    fn jump_to_done_hidden_notifies_when_show_hidden_off() {
+        let mut board = test_board(&[("Done", &[])]);
+        board.columns[0].slug = "done".into();
+        board.columns[0].hidden = true;
+        let mut state = AppState::new();
+        state.show_hidden_columns = false;
+        handle_goto(&board, &mut state, Action::JumpToDone);
+        assert_eq!(state.notification.as_deref(), Some("No 'done' column"));
     }
 }
