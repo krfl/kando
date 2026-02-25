@@ -135,6 +135,30 @@ enum Command {
     },
     /// Stream activity log to stdout (JSONL, one entry per line)
     Log,
+    /// Manage archived cards
+    Archive {
+        #[command(subcommand)]
+        action: Option<ArchiveAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArchiveAction {
+    /// List all archived cards
+    List,
+    /// Full-text search archived cards (title + body, case-insensitive)
+    Search {
+        /// Search query (omit to list all archived cards)
+        query: Option<String>,
+    },
+    /// Move a card from archive back to a column
+    Restore {
+        /// Card ID to restore
+        card_id: String,
+        /// Target column slug (default: done)
+        #[arg(long, default_value = "done")]
+        column: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -175,6 +199,11 @@ enum ConfigSetting {
     /// Set how many days trashed cards are kept before purging (0 to keep forever)
     TrashPurgeDays {
         /// Days to keep trash
+        days: u32,
+    },
+    /// Set how many days a completed card stays in done before being auto-archived (0 to disable)
+    ArchiveAfterDays {
+        /// Days in done before auto-archiving
         days: u32,
     },
     /// Enable or disable Nerd Font icons
@@ -248,6 +277,7 @@ fn main() {
             ConfigSetting::AutoCloseDays { days } => cmd_config_auto_close_days(&cwd, days),
             ConfigSetting::AutoCloseTarget { column } => cmd_config_auto_close_target(&cwd, &column),
             ConfigSetting::TrashPurgeDays { days } => cmd_config_trash_purge_days(&cwd, days),
+            ConfigSetting::ArchiveAfterDays { days } => cmd_config_archive_after_days(&cwd, days),
             ConfigSetting::NerdFont { value } => cmd_config_nerd_font(&cwd, &value),
             ConfigSetting::Show => cmd_config_show(&cwd),
         },
@@ -257,6 +287,7 @@ fn main() {
         Some(Command::Trash { action }) => cmd_trash(&cwd, action),
         Some(Command::Show { card_id }) => cmd_show(&cwd, &card_id),
         Some(Command::Log) => cmd_log(&cwd),
+        Some(Command::Archive { action }) => cmd_archive(&cwd, action),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
 
@@ -808,6 +839,19 @@ fn cmd_config_trash_purge_days(cwd: &Path, days: u32) -> color_eyre::Result<()> 
     Ok(())
 }
 
+fn cmd_config_archive_after_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    board.policies.archive_after_days = days;
+    save_board(&kando_dir, &board)?;
+    if days == 0 {
+        println!("Auto-archive disabled.");
+    } else {
+        println!("Auto-archive set to {days} days after completion.");
+    }
+    Ok(())
+}
+
 fn cmd_config_nerd_font(cwd: &Path, value: &str) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let mut board = load_board(&kando_dir)?;
@@ -845,6 +889,11 @@ fn cmd_config_show(cwd: &Path) -> color_eyre::Result<()> {
         println!("  trash-purge-days:    disabled (keep forever)");
     } else {
         println!("  trash-purge-days:    {} days", p.trash_purge_days);
+    }
+    if p.archive_after_days == 0 {
+        println!("  archive-after-days:  disabled");
+    } else {
+        println!("  archive-after-days:  {} days", p.archive_after_days);
     }
     println!();
     println!("WIP Limits");
@@ -1174,6 +1223,161 @@ fn cmd_show(cwd: &Path, card_id: &str) -> color_eyre::Result<()> {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
         Err(e) => return Err(e).wrap_err("error flushing stdout"),
     }
+    Ok(())
+}
+
+fn cmd_archive(cwd: &Path, action: Option<ArchiveAction>) -> color_eyre::Result<()> {
+    match action.unwrap_or(ArchiveAction::List) {
+        ArchiveAction::List => cmd_archive_list(cwd),
+        ArchiveAction::Search { query } => cmd_archive_search(cwd, query.as_deref().unwrap_or("")),
+        ArchiveAction::Restore { card_id, column } => cmd_archive_restore(cwd, &card_id, &column),
+    }
+}
+
+fn cmd_archive_list(cwd: &Path) -> color_eyre::Result<()> {
+    use std::io::{BufWriter, ErrorKind, Write};
+    use chrono::Utc;
+
+    let kando_dir = find_kando_dir(cwd)?;
+    let board = load_board(&kando_dir)?;
+
+    let archive_col = board.columns.iter()
+        .find(|c| c.slug == "archive")
+        .ok_or_else(|| color_eyre::eyre::eyre!("No 'archive' column found"))?;
+
+    if archive_col.cards.is_empty() {
+        println!("Archive is empty.");
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    match writeln!(out, "Archive ({} cards):", archive_col.cards.len()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+        Err(e) => return Err(e).wrap_err("error writing to stdout"),
+    }
+    for card in &archive_col.cards {
+        let age_start = card.completed.unwrap_or(card.updated);
+        let age_days = (now - age_start).num_days().max(0);
+        let date_str = age_start.format("%Y-%m-%d").to_string();
+        match writeln!(
+            out,
+            "  {:<6}  {:<40}  completed {}  ({} days ago)",
+            card.id,
+            if card.title.chars().count() > 40 { format!("{}…", card.title.chars().take(39).collect::<String>()) } else { card.title.clone() },
+            date_str,
+            age_days,
+        ) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => return Err(e).wrap_err("error writing to stdout"),
+        }
+    }
+    match out.flush() {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+        Err(e) => return Err(e).wrap_err("error flushing stdout"),
+    }
+    Ok(())
+}
+
+fn cmd_archive_search(cwd: &Path, query: &str) -> color_eyre::Result<()> {
+    use std::io::{BufWriter, ErrorKind, Write};
+    use chrono::Utc;
+
+    let kando_dir = find_kando_dir(cwd)?;
+    let board = load_board(&kando_dir)?;
+
+    let archive_col = board.columns.iter()
+        .find(|c| c.slug == "archive")
+        .ok_or_else(|| color_eyre::eyre::eyre!("No 'archive' column found"))?;
+
+    let query_lower = query.to_lowercase();
+    let matches: Vec<&Card> = archive_col.cards.iter()
+        .filter(|card| {
+            query_lower.is_empty()
+                || card.title.to_lowercase().contains(&query_lower)
+                || card.body.to_lowercase().contains(&query_lower)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        if query_lower.is_empty() {
+            println!("Archive is empty.");
+        } else {
+            println!("No archived cards match '{query}'.");
+        }
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let stdout = std::io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+    for card in matches {
+        let age_start = card.completed.unwrap_or(card.updated);
+        let age_days = (now - age_start).num_days().max(0);
+        let date_str = age_start.format("%Y-%m-%d").to_string();
+        match writeln!(
+            out,
+            "  {:<6}  {:<40}  completed {}  ({} days ago)",
+            card.id,
+            if card.title.chars().count() > 40 { format!("{}…", card.title.chars().take(39).collect::<String>()) } else { card.title.clone() },
+            date_str,
+            age_days,
+        ) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => return Err(e).wrap_err("error writing to stdout"),
+        }
+    }
+    match out.flush() {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => return Ok(()),
+        Err(e) => return Err(e).wrap_err("error flushing stdout"),
+    }
+    Ok(())
+}
+
+fn cmd_archive_restore(cwd: &Path, card_id: &str, column: &str) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+
+    let archive_idx = board.columns.iter().position(|c| c.slug == "archive")
+        .ok_or_else(|| color_eyre::eyre::eyre!("No 'archive' column found"))?;
+
+    let card_idx = board.columns[archive_idx].cards.iter()
+        .position(|c| c.id == card_id)
+        .ok_or_else(|| color_eyre::eyre::eyre!("Card '{}' not found in archive", card_id))?;
+
+    let target_idx = board.columns.iter().position(|c| c.slug == column)
+        .ok_or_else(|| {
+            let valid: Vec<&str> = board.columns.iter().map(|c| c.slug.as_str()).collect();
+            color_eyre::eyre::eyre!(
+                "Column '{}' not found. Valid columns: {}",
+                column,
+                valid.join(", ")
+            )
+        })?;
+
+    if target_idx == archive_idx {
+        bail!("Cannot restore a card to the archive column itself");
+    }
+
+    // Direct move to preserve completed/started timestamps (bypasses move_card()
+    // which would clear card.completed when moving out of "done").
+    let card = board.columns[archive_idx].cards.remove(card_idx);
+    let title = card.title.clone();
+    let target_name = board.columns[target_idx].name.clone();
+    board.columns[target_idx].cards.push(card);
+    board.columns[archive_idx].sort_cards();
+    board.columns[target_idx].sort_cards();
+
+    save_board(&kando_dir, &board)?;
+    append_activity(&kando_dir, "unarchive", card_id, &title, &[("to", &target_name)]);
+
+    println!("Restored {card_id} ({title}) to {target_name}");
     Ok(())
 }
 
@@ -1768,6 +1972,367 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_config_show(dir.path()).is_ok(), "cmd_config_show should not error");
+    }
+
+    // ── cmd_config_archive_after_days tests ──
+
+    #[test]
+    fn cmd_config_archive_after_days_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_config_archive_after_days(dir.path(), 7).is_err());
+    }
+
+    #[test]
+    fn cmd_config_archive_after_days_persists_value() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_config_archive_after_days(dir.path(), 14).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.archive_after_days, 14);
+    }
+
+    #[test]
+    fn cmd_config_archive_after_days_zero_disables() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        // First set a non-zero value, then set 0 to disable
+        cmd_config_archive_after_days(dir.path(), 7).unwrap();
+        cmd_config_archive_after_days(dir.path(), 0).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.archive_after_days, 0);
+    }
+
+    #[test]
+    fn cmd_config_archive_after_days_overwrite_works() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_config_archive_after_days(dir.path(), 7).unwrap();
+        cmd_config_archive_after_days(dir.path(), 30).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.archive_after_days, 30);
+    }
+
+    #[test]
+    fn cmd_config_archive_after_days_default_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.policies.archive_after_days, 0, "archive_after_days must default to 0 (disabled)");
+    }
+
+    // ── cmd_archive dispatch test ──
+
+    #[test]
+    fn cmd_archive_no_action_defaults_to_list() {
+        // When no action is given, cmd_archive defaults to list.
+        // An empty archive board should return Ok.
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        assert!(cmd_archive(dir.path(), None).is_ok());
+    }
+
+    // ── cmd_archive_list tests ──
+
+    /// Helper: create a board and add a card to the archive column.
+    fn setup_board_with_archived_card(parent: &Path) -> (PathBuf, String) {
+        use board::storage::{init_board, save_board};
+        init_board(parent, "Test", None).unwrap();
+        let kando_dir = parent.join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let id = board.next_card_id();
+        let card = Card::new(id.clone(), "Archived task".into());
+        board.columns[archive_idx].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+        (kando_dir, id)
+    }
+
+    #[test]
+    fn cmd_archive_list_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_archive_list(dir.path()).is_err());
+    }
+
+    #[test]
+    fn cmd_archive_list_empty_archive_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        assert!(cmd_archive_list(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_list_with_cards_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_archived_card(dir.path());
+        assert!(cmd_archive_list(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_list_uses_completed_date_returns_ok() {
+        use board::storage::save_board;
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_archived_card(dir.path());
+        let mut board = load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let card_idx = board.columns[archive_idx].cards.iter().position(|c| c.id == id).unwrap();
+        board.columns[archive_idx].cards[card_idx].completed =
+            Some(chrono::Utc::now() - chrono::Duration::days(30));
+        save_board(&kando_dir, &board).unwrap();
+        assert!(cmd_archive_list(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_list_falls_back_to_updated_returns_ok() {
+        // Card with completed = None — should fall back to updated for display date.
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_archived_card(dir.path()); // card has no completed set
+        assert!(cmd_archive_list(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_list_long_title_does_not_panic() {
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let id = board.next_card_id();
+        // Title with 60 ASCII chars AND multi-byte Unicode to exercise char-safe truncation
+        let long_title = "A".repeat(39) + "日本語テスト"; // > 40 chars total
+        board.columns[archive_idx].cards.push(Card::new(id, long_title));
+        save_board(&kando_dir, &board).unwrap();
+        assert!(cmd_archive_list(dir.path()).is_ok(), "long unicode title must not panic");
+    }
+
+    // ── cmd_archive_search tests ──
+
+    #[test]
+    fn cmd_archive_search_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_archive_search(dir.path(), "query").is_err());
+    }
+
+    #[test]
+    fn cmd_archive_search_title_match_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_archived_card(dir.path()); // title: "Archived task"
+        assert!(cmd_archive_search(dir.path(), "Archived").is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_search_body_match_returns_ok() {
+        use board::storage::{init_board, save_board};
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let id = board.next_card_id();
+        let mut card = Card::new(id, "Plain title".into());
+        card.body = "Unique body keyword xyzzy".into();
+        board.columns[archive_idx].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+        assert!(cmd_archive_search(dir.path(), "xyzzy").is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_search_no_match_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_archived_card(dir.path());
+        // Non-matching query — should print "No archived cards match" and return Ok
+        assert!(cmd_archive_search(dir.path(), "zzznomatch").is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_search_empty_query_returns_ok() {
+        // Empty query should list all cards without error
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_archived_card(dir.path());
+        assert!(cmd_archive_search(dir.path(), "").is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_search_empty_query_empty_archive_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        // Empty archive + empty query → "Archive is empty."
+        assert!(cmd_archive_search(dir.path(), "").is_ok());
+    }
+
+    #[test]
+    fn cmd_archive_search_case_insensitive_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_board_with_archived_card(dir.path()); // title: "Archived task"
+        // Uppercase query should still match lowercase title substring
+        assert!(cmd_archive_search(dir.path(), "ARCHIVED").is_ok());
+    }
+
+    // ── cmd_archive_restore tests ──
+
+    #[test]
+    fn cmd_archive_restore_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_archive_restore(dir.path(), "001", "done").is_err());
+    }
+
+    #[test]
+    fn cmd_archive_restore_card_not_in_archive_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let err = cmd_archive_restore(dir.path(), "nonexistent", "done").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not found in archive"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_invalid_column_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, card_id) = setup_board_with_archived_card(dir.path());
+        let err = cmd_archive_restore(dir.path(), &card_id, "nonexistent-col").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not found"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_to_archive_column_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, card_id) = setup_board_with_archived_card(dir.path());
+        let err = cmd_archive_restore(dir.path(), &card_id, "archive").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("archive column itself"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_to_done_moves_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, card_id) = setup_board_with_archived_card(dir.path());
+
+        cmd_archive_restore(dir.path(), &card_id, "done").unwrap();
+
+        let board = load_board(&kando_dir).unwrap();
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        assert!(
+            board.columns[done_idx].cards.iter().any(|c| c.id == card_id),
+            "card should be in done column after restore"
+        );
+        assert!(
+            !board.columns[archive_idx].cards.iter().any(|c| c.id == card_id),
+            "card should no longer be in archive after restore"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_to_custom_column_moves_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, card_id) = setup_board_with_archived_card(dir.path());
+
+        cmd_archive_restore(dir.path(), &card_id, "backlog").unwrap();
+
+        let board = load_board(&kando_dir).unwrap();
+        let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
+        assert!(
+            board.columns[backlog_idx].cards.iter().any(|c| c.id == card_id),
+            "card should be in backlog after restoring to backlog"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_preserves_completed_timestamp() {
+        use board::storage::save_board;
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let id = board.next_card_id();
+        let fixed_completed = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let mut card = Card::new(id.clone(), "Restore test".into());
+        card.completed = Some(fixed_completed);
+        board.columns[archive_idx].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        cmd_archive_restore(dir.path(), &id, "done").unwrap();
+
+        let board = load_board(&kando_dir).unwrap();
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        let restored = board.columns[done_idx].cards.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            restored.completed,
+            Some(fixed_completed),
+            "restore must preserve the completed timestamp (direct move bypasses move_card)"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_preserves_started_timestamp() {
+        use board::storage::save_board;
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut board = load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let id = board.next_card_id();
+        let fixed_started = chrono::DateTime::from_timestamp(500_000, 0).unwrap();
+        let mut card = Card::new(id.clone(), "Started restore test".into());
+        card.started = Some(fixed_started);
+        board.columns[archive_idx].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        cmd_archive_restore(dir.path(), &id, "done").unwrap();
+
+        let board = load_board(&kando_dir).unwrap();
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        let restored = board.columns[done_idx].cards.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            restored.started,
+            Some(fixed_started),
+            "restore must preserve the started timestamp"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_saves_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, card_id) = setup_board_with_archived_card(dir.path());
+
+        cmd_archive_restore(dir.path(), &card_id, "done").unwrap();
+
+        // Reload from disk to verify the save happened
+        let board = load_board(&kando_dir).unwrap();
+        let found = board.columns.iter().any(|col| col.cards.iter().any(|c| c.id == card_id));
+        assert!(found, "card should be findable on disk after restore");
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        assert!(
+            !board.columns[archive_idx].cards.iter().any(|c| c.id == card_id),
+            "archive column should not contain the card after restore"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_restore_appends_activity_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, card_id) = setup_board_with_archived_card(dir.path());
+
+        cmd_archive_restore(dir.path(), &card_id, "done").unwrap();
+
+        let log = fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        assert!(log.contains("\"action\":\"unarchive\""), "activity log should record unarchive action");
+        assert!(
+            log.contains(&format!("\"id\":\"{card_id}\"")),
+            "activity log should include card id"
+        );
     }
 
     #[test]

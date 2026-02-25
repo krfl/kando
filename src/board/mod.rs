@@ -37,6 +37,9 @@ pub struct Policies {
     /// Trash entries older than this many days are permanently purged. 0 = never.
     #[serde(default = "default_trash_purge_days")]
     pub trash_purge_days: u32,
+    /// Cards in the `done` column for this many days are auto-archived. 0 = disabled.
+    #[serde(default)]
+    pub archive_after_days: u32,
 }
 
 fn default_auto_close_days() -> u32 {
@@ -59,6 +62,7 @@ impl Default for Policies {
             auto_close_target: default_auto_close_target(),
             stale_days: default_stale_days(),
             trash_purge_days: default_trash_purge_days(),
+            archive_after_days: 0,
         }
     }
 }

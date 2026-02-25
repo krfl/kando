@@ -108,6 +108,69 @@ pub fn run_auto_close(board: &mut Board, now: DateTime<Utc>) -> Vec<ClosedCard> 
     closed_ids
 }
 
+/// A card that was moved to the archive column by the auto-archive policy.
+#[derive(Debug)]
+pub struct ArchivedCard {
+    pub id: String,
+    pub title: String,
+    /// Slug of the source column (e.g. `"done"`). Use this to look up the display
+    /// name at the call site, consistent with [`ClosedCard::from_col_slug`].
+    pub from_col_slug: String,
+}
+
+/// Run the auto-archive policy on the board.
+///
+/// Moves cards that have been in the `done` column for at least
+/// `policies.archive_after_days` days to the `archive` column.
+/// Uses `card.completed` as the age reference, falling back to `card.updated`.
+///
+/// Returns one [`ArchivedCard`] per card moved.
+pub fn run_auto_archive(board: &mut Board, now: DateTime<Utc>) -> Vec<ArchivedCard> {
+    let days = board.policies.archive_after_days;
+    if days == 0 {
+        return Vec::new();
+    }
+    let threshold = chrono::Duration::days(days as i64);
+
+    let done_idx = board.columns.iter().position(|c| c.slug == "done");
+    let archive_idx = board.columns.iter().position(|c| c.slug == "archive");
+    let (Some(done_idx), Some(archive_idx)) = (done_idx, archive_idx) else {
+        return Vec::new();
+    };
+
+    // Collect indices of cards old enough to archive, in reverse order so that
+    // removing by index doesn't shift subsequent indices.
+    let to_archive: Vec<usize> = board.columns[done_idx]
+        .cards
+        .iter()
+        .enumerate()
+        .filter(|(_, card)| {
+            let age_start = card.completed.unwrap_or(card.updated);
+            now.signed_duration_since(age_start) >= threshold
+        })
+        .map(|(i, _)| i)
+        .rev()
+        .collect();
+
+    let done_slug = board.columns[done_idx].slug.clone();
+    let mut archived = Vec::new();
+    for idx in to_archive {
+        let card = board.columns[done_idx].cards.remove(idx);
+        archived.push(ArchivedCard {
+            id: card.id.clone(),
+            title: card.title.clone(),
+            from_col_slug: done_slug.clone(),
+        });
+        // Direct push bypasses move_card() to preserve the completed timestamp.
+        board.columns[archive_idx].cards.push(card);
+    }
+
+    board.columns[done_idx].sort_cards();
+    board.columns[archive_idx].sort_cards();
+
+    archived
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +613,370 @@ mod tests {
         let mut board = make_board(vec![], policies);
         let closed = run_auto_close(&mut board, now);
         assert!(closed.is_empty());
+    }
+
+    // ── run_auto_archive tests ──
+
+    #[test]
+    fn run_auto_archive_moves_card_from_done_to_archive() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let completed = Utc.with_ymd_and_hms(2025, 6, 5, 12, 0, 0).unwrap(); // 10 days ago
+        let mut card = Card::new("1".into(), "Done task".into());
+        card.completed = Some(completed);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "1");
+        assert_eq!(board.columns[0].cards.len(), 0, "done column should be empty");
+        assert_eq!(board.columns[1].cards.len(), 1, "archive column should have one card");
+        assert_eq!(board.columns[1].cards[0].id, "1");
+    }
+
+    #[test]
+    fn run_auto_archive_disabled_when_zero() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Old task".into());
+        card.completed = Some(old);
+
+        let policies = Policies { archive_after_days: 0, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert!(archived.is_empty());
+        assert_eq!(board.columns[0].cards.len(), 1, "card should remain in done");
+    }
+
+    #[test]
+    fn run_auto_archive_at_exact_threshold_is_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // Exactly 7 days ago — should meet the >= threshold
+        let completed = Utc.with_ymd_and_hms(2025, 6, 8, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Boundary".into());
+        card.completed = Some(completed);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 1, "card at exact 7-day threshold should be archived");
+    }
+
+    #[test]
+    fn run_auto_archive_one_day_short_not_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // 6 days ago — one short of 7-day threshold
+        let completed = Utc.with_ymd_and_hms(2025, 6, 9, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Almost ready".into());
+        card.completed = Some(completed);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert!(archived.is_empty(), "card 6 days old should not be archived at 7-day threshold");
+        assert_eq!(board.columns[0].cards.len(), 1, "card should still be in done");
+    }
+
+    #[test]
+    fn run_auto_archive_preserves_completed_timestamp() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let completed = Utc.with_ymd_and_hms(2025, 6, 5, 12, 0, 0).unwrap(); // 10 days ago
+        let mut card = Card::new("1".into(), "Task".into());
+        card.completed = Some(completed);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        run_auto_archive(&mut board, now);
+
+        let archived_card = &board.columns[1].cards[0];
+        assert_eq!(
+            archived_card.completed,
+            Some(completed),
+            "completed timestamp must be preserved after auto-archiving"
+        );
+    }
+
+    #[test]
+    fn run_auto_archive_uses_completed_over_updated() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // completed is recent (3 days ago — below 7-day threshold)
+        let completed = Utc.with_ymd_and_hms(2025, 6, 12, 12, 0, 0).unwrap();
+        // updated is very old (30 days ago — above threshold)
+        let updated = Utc.with_ymd_and_hms(2025, 5, 16, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Recently completed".into());
+        card.completed = Some(completed);
+        card.updated = updated;
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert!(
+            archived.is_empty(),
+            "completed (3 days ago) takes priority over updated (30 days ago); must not be archived"
+        );
+        assert_eq!(board.columns[0].cards.len(), 1, "card should remain in done");
+    }
+
+    #[test]
+    fn run_auto_archive_falls_back_to_updated_when_no_completed() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // No completed timestamp; updated is 10 days ago (above 7-day threshold)
+        let updated = Utc.with_ymd_and_hms(2025, 6, 5, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "No completed".into());
+        card.updated = updated;
+        // card.completed is None by default
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 1, "should fall back to updated when completed is None");
+    }
+
+    #[test]
+    fn run_auto_archive_only_moves_from_done_not_other_columns() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap(); // 45 days ago
+        // Old card in backlog — must NOT be archived (only "done" is in scope)
+        let mut backlog_card = Card::new("1".into(), "Backlog old".into());
+        backlog_card.updated = old;
+        // Old card in done — must be archived
+        let mut done_card = Card::new("2".into(), "Done old".into());
+        done_card.completed = Some(old);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![backlog_card]),
+            make_column("done", "Done", vec![done_card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 1, "only done-column cards should be archived");
+        assert_eq!(archived[0].id, "2");
+        assert_eq!(board.columns[0].cards.len(), 1, "backlog card should be untouched");
+        assert_eq!(board.columns[1].cards.len(), 0, "done card should be moved");
+        assert_eq!(board.columns[2].cards.len(), 1, "archive should have the done card");
+    }
+
+    #[test]
+    fn run_auto_archive_no_done_column_returns_empty() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert!(archived.is_empty());
+    }
+
+    #[test]
+    fn run_auto_archive_no_archive_column_returns_empty() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Old done".into());
+        card.completed = Some(old);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert!(archived.is_empty());
+        assert_eq!(board.columns[0].cards.len(), 1, "card must stay when no archive column exists");
+    }
+
+    #[test]
+    fn run_auto_archive_multiple_done_cards_all_old_all_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        let mut c1 = Card::new("1".into(), "First".into());
+        c1.completed = Some(old);
+        let mut c2 = Card::new("2".into(), "Second".into());
+        c2.completed = Some(old);
+        let mut c3 = Card::new("3".into(), "Third".into());
+        c3.completed = Some(old);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![c1, c2, c3]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 3, "all three old cards should be archived");
+        assert_eq!(board.columns[0].cards.len(), 0, "done column should be empty");
+        assert_eq!(board.columns[1].cards.len(), 3, "archive column should have 3 cards");
+    }
+
+    #[test]
+    fn run_auto_archive_mixed_old_and_young_only_old_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        let recent = Utc.with_ymd_and_hms(2025, 6, 13, 12, 0, 0).unwrap(); // 2 days ago
+        let mut old_card = Card::new("1".into(), "Old".into());
+        old_card.completed = Some(old);
+        let mut new_card = Card::new("2".into(), "New".into());
+        new_card.completed = Some(recent);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![old_card, new_card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 1, "only the old card should be archived");
+        assert_eq!(archived[0].id, "1");
+        assert_eq!(board.columns[0].cards.len(), 1, "recent card should remain in done");
+        assert_eq!(board.columns[0].cards[0].id, "2", "the remaining card should be the recent one");
+    }
+
+    #[test]
+    fn run_auto_archive_returns_correct_id_and_title() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        let mut card = Card::new("042".into(), "Very Important Task".into());
+        card.completed = Some(old);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "042");
+        assert_eq!(archived[0].title, "Very Important Task");
+    }
+
+    #[test]
+    fn run_auto_archive_from_col_slug_is_done_slug() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let old = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Task".into());
+        card.completed = Some(old);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].from_col_slug, "done");
+    }
+
+    #[test]
+    fn run_auto_archive_does_not_update_updated_field() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let completed = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        let updated = Utc.with_ymd_and_hms(2025, 4, 20, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Task".into());
+        card.completed = Some(completed);
+        card.updated = updated;
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        run_auto_archive(&mut board, now);
+
+        let archived_card = &board.columns[1].cards[0];
+        assert_eq!(
+            archived_card.updated, updated,
+            "archiving must not change updated (touch() is intentionally skipped)"
+        );
+    }
+
+    #[test]
+    fn run_auto_archive_preserves_started_timestamp() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let completed = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        let started = Utc.with_ymd_and_hms(2025, 4, 1, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Task".into());
+        card.completed = Some(completed);
+        card.started = Some(started);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        run_auto_archive(&mut board, now);
+
+        let archived_card = &board.columns[1].cards[0];
+        assert_eq!(
+            archived_card.started,
+            Some(started),
+            "started timestamp must be preserved after auto-archiving"
+        );
+    }
+
+    #[test]
+    fn run_auto_archive_empty_done_column_returns_empty() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert!(archived.is_empty());
+    }
+
+    #[test]
+    fn run_auto_archive_future_completed_not_moved() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // completed is in the future — signed_duration_since < threshold
+        let completed = Utc.with_ymd_and_hms(2025, 7, 1, 12, 0, 0).unwrap();
+        let mut card = Card::new("1".into(), "Future done".into());
+        card.completed = Some(completed);
+
+        let policies = Policies { archive_after_days: 7, ..Default::default() };
+        let mut board = make_board(vec![
+            make_column("done", "Done", vec![card]),
+            make_column("archive", "Archive", vec![]),
+        ], policies);
+
+        let archived = run_auto_archive(&mut board, now);
+        assert!(archived.is_empty(), "card with future completed timestamp must not be archived");
+        assert_eq!(board.columns[0].cards.len(), 1);
     }
 }

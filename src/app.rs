@@ -6,7 +6,7 @@ use ratatui::DefaultTerminal;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use crate::board::age::run_auto_close;
+use crate::board::age::{run_auto_archive, run_auto_close};
 use crate::board::storage::{append_activity, find_kando_dir, load_board, load_local_config, load_trash, save_board, trash_card, restore_card, TrashEntry};
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
@@ -347,8 +347,9 @@ fn handle_auto_close(
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
     let mut messages = Vec::new();
+    let now = Utc::now();
 
-    let closed = run_auto_close(board, Utc::now());
+    let closed = run_auto_close(board, now);
     if !closed.is_empty() {
         save_board(kando_dir, board)?;
         let target_name = board.columns.iter()
@@ -370,6 +371,34 @@ fn handle_auto_close(
         }
         messages.push(format!(
             "{} card{} auto-closed",
+            n,
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
+    // Auto-archive completed cards from the done column
+    let aa = run_auto_archive(board, now);
+    if !aa.is_empty() {
+        save_board(kando_dir, board)?;
+        let archive_name = board.columns.iter()
+            .find(|c| c.slug == "archive")
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "Archive".to_string());
+        for card in &aa {
+            let from_name = board.columns.iter()
+                .find(|c| c.slug == card.from_col_slug)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| card.from_col_slug.clone());
+            append_activity(kando_dir, "archive", &card.id, &card.title,
+                &[("from", &from_name), ("to", &archive_name)]);
+        }
+        let n = aa.len();
+        let sync_msg = format!("Auto-archive {} completed card{}", n, if n == 1 { "" } else { "s" });
+        if let Some(ref mut sync_state) = state.sync_state {
+            sync::commit_and_push(sync_state, kando_dir, &sync_msg);
+        }
+        messages.push(format!(
+            "{} card{} auto-archived",
             n,
             if n == 1 { "" } else { "s" }
         ));

@@ -21,6 +21,7 @@ pub struct CommandInfo {
 /// Aliases (mv, pri, q) are intentionally omitted — they still work but
 /// are not shown in the palette or offered as completions.
 pub const COMMANDS: &[CommandInfo] = &[
+    CommandInfo { name: "archive",  description: "Archive the selected (or specified) card" },
     CommandInfo { name: "assign",   description: "Assign card" },
     CommandInfo { name: "col",      description: "Column visibility" },
     CommandInfo { name: "count",    description: "Card counts" },
@@ -42,7 +43,7 @@ pub const COMMANDS: &[CommandInfo] = &[
 
 /// All recognized command names (for completion), derived from COMMANDS.
 const COMMAND_NAMES: &[&str] = &[
-    "assign", "col", "count", "find", "focus", "metrics", "move", "priority",
+    "archive", "assign", "col", "count", "find", "focus", "metrics", "move", "priority",
     "quit", "reload", "rename", "restore", "sort", "tag", "unassign", "untag", "wip",
 ];
 
@@ -159,6 +160,7 @@ fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String]
         }
         "focus" => FOCUS_ARGS.iter().map(|s| s.to_string()).collect(),
         "restore" => trash_ids.iter().map(|(id, _)| id.clone()).collect(),
+        "archive" => archivable_card_ids(board).into_iter().map(|(id, _)| id).collect(),
         _ => vec![], // find, rename, reload, count — no arg completion
     };
 
@@ -195,6 +197,14 @@ fn board_tags(board: &Board) -> Vec<String> {
 
 fn board_assignees(board: &Board) -> Vec<String> {
     board.all_assignees().into_iter().map(|(name, _)| name).collect()
+}
+
+/// Card IDs in all visible, non-archive columns (candidates for :archive).
+fn archivable_card_ids(board: &Board) -> Vec<(String, String)> {
+    board.columns.iter()
+        .filter(|c| c.slug != "archive" && !c.hidden)
+        .flat_map(|c| c.cards.iter().map(|card| (card.id.clone(), card.title.clone())))
+        .collect()
 }
 
 /// Compute the palette items (name, description) for the command overlay.
@@ -254,6 +264,7 @@ pub fn palette_items(input: &str, board: &Board, card_tags: &[String], card_assi
             }
         }
         "restore" => ("trash", trash_ids.iter().map(|(id, title)| (id.clone(), title.clone())).collect()),
+        "archive" => ("cards", archivable_card_ids(board)),
         _ => return ("", vec![]), // find, rename, reload, count, q, quit — no arg completion
     };
 
@@ -373,6 +384,7 @@ pub fn execute_command(
         "focus" => cmd_focus(state, rest, kando_dir),
         "col" => cmd_col(board, state, rest, kando_dir),
         "restore" => cmd_restore(board, state, rest, kando_dir),
+        "archive" => cmd_archive(board, state, rest, kando_dir),
         "reload" => cmd_reload(board, state, kando_dir),
         "metrics" => { state.mode = crate::app::Mode::Metrics { scroll: 0 }; Ok(None) }
         "count" => cmd_count(board, state),
@@ -970,6 +982,74 @@ fn cmd_restore(
     }
     state.notify(format!("Restored: {title}"));
     Ok(Some("Restore card".into()))
+}
+
+/// :archive [card-id] — Move a card to the archive column.
+///
+/// Without an argument, archives the currently selected card.
+/// With an argument, archives the card with that ID.
+fn cmd_archive(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &str,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    // Find the archive column index.
+    let archive_idx = match board.columns.iter().position(|c| c.slug == "archive") {
+        Some(i) => i,
+        None => {
+            state.notify_error("No 'archive' column found — create one first");
+            return Ok(None);
+        }
+    };
+
+    // Resolve target card: explicit ID or currently focused card.
+    let (col_idx, card_idx) = if args.trim().is_empty() {
+        let col = state.focused_column;
+        let card = state.selected_card;
+        if board.columns.get(col).and_then(|c| c.cards.get(card)).is_none() {
+            state.notify_error("No card selected");
+            return Ok(None);
+        }
+        (col, card)
+    } else {
+        let id = args.trim();
+        match board.find_card(id) {
+            Some(pos) => pos,
+            None => {
+                state.notify_error(format!("Card {id} not found"));
+                return Ok(None);
+            }
+        }
+    };
+
+    if col_idx == archive_idx {
+        state.notify_error("Card is already in the archive");
+        return Ok(None);
+    }
+
+    // Direct move rather than board.move_card() to preserve completed/started
+    // timestamps. move_card() clears card.completed when moving OUT of "done",
+    // which would erase the completion date we want to keep in the archive.
+    // touch() is also intentionally skipped — archiving is organizational, not
+    // a content edit, so updated should reflect the last actual change to the card.
+    let card = board.columns[col_idx].cards.remove(card_idx);
+    let title = card.title.clone();
+    let id = card.id.clone();
+    let from_col_name = board.columns[col_idx].name.clone();
+    let archive_name = board.columns[archive_idx].name.clone();
+    board.columns[archive_idx].cards.push(card);
+    board.columns[col_idx].sort_cards();
+    board.columns[archive_idx].sort_cards();
+
+    crate::board::storage::save_board(kando_dir, board)?;
+    crate::board::storage::append_activity(kando_dir, "archive", &id, &title,
+        &[("from", &from_col_name), ("to", &archive_name)]);
+
+    // Keep selection valid after removal.
+    state.clamp_selection(board);
+    state.notify(format!("Archived: {title}"));
+    Ok(Some("Archive card".into()))
 }
 
 /// :reload — Reload board from disk.
@@ -1918,5 +1998,198 @@ mod tests {
         execute_command(&mut board, &mut state, "focus  ", &kando_dir).unwrap();
         assert!(state.focus_mode);
         assert_eq!(state.notification_level, crate::app::NotificationLevel::Info);
+    }
+
+    // ── :archive TUI command tests ──
+
+    #[test]
+    fn cmd_archive_focused_card_moves_to_archive() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // Card "001" is in backlog (columns[0]), state defaults to focused_column=0, selected_card=0
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+
+        let result = execute_command(&mut board, &mut state, "archive", &kando_dir).unwrap();
+
+        assert!(result.is_some(), ":archive should return Some (it's a board mutation)");
+        assert!(
+            board.columns[archive_idx].cards.iter().any(|c| c.id == "001"),
+            "card should be in archive column after :archive"
+        );
+        assert!(
+            !board.columns[0].cards.iter().any(|c| c.id == "001"),
+            "card should be gone from backlog"
+        );
+        assert!(
+            state.notification.as_ref().unwrap().contains("Archived"),
+            "notification should say Archived"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_by_id_moves_to_archive() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+
+        let result = execute_command(&mut board, &mut state, "archive 001", &kando_dir).unwrap();
+
+        assert!(result.is_some());
+        assert!(board.columns[archive_idx].cards.iter().any(|c| c.id == "001"));
+    }
+
+    #[test]
+    fn cmd_archive_already_in_archive_notifies_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        // Add any card to the archive column so that focusing on archive is valid
+        board.columns[archive_idx].cards.push(Card::new("010".into(), "Archive card".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        // Focus on the archive column
+        state.focused_column = archive_idx;
+        state.selected_card = 0;
+
+        execute_command(&mut board, &mut state, "archive", &kando_dir).unwrap();
+
+        assert_eq!(state.notification_level, crate::app::NotificationLevel::Error);
+        assert!(
+            state.notification.as_ref().unwrap().contains("already in the archive"),
+            "notification: {:?}", state.notification
+        );
+    }
+
+    #[test]
+    fn cmd_archive_no_card_selected_notifies_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // Focus on the done column, which is empty
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        state.focused_column = done_idx;
+        state.selected_card = 0;
+
+        execute_command(&mut board, &mut state, "archive", &kando_dir).unwrap();
+
+        assert_eq!(state.notification_level, crate::app::NotificationLevel::Error);
+        assert!(state.notification.as_ref().unwrap().contains("No card selected"));
+    }
+
+    #[test]
+    fn cmd_archive_card_id_not_found_notifies_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+
+        execute_command(&mut board, &mut state, "archive nonexistent999", &kando_dir).unwrap();
+
+        assert_eq!(state.notification_level, crate::app::NotificationLevel::Error);
+        assert!(state.notification.as_ref().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn cmd_archive_preserves_completed_timestamp() {
+        use chrono::TimeZone;
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let fixed_completed = chrono::Utc.with_ymd_and_hms(2025, 3, 15, 10, 0, 0).unwrap();
+        let mut card = Card::new("099".into(), "Done card".into());
+        card.completed = Some(fixed_completed);
+        board.columns[done_idx].cards.push(card);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        state.focused_column = done_idx;
+        state.selected_card = 0;
+
+        execute_command(&mut board, &mut state, "archive 099", &kando_dir).unwrap();
+
+        let archived = board.columns[archive_idx].cards.iter().find(|c| c.id == "099").unwrap();
+        assert_eq!(
+            archived.completed,
+            Some(fixed_completed),
+            ":archive must preserve completed timestamp (direct move, no move_card)"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_preserves_started_timestamp() {
+        use chrono::TimeZone;
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        let fixed_started = chrono::Utc.with_ymd_and_hms(2025, 2, 1, 9, 0, 0).unwrap();
+        let mut card = Card::new("098".into(), "Started card".into());
+        card.started = Some(fixed_started);
+        board.columns[done_idx].cards.push(card);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+
+        execute_command(&mut board, &mut state, "archive 098", &kando_dir).unwrap();
+
+        let archived = board.columns[archive_idx].cards.iter().find(|c| c.id == "098").unwrap();
+        assert_eq!(
+            archived.started,
+            Some(fixed_started),
+            ":archive must preserve started timestamp (touch() is intentionally skipped)"
+        );
+    }
+
+    #[test]
+    fn cmd_archive_no_archive_column_notifies_error() {
+        // test_board() has no archive column; the command should return a notification,
+        // not an Err, and must not reach save_board (fake path is never used).
+        let mut board = test_board();
+        let mut state = AppState::new();
+        let fake_dir = std::path::Path::new("/nonexistent");
+
+        execute_command(&mut board, &mut state, "archive", fake_dir).unwrap();
+
+        assert_eq!(state.notification_level, crate::app::NotificationLevel::Error);
+        assert!(
+            state.notification.as_ref().unwrap().contains("No 'archive' column found"),
+            "notification: {:?}", state.notification
+        );
+    }
+
+    #[test]
+    fn archivable_card_ids_excludes_archive_and_hidden() {
+        // Each column exercises exactly one filter condition in isolation:
+        //  "backlog"  → visible non-archive: included
+        //  "archive"  → excluded by slug check (hidden: false so slug is the only guard)
+        //  "secret"   → excluded by hidden check (slug != "archive" so hidden is the only guard)
+        let board = Board {
+            name: "Test".into(),
+            next_card_id: 10,
+            policies: Policies::default(),
+            sync_branch: None,
+            tutorial_shown: true,
+            nerd_font: false,
+            created_at: None,
+            columns: vec![
+                Column {
+                    slug: "backlog".into(),
+                    name: "Backlog".into(),
+                    order: 0,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: vec![Card::new("001".into(), "Visible backlog card".into())],
+                },
+                Column {
+                    slug: "archive".into(),
+                    name: "Archive".into(),
+                    order: 1,
+                    wip_limit: None,
+                    hidden: false, // excluded solely by slug, NOT by hidden flag
+                    cards: vec![Card::new("002".into(), "Already archived card".into())],
+                },
+                Column {
+                    slug: "secret".into(),
+                    name: "Secret".into(),
+                    order: 2,
+                    wip_limit: None,
+                    hidden: true, // excluded solely by hidden, NOT by slug
+                    cards: vec![Card::new("003".into(), "Hidden col card".into())],
+                },
+            ],
+        };
+
+        let ids = archivable_card_ids(&board);
+        let id_strs: Vec<&str> = ids.iter().map(|(id, _)| id.as_str()).collect();
+
+        assert!(id_strs.contains(&"001"), "visible backlog card should be archivable");
+        assert!(!id_strs.contains(&"002"), "archive-column card must NOT be archivable (slug guard)");
+        assert!(!id_strs.contains(&"003"), "hidden-column card must NOT be archivable (hidden guard)");
     }
 }
