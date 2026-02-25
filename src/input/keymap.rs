@@ -59,6 +59,7 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Char(' ') => Action::EnterSpaceMode,
         KeyCode::Char('z') => Action::EnterViewMode,
         KeyCode::Char('u') => Action::Undo,
+        KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Char(':') => Action::EnterCommandMode,
         KeyCode::Tab => Action::CycleNextCard,
         KeyCode::BackTab => Action::CyclePrevCard,
@@ -204,6 +205,7 @@ pub const NORMAL_BINDINGS: &[Binding] = &[
     Binding { key: "u", description: "Undo last delete", tutorial: true },
     Binding { key: "/", description: "Search cards", tutorial: false },
     Binding { key: ":", description: "Command mode", tutorial: false },
+    Binding { key: "?", description: "Help", tutorial: true },
     Binding { key: "Esc", description: "Clear filters", tutorial: false },
     Binding { key: "q", description: "Quit", tutorial: false },
 ];
@@ -221,7 +223,7 @@ pub const SPACE_BINDINGS: &[Binding] = &[
     Binding { key: "u", description: "Undo last delete", tutorial: false },
     Binding { key: "r", description: "Reload board", tutorial: false },
     Binding { key: "/", description: "Search all", tutorial: false },
-    Binding { key: "?", description: "This help", tutorial: false },
+    Binding { key: "?", description: "Help", tutorial: false },
 ];
 
 pub const FILTER_BINDINGS: &[Binding] = &[
@@ -253,11 +255,11 @@ pub const DETAIL_BINDINGS: &[Binding] = &[
 ];
 
 /// Extra bindings shown only in the tutorial "More" section.
+/// Must not duplicate entries already in NORMAL_BINDINGS with tutorial: true.
 const TUTORIAL_EXTRA: &[Binding] = &[
     Binding { key: "g", description: "Goto mode (jump to columns)", tutorial: true },
     Binding { key: "z", description: "View mode (hidden columns)", tutorial: true },
     Binding { key: "/", description: "Search cards", tutorial: true },
-    Binding { key: "Space ?", description: "Full help", tutorial: true },
     Binding { key: "q", description: "Quit", tutorial: true },
 ];
 
@@ -398,6 +400,11 @@ mod tests {
     #[test]
     fn normal_u_undoes() {
         assert_eq!(map_key(key(KeyCode::Char('u')), &Mode::Normal), Action::Undo);
+    }
+
+    #[test]
+    fn normal_question_mark_shows_help() {
+        assert_eq!(map_key(key(KeyCode::Char('?')), &Mode::Normal), Action::ShowHelp);
     }
 
     #[test]
@@ -567,6 +574,11 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('b')), &Mode::Space), Action::ToggleBlocker);
     }
 
+    #[test]
+    fn space_question_mark_shows_help() {
+        assert_eq!(map_key(key(KeyCode::Char('?')), &Mode::Space), Action::ShowHelp);
+    }
+
     // ── View mode bindings ──
 
     #[test]
@@ -669,6 +681,35 @@ mod tests {
     fn detail_esc_closes() {
         let mode = Mode::CardDetail { scroll: 0 };
         assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::ClosePanel);
+    }
+
+    // ── Binding registry tests ──
+
+    #[test]
+    fn normal_bindings_contains_question_mark_tutorial() {
+        let entry = NORMAL_BINDINGS.iter().find(|b| b.key == "?");
+        assert!(entry.is_some(), "? binding missing from NORMAL_BINDINGS");
+        let entry = entry.unwrap();
+        assert_eq!(entry.description, "Help");
+        assert!(entry.tutorial, "? binding should be marked tutorial: true");
+    }
+
+    #[test]
+    fn tutorial_extra_has_no_question_mark() {
+        // ? is in NORMAL_BINDINGS (tutorial: true) — it must not also appear in
+        // TUTORIAL_EXTRA, which would cause it to render twice in the tutorial overlay.
+        assert!(
+            TUTORIAL_EXTRA.iter().all(|b| b.key != "?"),
+            "? must not appear in TUTORIAL_EXTRA — it is already in NORMAL_BINDINGS"
+        );
+    }
+
+    #[test]
+    fn space_bindings_question_mark_not_tutorial() {
+        // ? in SPACE_BINDINGS should never be tutorial: true — that would duplicate
+        // the ? entry already in NORMAL_BINDINGS in the tutorial overlay.
+        let entry = SPACE_BINDINGS.iter().find(|b| b.key == "?").unwrap();
+        assert!(!entry.tutorial, "? in SPACE_BINDINGS should be tutorial: false");
     }
 
     // ── mode_bindings tests ──
