@@ -10,6 +10,7 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Goto => map_goto(key),
         Mode::Space => map_space(key),
         Mode::View => map_view(key),
+        Mode::ColMove => map_col_move(key),
         Mode::FilterMenu => map_filter_menu(key),
         Mode::Input { .. } => map_input(key),
         Mode::Confirm { .. } => map_confirm(key),
@@ -57,14 +58,14 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Char('f') => Action::EnterFilterMode,
         KeyCode::Char('g') => Action::EnterGotoMode,
         KeyCode::Char(' ') => Action::EnterSpaceMode,
-        KeyCode::Char('z') => Action::EnterViewMode,
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+        KeyCode::Char('c') => Action::EnterViewMode,
         KeyCode::Char('u') => Action::Undo,
         KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Char(':') => Action::EnterCommandMode,
         KeyCode::Tab => Action::CycleNextCard,
         KeyCode::BackTab => Action::CyclePrevCard,
         KeyCode::Esc => Action::ClearFilters,
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
         _ => Action::None,
     }
 }
@@ -101,9 +102,30 @@ fn map_space(key: KeyEvent) -> Action {
     }
 }
 
+/// Map keys for column-management mode, entered by pressing `c` in Normal mode.
+/// Displayed as "Column (c)" in the help panel; uses [`Mode::View`] internally.
 fn map_view(key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Char('h') => Action::ToggleHiddenColumns,
+        KeyCode::Char('h') => Action::ToggleFocusedColumnHidden,
+        KeyCode::Char('s') => Action::ToggleHiddenColumns,
+        KeyCode::Char('r') => Action::ColRenameSelected,
+        KeyCode::Char('a') => Action::ColAddBefore,
+        KeyCode::Char('d') => Action::ColRemoveSelected,
+        KeyCode::Char('m') => Action::EnterColMoveMode,
+        KeyCode::Esc => Action::None,
+        _ => Action::None,
+    }
+}
+
+/// Map keys for column-move mode, entered by pressing `m` in Column mode.
+/// Moves the currently focused column to a new position.
+fn map_col_move(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('h') => Action::ColMoveLeft,
+        KeyCode::Char('l') => Action::ColMoveRight,
+        KeyCode::Char('g') => Action::ColMoveFirst,
+        KeyCode::Char('e') => Action::ColMoveLast,
+        KeyCode::Char(c @ '1'..='9') => Action::ColMoveToPosition((c as usize) - b'0' as usize),
         KeyCode::Esc => Action::None,
         _ => Action::None,
     }
@@ -234,14 +256,27 @@ pub const FILTER_BINDINGS: &[Binding] = &[
 
 pub const GOTO_BINDINGS: &[Binding] = &[
     Binding { key: "1-9", description: "Jump to column", tutorial: false },
-    Binding { key: "g", description: "First card", tutorial: false },
-    Binding { key: "e", description: "Last card", tutorial: false },
     Binding { key: "b", description: "Backlog", tutorial: false },
     Binding { key: "d", description: "Done", tutorial: false },
+    Binding { key: "g", description: "First card", tutorial: false },
+    Binding { key: "e", description: "Last card", tutorial: false },
 ];
 
 pub const VIEW_BINDINGS: &[Binding] = &[
-    Binding { key: "h", description: "Toggle hidden columns", tutorial: false },
+    Binding { key: "r", description: "Rename focused column",      tutorial: false },
+    Binding { key: "a", description: "Add column before focused",  tutorial: false },
+    Binding { key: "m", description: "Move focused column",        tutorial: false },
+    Binding { key: "h", description: "Toggle column hidden",        tutorial: false },
+    Binding { key: "s", description: "Toggle showing hidden cols", tutorial: false },
+    Binding { key: "d", description: "Delete focused column",      tutorial: false },
+];
+
+pub const COL_MOVE_BINDINGS: &[Binding] = &[
+    Binding { key: "1-9", description: "Move to position N",   tutorial: false },
+    Binding { key: "h",   description: "Move column left",     tutorial: false },
+    Binding { key: "l",   description: "Move column right",    tutorial: false },
+    Binding { key: "g",   description: "Move column to first", tutorial: false },
+    Binding { key: "e",   description: "Move column to last",  tutorial: false },
 ];
 
 pub const DETAIL_BINDINGS: &[Binding] = &[
@@ -258,7 +293,7 @@ pub const DETAIL_BINDINGS: &[Binding] = &[
 /// Must not duplicate entries already in NORMAL_BINDINGS with tutorial: true.
 const TUTORIAL_EXTRA: &[Binding] = &[
     Binding { key: "g", description: "Goto mode (jump to columns)", tutorial: true },
-    Binding { key: "z", description: "View mode (hidden columns)", tutorial: true },
+    Binding { key: "c", description: "Column mode (hide/rename/…)", tutorial: true },
     Binding { key: "/", description: "Search cards", tutorial: true },
     Binding { key: "q", description: "Quit", tutorial: true },
 ];
@@ -268,7 +303,8 @@ pub const HELP_GROUPS: &[BindingGroup] = &[
     BindingGroup { name: "Normal Mode", bindings: NORMAL_BINDINGS },
     BindingGroup { name: "Commands (Space)", bindings: SPACE_BINDINGS },
     BindingGroup { name: "Goto (g)", bindings: GOTO_BINDINGS },
-    BindingGroup { name: "View (z)", bindings: VIEW_BINDINGS },
+    BindingGroup { name: "Column (c)", bindings: VIEW_BINDINGS },
+    BindingGroup { name: "Column Move (cm)", bindings: COL_MOVE_BINDINGS },
     BindingGroup { name: "Card Detail", bindings: DETAIL_BINDINGS },
 ];
 
@@ -285,6 +321,7 @@ pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
         Mode::Goto => GOTO_BINDINGS,
         Mode::Space => SPACE_BINDINGS,
         Mode::View => VIEW_BINDINGS,
+        Mode::ColMove => COL_MOVE_BINDINGS,
         Mode::FilterMenu => FILTER_BINDINGS,
         _ => &[],
     }
@@ -365,6 +402,17 @@ mod tests {
     fn normal_shift_h_l_moves_card() {
         assert_eq!(map_key(key(KeyCode::Char('H')), &Mode::Normal), Action::MoveCardPrevColumn);
         assert_eq!(map_key(key(KeyCode::Char('L')), &Mode::Normal), Action::MoveCardNextColumn);
+    }
+
+    #[test]
+    fn normal_c_enters_view_mode() {
+        assert_eq!(map_key(key(KeyCode::Char('c')), &Mode::Normal), Action::EnterViewMode);
+    }
+
+    #[test]
+    fn normal_ctrl_c_quits_not_column_mode() {
+        // CONTROL+c must map to Quit even though bare 'c' maps to EnterViewMode.
+        assert_eq!(map_key(key_ctrl(KeyCode::Char('c')), &Mode::Normal), Action::Quit);
     }
 
     #[test]
@@ -579,11 +627,31 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('?')), &Mode::Space), Action::ShowHelp);
     }
 
-    // ── View mode bindings ──
+    // ── View / Column mode bindings ──
 
     #[test]
-    fn view_h_toggles_hidden() {
-        assert_eq!(map_key(key(KeyCode::Char('h')), &Mode::View), Action::ToggleHiddenColumns);
+    fn view_h_hides_focused_column() {
+        assert_eq!(map_key(key(KeyCode::Char('h')), &Mode::View), Action::ToggleFocusedColumnHidden);
+    }
+
+    #[test]
+    fn view_s_toggles_hidden_columns() {
+        assert_eq!(map_key(key(KeyCode::Char('s')), &Mode::View), Action::ToggleHiddenColumns);
+    }
+
+    #[test]
+    fn view_r_enters_rename_prefilled() {
+        assert_eq!(map_key(key(KeyCode::Char('r')), &Mode::View), Action::ColRenameSelected);
+    }
+
+    #[test]
+    fn view_a_enters_add_prefilled() {
+        assert_eq!(map_key(key(KeyCode::Char('a')), &Mode::View), Action::ColAddBefore);
+    }
+
+    #[test]
+    fn view_d_enters_remove_prefilled() {
+        assert_eq!(map_key(key(KeyCode::Char('d')), &Mode::View), Action::ColRemoveSelected);
     }
 
     #[test]

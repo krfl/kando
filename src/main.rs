@@ -12,8 +12,8 @@ use color_eyre::eyre::{bail, WrapErr};
 
 use clap::{Parser, Subcommand};
 
-use board::storage::{append_activity, find_kando_dir, init_board, load_board, save_board, trash_card};
-use board::{Card, Priority};
+use board::storage::{append_activity, find_kando_dir, init_board, load_board, save_board, trash_card, remove_column_dir, rename_column_dir};
+use board::{Card, Priority, generate_slug, normalize_column_orders, slug_for_rename, slug_to_name};
 
 #[derive(Parser)]
 #[command(name = "kando", about = "A keyboard-first Kanban TUI")]
@@ -140,6 +140,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<ArchiveAction>,
     },
+    /// Manage board columns (add, remove, rename, reorder)
+    Col {
+        #[command(subcommand)]
+        action: Option<ColAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -170,6 +175,52 @@ enum TrashAction {
     },
     /// Permanently delete all trashed cards
     Purge,
+}
+
+#[derive(Subcommand)]
+enum ColAction {
+    /// List all columns with their position, slug, card count, and settings
+    List,
+    /// Add a new column (inserted before the first hidden column by default)
+    Add {
+        /// Column display name
+        name: String,
+        /// Insert after this column (slug or name)
+        #[arg(long)]
+        after: Option<String>,
+    },
+    /// Remove an empty column ("archive" is reserved and cannot be removed)
+    Remove {
+        /// Column to remove (slug or name)
+        column: String,
+        /// Move cards to this column before removing
+        #[arg(long)]
+        move_to: Option<String>,
+    },
+    /// Rename a column's display name (slug is unchanged)
+    Rename {
+        /// Column to rename (slug or name)
+        column: String,
+        /// New display name
+        new_name: String,
+    },
+    /// Move a column to a new position
+    Move {
+        /// Column to move (slug or name)
+        column: String,
+        /// New position: a number (1-indexed), or left/right/first/last
+        position: String,
+    },
+    /// Hide a column
+    Hide {
+        /// Column to hide (slug or name)
+        column: String,
+    },
+    /// Unhide a hidden column
+    Show {
+        /// Column to show (slug or name)
+        column: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -288,6 +339,7 @@ fn main() {
         Some(Command::Show { card_id }) => cmd_show(&cwd, &card_id),
         Some(Command::Log) => cmd_log(&cwd),
         Some(Command::Archive { action }) => cmd_archive(&cwd, action),
+        Some(Command::Col { action }) => cmd_col_cli(&cwd, action),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
 
@@ -1381,6 +1433,326 @@ fn cmd_archive_restore(cwd: &Path, card_id: &str, column: &str) -> color_eyre::R
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Column management CLI
+// ---------------------------------------------------------------------------
+
+/// Resolve a column by exact slug or case-insensitive name.  Returns the index.
+fn resolve_col_cli(board: &board::Board, query: &str) -> color_eyre::Result<usize> {
+    let lower = query.to_lowercase();
+    board
+        .columns
+        .iter()
+        .position(|c| c.slug == query || c.name.to_lowercase() == lower)
+        .ok_or_else(|| {
+            let valid: Vec<String> = board
+                .columns
+                .iter()
+                .map(|c| format!("{} ({})", c.name, c.slug))
+                .collect();
+            color_eyre::eyre::eyre!(
+                "Column '{}' not found. Valid columns: {}",
+                query,
+                valid.join(", ")
+            )
+        })
+}
+
+fn cmd_col_cli(cwd: &Path, action: Option<ColAction>) -> color_eyre::Result<()> {
+    match action.unwrap_or(ColAction::List) {
+        ColAction::List => cmd_col_list(cwd),
+        ColAction::Add { name, after } => cmd_col_add(cwd, &name, after.as_deref()),
+        ColAction::Remove { column, move_to } => cmd_col_remove(cwd, &column, move_to.as_deref()),
+        ColAction::Rename { column, new_name } => cmd_col_rename(cwd, &column, &new_name),
+        ColAction::Move { column, position } => cmd_col_move(cwd, &column, &position),
+        ColAction::Hide { column } => cmd_col_hide_cli(cwd, &column),
+        ColAction::Show { column } => cmd_col_show_cli(cwd, &column),
+    }
+}
+
+fn cmd_col_list(cwd: &Path) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let board = load_board(&kando_dir)?;
+
+    println!("\nColumns ({} total):", board.columns.len());
+    println!("{}", "─".repeat(62));
+    println!(
+        "  {:<3}  {:<22}  {:<16}  {:>5}  {:>4}",
+        "#", "Name", "Slug", "Cards", "WIP"
+    );
+    println!("{}", "─".repeat(62));
+    for (i, col) in board.columns.iter().enumerate() {
+        let wip = col.wip_limit.map_or("-".to_string(), |n| n.to_string());
+        let hidden_tag = if col.hidden { "  [hidden]" } else { "" };
+        // Slugs are ASCII-only (enforced by validate_slug), so byte-indexing is safe.
+        let slug_display = if col.slug.len() > 16 {
+            format!("{}…", &col.slug[..15])
+        } else {
+            col.slug.clone()
+        };
+        println!(
+            "  {:<3}  {:<22}  {:<16}  {:>5}  {:>4}{}",
+            i + 1,
+            if col.name.chars().count() > 22 {
+                format!("{}…", col.name.chars().take(21).collect::<String>())
+            } else {
+                col.name.clone()
+            },
+            slug_display,
+            col.cards.len(),
+            wip,
+            hidden_tag,
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_col_add(cwd: &Path, name: &str, after: Option<&str>) -> color_eyre::Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        color_eyre::eyre::bail!("Column name cannot be empty");
+    }
+
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+
+    let slug = generate_slug(name, &board.columns);
+
+    let insert_order = if let Some(after_query) = after {
+        let after_idx = resolve_col_cli(&board, after_query)?;
+        board.columns[after_idx].order + 1
+    } else {
+        // Default: before the first hidden column (or at the end).
+        board
+            .columns
+            .iter()
+            .filter(|c| c.hidden)
+            .map(|c| c.order)
+            .min()
+            .unwrap_or(u32::try_from(board.columns.len()).unwrap_or(u32::MAX))
+    };
+
+    // Shift existing columns at or after the insert position.
+    for col in board.columns.iter_mut() {
+        if col.order >= insert_order {
+            col.order += 1;
+        }
+    }
+    // Derive display name from slug so it matches what a load_board round-trip
+    // would produce, rather than storing the raw user-supplied string.
+    let derived_name = slug_to_name(&slug);
+    board.columns.push(board::Column {
+        slug: slug.clone(),
+        name: derived_name.clone(),
+        order: insert_order,
+        wip_limit: None,
+        hidden: false,
+        cards: vec![],
+    });
+    normalize_column_orders(&mut board.columns);
+
+    save_board(&kando_dir, &board)?;
+    append_activity(&kando_dir, "col-add", &slug, &derived_name, &[]);
+
+    println!("Created column '{}' (slug: {})", derived_name, slug);
+    Ok(())
+}
+
+fn cmd_col_remove(cwd: &Path, column: &str, move_to: Option<&str>) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+
+    let col_idx = resolve_col_cli(&board, column)?;
+    let slug = board.columns[col_idx].slug.clone();
+    let name = board.columns[col_idx].name.clone();
+
+    if slug == "archive" {
+        color_eyre::eyre::bail!("The 'archive' column is reserved and cannot be removed");
+    }
+    if board.columns.len() == 1 {
+        color_eyre::eyre::bail!("Cannot remove the last column");
+    }
+
+    let card_count = board.columns[col_idx].cards.len();
+    if card_count > 0 {
+        if let Some(target_query) = move_to {
+            // Move all cards to the target column before removal.
+            let target_idx = resolve_col_cli(&board, target_query)?;
+            if target_idx == col_idx {
+                color_eyre::eyre::bail!("Cannot move cards to the same column being removed");
+            }
+            // Extract all cards, then push to target. We intentionally skip
+            // card.touch() here: the user is destroying a column, not editing
+            // cards; preserving the original updated timestamp is correct.
+            let cards: Vec<_> = board.columns[col_idx].cards.drain(..).collect();
+            let moved = cards.len();
+            board.columns[target_idx].cards.extend(cards);
+            board.columns[target_idx].sort_cards();
+            println!("Moved {moved} card(s) to '{}'", board.columns[target_idx].name);
+        } else {
+            color_eyre::eyre::bail!(
+                "Column '{}' has {card_count} card(s). Move them first, or use --move-to <column>",
+                name
+            );
+        }
+    }
+
+    board.columns.remove(col_idx);
+    normalize_column_orders(&mut board.columns);
+
+    // save_board must run before remove_column_dir: save writes config.toml with
+    // the column removed, then remove_column_dir deletes the slug directory.
+    // If remove_column_dir is never reached (e.g. disk full after save), the
+    // orphaned directory is benign — load_board ignores dirs not in config.toml.
+    save_board(&kando_dir, &board)?;
+    remove_column_dir(&kando_dir, &slug)?;
+    append_activity(&kando_dir, "col-remove", &slug, &name, &[]);
+
+    println!("Removed column '{name}'");
+    Ok(())
+}
+
+fn cmd_col_rename(cwd: &Path, column: &str, new_name: &str) -> color_eyre::Result<()> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        bail!("New column name cannot be empty");
+    }
+
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+
+    let col_idx = resolve_col_cli(&board, column)?;
+
+    // slug_for_rename centralises the "archive" reservation check.
+    let new_slug = slug_for_rename(new_name)
+        .map_err(|e| color_eyre::eyre::eyre!("{}", e))?;
+
+    let old_slug = board.columns[col_idx].slug.clone();
+    let old_name = board.columns[col_idx].name.clone();
+
+    if new_slug == old_slug {
+        println!("'{}' is already at that slug (unchanged)", old_name);
+        return Ok(());
+    }
+
+    // Conflict check: another column already has this slug.
+    if board.columns.iter().enumerate().any(|(i, c)| i != col_idx && c.slug == new_slug) {
+        bail!("A column with slug '{}' already exists", new_slug);
+    }
+
+    // Update board state in memory.
+    let derived_name = slug_to_name(&new_slug);
+    board.columns[col_idx].slug = new_slug.clone();
+    board.columns[col_idx].name = derived_name.clone();
+    if board.policies.auto_close_target == old_slug {
+        board.policies.auto_close_target = new_slug.clone();
+    }
+
+    // Rename the directory first so save_board writes card files into the
+    // correct location. On save failure we attempt a best-effort rollback of
+    // the directory rename to keep the filesystem consistent.
+    rename_column_dir(&kando_dir, &old_slug, &new_slug)
+        .wrap_err("Could not rename column directory")?;
+    save_board(&kando_dir, &board).inspect_err(|_| {
+        let _ = rename_column_dir(&kando_dir, &new_slug, &old_slug);
+    })?;
+
+    append_activity(&kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug)]);
+
+    println!("Renamed '{}' → '{}' (slug: {} → {})", old_name, derived_name, old_slug, new_slug);
+    Ok(())
+}
+
+fn cmd_col_move(cwd: &Path, column: &str, position: &str) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+
+    let col_idx = resolve_col_cli(&board, column)?;
+    let slug = board.columns[col_idx].slug.clone();
+    let name = board.columns[col_idx].name.clone();
+    let len = board.columns.len();
+
+    let target_idx = match position {
+        "left" => {
+            if col_idx == 0 {
+                color_eyre::eyre::bail!("'{}' is already the leftmost column", name);
+            }
+            col_idx - 1
+        }
+        "right" => {
+            if col_idx + 1 >= len {
+                color_eyre::eyre::bail!("'{}' is already the rightmost column", name);
+            }
+            col_idx + 1
+        }
+        "first" => 0,
+        // resolve_col_cli succeeds above, so len >= 1; subtraction is safe.
+        "last" => len.saturating_sub(1),
+        n => match n.parse::<usize>() {
+            Ok(pos) if pos >= 1 && pos <= len => pos - 1,
+            _ => color_eyre::eyre::bail!(
+                "Invalid position: '{}'. Use left, right, first, last, or 1–{}",
+                n,
+                len
+            ),
+        },
+    };
+
+    if target_idx == col_idx {
+        println!("'{}' is already at that position", name);
+        return Ok(());
+    }
+
+    let col = board.columns.remove(col_idx);
+    board.columns.insert(target_idx, col);
+    // Assign orders based on new Vec positions. Do NOT call normalize_column_orders
+    // here: that function sorts by the existing order fields first, which would
+    // undo the remove+insert reordering we just performed.
+    for (i, c) in board.columns.iter_mut().enumerate() {
+        c.order = i as u32;
+    }
+
+    let new_pos = target_idx + 1;
+    save_board(&kando_dir, &board)?;
+    append_activity(
+        &kando_dir,
+        "col-move",
+        &slug,
+        &name,
+        &[("to", &new_pos.to_string())],
+    );
+
+    println!("Moved '{}' to position {}", name, new_pos);
+    Ok(())
+}
+
+fn cmd_col_hide_cli(cwd: &Path, column: &str) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    let col_idx = resolve_col_cli(&board, column)?;
+    let slug = board.columns[col_idx].slug.clone();
+    let name = board.columns[col_idx].name.clone();
+    board.columns[col_idx].hidden = true;
+    save_board(&kando_dir, &board)?;
+    append_activity(&kando_dir, "col-hide", &slug, &name, &[]);
+    println!("Hidden column '{name}'");
+    Ok(())
+}
+
+fn cmd_col_show_cli(cwd: &Path, column: &str) -> color_eyre::Result<()> {
+    let kando_dir = find_kando_dir(cwd)?;
+    let mut board = load_board(&kando_dir)?;
+    let col_idx = resolve_col_cli(&board, column)?;
+    let slug = board.columns[col_idx].slug.clone();
+    let name = board.columns[col_idx].name.clone();
+    board.columns[col_idx].hidden = false;
+    save_board(&kando_dir, &board)?;
+    append_activity(&kando_dir, "col-show", &slug, &name, &[]);
+    println!("Showed column '{name}'");
+    Ok(())
+}
+
 fn cmd_log(cwd: &Path) -> color_eyre::Result<()> {
     use std::io::{self, BufRead, BufWriter, ErrorKind, Write};
 
@@ -2333,6 +2705,539 @@ mod tests {
             log.contains(&format!("\"id\":\"{card_id}\"")),
             "activity log should include card id"
         );
+    }
+
+    // ── resolve_col_cli ──
+
+    fn board_for_col_tests() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        (dir, kando_dir)
+    }
+
+    #[test]
+    fn resolve_col_cli_exact_slug_match() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let board = load_board(&kando_dir).unwrap();
+        let idx = resolve_col_cli(&board, "backlog").unwrap();
+        assert_eq!(board.columns[idx].slug, "backlog");
+        let _ = dir;
+    }
+
+    #[test]
+    fn resolve_col_cli_name_case_insensitive() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let board = load_board(&kando_dir).unwrap();
+        let idx = resolve_col_cli(&board, "IN PROGRESS").unwrap();
+        assert_eq!(board.columns[idx].slug, "in-progress");
+        let _ = dir;
+    }
+
+    #[test]
+    fn resolve_col_cli_not_found_returns_err_with_hint() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let board = load_board(&kando_dir).unwrap();
+        let err = resolve_col_cli(&board, "nonexistent").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not found"), "error should say 'not found': {msg}");
+        assert!(msg.contains("Backlog"), "error should list valid columns: {msg}");
+        let _ = dir;
+    }
+
+    #[test]
+    fn resolve_col_cli_partial_slug_no_match() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let board = load_board(&kando_dir).unwrap();
+        // "back" is a prefix of "backlog" but not an exact match
+        assert!(resolve_col_cli(&board, "back").is_err());
+        let _ = dir;
+    }
+
+    // ── cmd_col_list ──
+
+    #[test]
+    fn cmd_col_list_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_col_list(dir.path()).is_err());
+    }
+
+    #[test]
+    fn cmd_col_list_returns_ok_with_board() {
+        let (dir, _) = board_for_col_tests();
+        assert!(cmd_col_list(dir.path()).is_ok());
+    }
+
+    // ── cmd_col_add ──
+
+    #[test]
+    fn cmd_col_add_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_col_add(dir.path(), "Test", None).is_err());
+    }
+
+    #[test]
+    fn cmd_col_add_empty_name_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        let err = cmd_col_add(dir.path(), "   ", None).unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be empty"));
+    }
+
+    #[test]
+    fn cmd_col_add_happy_path_column_created() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Staging", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.columns.iter().any(|c| c.name == "Staging"));
+    }
+
+    #[test]
+    fn cmd_col_add_slug_generated_from_name() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "My Feature", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.columns.iter().any(|c| c.slug == "my-feature"));
+    }
+
+    #[test]
+    fn cmd_col_add_inserted_before_hidden_column() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let before = load_board(&kando_dir).unwrap();
+        let archive_idx_before = before.columns.iter().position(|c| c.slug == "archive").unwrap();
+        cmd_col_add(dir.path(), "Staging", None).unwrap();
+        let after = load_board(&kando_dir).unwrap();
+        let staging_idx = after.columns.iter().position(|c| c.slug == "staging").unwrap();
+        let archive_idx = after.columns.iter().position(|c| c.slug == "archive").unwrap();
+        assert!(staging_idx < archive_idx, "new column should appear before the hidden archive column");
+        assert_eq!(archive_idx, archive_idx_before + 1, "archive index should shift by one");
+    }
+
+    #[test]
+    fn cmd_col_add_after_named_column() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Staging", Some("backlog")).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
+        let staging_idx = board.columns.iter().position(|c| c.slug == "staging").unwrap();
+        assert_eq!(staging_idx, backlog_idx + 1, "staging should be directly after backlog");
+    }
+
+    #[test]
+    fn cmd_col_add_after_invalid_column_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        assert!(cmd_col_add(dir.path(), "Staging", Some("nonexistent")).is_err());
+    }
+
+    #[test]
+    fn cmd_col_add_orders_normalized_after_insert() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Staging", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        for (i, col) in board.columns.iter().enumerate() {
+            assert_eq!(col.order, i as u32, "column '{}' order should be {}", col.slug, i);
+        }
+    }
+
+    #[test]
+    fn cmd_col_add_saves_board_persistently() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Staging", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.columns.iter().any(|c| c.slug == "staging"), "column should persist after reload");
+    }
+
+    #[test]
+    fn cmd_col_add_creates_column_dir_on_disk() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Staging", None).unwrap();
+        assert!(kando_dir.join("columns").join("staging").is_dir(), "column directory should be created");
+    }
+
+    #[test]
+    fn cmd_col_add_duplicate_name_gets_unique_slug() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Backlog", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        // Original backlog slug is "backlog"; duplicate should get "backlog-2"
+        assert!(board.columns.iter().any(|c| c.slug == "backlog-2"), "duplicate should get slug backlog-2");
+    }
+
+    #[test]
+    fn cmd_col_add_archive_name_gets_different_slug() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Archive", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        // Reserved slug "archive" already exists, so new column gets slug "archive-col".
+        // The display name is derived from the slug: "Archive Col".
+        let new_col = board.columns.iter().find(|c| c.slug == "archive-col");
+        assert!(new_col.is_some(), "new column should get slug 'archive-col': {:?}", board.columns.iter().map(|c| &c.slug).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn cmd_col_add_appends_activity_log() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_add(dir.path(), "Staging", None).unwrap();
+        let log = fs::read_to_string(kando_dir.join("activity.log")).unwrap_or_default();
+        assert!(log.contains("\"action\":\"col-add\""), "activity log should have col-add entry");
+        assert!(log.contains("\"id\":\"staging\""), "activity log should reference the new slug");
+    }
+
+    // ── cmd_col_remove ──
+
+    #[test]
+    fn cmd_col_remove_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_col_remove(dir.path(), "backlog", None).is_err());
+    }
+
+    #[test]
+    fn cmd_col_remove_archive_reserved_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        let err = cmd_col_remove(dir.path(), "archive", None).unwrap_err();
+        assert!(format!("{err:#}").contains("reserved"));
+    }
+
+    #[test]
+    fn cmd_col_remove_nonexistent_column_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        assert!(cmd_col_remove(dir.path(), "nonexistent", None).is_err());
+    }
+
+    #[test]
+    fn cmd_col_remove_last_column_returns_err() {
+        // Reduce the board to a single column (archive and all others stripped),
+        // leaving only "backlog". The guard is `board.columns.len() == 1`.
+        let (dir, kando_dir) = board_for_col_tests();
+        let mut board = load_board(&kando_dir).unwrap();
+        board.columns.retain(|c| c.slug == "backlog");
+        board::storage::save_board(&kando_dir, &board).unwrap();
+        let err = cmd_col_remove(dir.path(), "backlog", None).unwrap_err();
+        assert!(format!("{err:#}").contains("last column"));
+    }
+
+    #[test]
+    fn cmd_col_remove_nonempty_without_move_to_returns_err() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let mut board = load_board(&kando_dir).unwrap();
+        let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
+        board.columns[backlog_idx].cards.push(Card::new("001".into(), "Test Card".into()));
+        board::storage::save_board(&kando_dir, &board).unwrap();
+        let err = cmd_col_remove(dir.path(), "backlog", None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("1 card"), "should mention card count: {msg}");
+        assert!(msg.contains("--move-to"), "should suggest --move-to: {msg}");
+    }
+
+    #[test]
+    fn cmd_col_remove_empty_column_succeeds() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_remove(dir.path(), "backlog", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert!(!board.columns.iter().any(|c| c.slug == "backlog"));
+    }
+
+    #[test]
+    fn cmd_col_remove_empty_column_dir_deleted() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_remove(dir.path(), "backlog", None).unwrap();
+        assert!(!kando_dir.join("columns").join("backlog").exists(), "column dir should be removed from disk");
+    }
+
+    #[test]
+    fn cmd_col_remove_with_move_to_drains_cards() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let mut board = load_board(&kando_dir).unwrap();
+        let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
+        board.columns[backlog_idx].cards.push(Card::new("001".into(), "Card 1".into()));
+        board.columns[backlog_idx].cards.push(Card::new("002".into(), "Card 2".into()));
+        board::storage::save_board(&kando_dir, &board).unwrap();
+        cmd_col_remove(dir.path(), "backlog", Some("done")).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert!(!board.columns.iter().any(|c| c.slug == "backlog"), "removed column should be gone");
+        let done = board.columns.iter().find(|c| c.slug == "done").unwrap();
+        assert_eq!(done.cards.len(), 2, "both cards should be in 'done'");
+    }
+
+    #[test]
+    fn cmd_col_remove_move_to_same_column_returns_err() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let mut board = load_board(&kando_dir).unwrap();
+        let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
+        board.columns[backlog_idx].cards.push(Card::new("001".into(), "Card".into()));
+        board::storage::save_board(&kando_dir, &board).unwrap();
+        let err = cmd_col_remove(dir.path(), "backlog", Some("backlog")).unwrap_err();
+        assert!(format!("{err:#}").contains("same column"));
+    }
+
+    #[test]
+    fn cmd_col_remove_move_to_invalid_column_returns_err() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let mut board = load_board(&kando_dir).unwrap();
+        let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
+        board.columns[backlog_idx].cards.push(Card::new("001".into(), "Card".into()));
+        board::storage::save_board(&kando_dir, &board).unwrap();
+        assert!(cmd_col_remove(dir.path(), "backlog", Some("nonexistent")).is_err());
+    }
+
+    #[test]
+    fn cmd_col_remove_orders_normalized_after_remove() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_remove(dir.path(), "in-progress", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        for (i, col) in board.columns.iter().enumerate() {
+            assert_eq!(col.order, i as u32, "orders should be dense after remove");
+        }
+    }
+
+    #[test]
+    fn cmd_col_remove_appends_activity_log() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_remove(dir.path(), "backlog", None).unwrap();
+        let log = fs::read_to_string(kando_dir.join("activity.log")).unwrap_or_default();
+        assert!(log.contains("\"action\":\"col-remove\""));
+        assert!(log.contains("\"id\":\"backlog\""));
+    }
+
+    // ── cmd_col_rename ──
+
+    #[test]
+    fn cmd_col_rename_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_col_rename(dir.path(), "backlog", "Queue").is_err());
+    }
+
+    #[test]
+    fn cmd_col_rename_empty_new_name_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        let err = cmd_col_rename(dir.path(), "backlog", "   ").unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be empty"));
+    }
+
+    #[test]
+    fn cmd_col_rename_happy_path_name_updated() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_rename(dir.path(), "backlog", "Queue").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.columns.iter().any(|c| c.name == "Queue"));
+    }
+
+    #[test]
+    fn cmd_col_rename_slug_changes() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_rename(dir.path(), "backlog", "Queue").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.columns.iter().any(|c| c.slug == "queue"), "slug should change to 'queue'");
+        assert!(!board.columns.iter().any(|c| c.slug == "backlog"), "old slug 'backlog' should be gone");
+    }
+
+    #[test]
+    fn cmd_col_rename_name_derived_from_slug() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_rename(dir.path(), "backlog", "Queue").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "queue").unwrap();
+        assert_eq!(col.name, "Queue");
+    }
+
+    #[test]
+    fn cmd_col_rename_duplicate_slug_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        // "In Progress" → slug "in-progress" already exists
+        // "Backlog" → slug "backlog" already exists for another column
+        let err = cmd_col_rename(dir.path(), "in-progress", "Backlog").unwrap_err();
+        assert!(format!("{err:#}").contains("already exists"));
+    }
+
+    #[test]
+    fn cmd_col_rename_same_name_as_self_is_allowed() {
+        let (dir, _) = board_for_col_tests();
+        // Renaming "Backlog" to its own slug-equivalent name is a no-op, no error.
+        assert!(cmd_col_rename(dir.path(), "backlog", "Backlog").is_ok());
+    }
+
+    #[test]
+    fn cmd_col_rename_saves_board_persistently() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_rename(dir.path(), "backlog", "Queue").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "queue").unwrap();
+        assert_eq!(col.name, "Queue");
+    }
+
+    #[test]
+    fn cmd_col_rename_appends_activity_log() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_rename(dir.path(), "backlog", "Queue").unwrap();
+        let log = fs::read_to_string(kando_dir.join("activity.log")).unwrap_or_default();
+        assert!(log.contains("\"action\":\"col-rename\""));
+        assert!(log.contains("\"id\":\"queue\""), "should reference the new slug: {log}");
+        assert!(log.contains("\"from\":\"backlog\""), "should log old slug as 'from': {log}");
+    }
+
+    #[test]
+    fn cmd_col_rename_nonexistent_column_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        assert!(cmd_col_rename(dir.path(), "nonexistent", "Whatever").is_err());
+    }
+
+    // ── cmd_col_move ──
+
+    #[test]
+    fn cmd_col_move_no_kando_dir_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cmd_col_move(dir.path(), "backlog", "right").is_err());
+    }
+
+    #[test]
+    fn cmd_col_move_left_happy_path() {
+        let (dir, kando_dir) = board_for_col_tests();
+        // In Progress is at index 1; move it left → index 0
+        cmd_col_move(dir.path(), "in-progress", "left").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.columns[0].slug, "in-progress");
+        assert_eq!(board.columns[1].slug, "backlog");
+    }
+
+    #[test]
+    fn cmd_col_move_left_already_leftmost_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        let err = cmd_col_move(dir.path(), "backlog", "left").unwrap_err();
+        assert!(format!("{err:#}").contains("leftmost"));
+    }
+
+    #[test]
+    fn cmd_col_move_right_happy_path() {
+        let (dir, kando_dir) = board_for_col_tests();
+        // Backlog is at index 0; move it right → index 1
+        cmd_col_move(dir.path(), "backlog", "right").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.columns[0].slug, "in-progress");
+        assert_eq!(board.columns[1].slug, "backlog");
+    }
+
+    #[test]
+    fn cmd_col_move_right_already_rightmost_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        // Move "done" to last position first so we test with a non-hidden rightmost column.
+        cmd_col_move(dir.path(), "done", "last").unwrap();
+        let err = cmd_col_move(dir.path(), "done", "right").unwrap_err();
+        assert!(format!("{err:#}").contains("rightmost"));
+    }
+
+    #[test]
+    fn cmd_col_move_first_happy_path() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_move(dir.path(), "done", "first").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.columns[0].slug, "done");
+    }
+
+    #[test]
+    fn cmd_col_move_last_happy_path() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_move(dir.path(), "backlog", "last").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.columns.last().unwrap().slug, "backlog");
+    }
+
+    #[test]
+    fn cmd_col_move_numeric_position_valid() {
+        let (dir, kando_dir) = board_for_col_tests();
+        // Move backlog (currently position 1) to position 3 → index 2.
+        cmd_col_move(dir.path(), "backlog", "3").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.columns[2].slug, "backlog");
+    }
+
+    #[test]
+    fn cmd_col_move_numeric_position_0_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        let err = cmd_col_move(dir.path(), "backlog", "0").unwrap_err();
+        assert!(format!("{err:#}").contains("Invalid position"));
+    }
+
+    #[test]
+    fn cmd_col_move_numeric_position_exceeds_len_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        let err = cmd_col_move(dir.path(), "backlog", "99").unwrap_err();
+        assert!(format!("{err:#}").contains("Invalid position"));
+    }
+
+    #[test]
+    fn cmd_col_move_invalid_string_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        let err = cmd_col_move(dir.path(), "backlog", "sideways").unwrap_err();
+        assert!(format!("{err:#}").contains("Invalid position"));
+    }
+
+    #[test]
+    fn cmd_col_move_orders_assigned_by_vec_position() {
+        // Critical regression test: after a move, order values must reflect
+        // the new Vec positions, NOT the stale pre-move order values.
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_move(dir.path(), "done", "first").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        for (i, col) in board.columns.iter().enumerate() {
+            assert_eq!(col.order, i as u32,
+                "column '{}' at index {} should have order {}", col.slug, i, i);
+        }
+    }
+
+    #[test]
+    fn cmd_col_move_saves_board_persistently() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_move(dir.path(), "done", "first").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.columns[0].slug, "done", "move should persist across reload");
+    }
+
+    #[test]
+    fn cmd_col_move_appends_activity_log() {
+        let (dir, kando_dir) = board_for_col_tests();
+        cmd_col_move(dir.path(), "done", "first").unwrap();
+        let log = fs::read_to_string(kando_dir.join("activity.log")).unwrap_or_default();
+        assert!(log.contains("\"action\":\"col-move\""));
+        assert!(log.contains("\"id\":\"done\""));
+        // "done" moved to "first" → target_idx=0 → new_pos=1 (1-indexed).
+        assert!(log.contains("\"to\":\"1\""), "should log position 1 as 'to': {log}");
+    }
+
+    #[test]
+    fn cmd_col_move_nonexistent_column_returns_err() {
+        let (dir, _) = board_for_col_tests();
+        assert!(cmd_col_move(dir.path(), "nonexistent", "first").is_err());
+    }
+
+    #[test]
+    fn cmd_col_move_same_position_is_noop() {
+        let (dir, kando_dir) = board_for_col_tests();
+        // backlog is at index 0, which is position "1"
+        cmd_col_move(dir.path(), "backlog", "1").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        // Board should be unchanged
+        assert_eq!(board.columns[0].slug, "backlog");
+    }
+
+    #[test]
+    fn cmd_col_move_cards_preserved_after_reorder() {
+        let (dir, kando_dir) = board_for_col_tests();
+        let mut board = load_board(&kando_dir).unwrap();
+        let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
+        board.columns[backlog_idx].cards.push(Card::new("001".into(), "Important Card".into()));
+        board::storage::save_board(&kando_dir, &board).unwrap();
+        cmd_col_move(dir.path(), "backlog", "last").unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let backlog = board.columns.iter().find(|c| c.slug == "backlog").unwrap();
+        assert_eq!(backlog.cards.len(), 1, "cards should be preserved after column reorder");
+        assert_eq!(backlog.cards[0].id, "001");
+    }
+
+    // ── cmd_col_cli dispatcher ──
+
+    #[test]
+    fn cmd_col_cli_no_action_defaults_to_list() {
+        let (dir, _) = board_for_col_tests();
+        assert!(cmd_col_cli(dir.path(), None).is_ok());
     }
 
     #[test]

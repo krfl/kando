@@ -99,6 +99,7 @@ pub enum Mode {
     Goto,
     Space,
     View,
+    ColMove,
     FilterMenu,
     Input {
         prompt: &'static str,
@@ -518,6 +519,11 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
     // Run auto-close on startup
     handle_auto_close(&mut board, &mut state, &kando_dir)?;
 
+    // Warn at startup if the 'archive' column is missing (reserved for archiving).
+    if !board.columns.iter().any(|c| c.slug == "archive") {
+        state.notify_error("Warning: no 'archive' column found — archiving features disabled");
+    }
+
     state.clamp_selection(&board);
 
     // Show tutorial on first launch
@@ -582,7 +588,7 @@ fn process_action(
     terminal: &mut DefaultTerminal,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
-    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::View | Mode::FilterMenu);
+    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::View | Mode::ColMove | Mode::FilterMenu);
     let mut sync_message: Option<String> = None;
 
     match action {
@@ -635,6 +641,68 @@ fn process_action(
         // View toggles
         Action::ToggleHiddenColumns => {
             handle_view_toggle(board, state, action);
+        }
+
+        // Column mode actions
+        Action::ToggleFocusedColumnHidden => {
+            sync_message = handle_col_toggle_hidden(board, state, kando_dir)?;
+        }
+        Action::ColRenameSelected => {
+            let slug = match board.columns.get(state.focused_column) {
+                Some(c) => c.slug.clone(),
+                None => return Ok(()),
+            };
+            debug_assert!(!slug.is_empty(), "column slug must be non-empty");
+            let cmd = crate::command::CommandState::new_with_input(format!("col rename {slug} "));
+            state.cached_trash_ids = load_trash(kando_dir)
+                .into_iter()
+                .map(|e| (e.id, e.title))
+                .collect();
+            state.mode = Mode::Command { cmd };
+        }
+        Action::ColAddBefore => {
+            let cmd = crate::command::CommandState::new_with_input("col add ".into());
+            state.cached_trash_ids = load_trash(kando_dir)
+                .into_iter()
+                .map(|e| (e.id, e.title))
+                .collect();
+            state.mode = Mode::Command { cmd };
+        }
+        Action::ColRemoveSelected => {
+            let slug = match board.columns.get(state.focused_column) {
+                Some(c) => c.slug.clone(),
+                None => return Ok(()),
+            };
+            debug_assert!(!slug.is_empty(), "column slug must be non-empty");
+            let cmd = crate::command::CommandState::new_with_input(format!("col remove {slug}"));
+            state.cached_trash_ids = load_trash(kando_dir)
+                .into_iter()
+                .map(|e| (e.id, e.title))
+                .collect();
+            state.mode = Mode::Command { cmd };
+        }
+        Action::EnterColMoveMode => {
+            if board.columns.get(state.focused_column).is_some() {
+                state.mode = Mode::ColMove;
+            }
+        }
+        Action::ColMoveLeft | Action::ColMoveRight | Action::ColMoveFirst
+        | Action::ColMoveLast | Action::ColMoveToPosition(_) => {
+            let slug = match board.columns.get(state.focused_column) {
+                Some(c) => c.slug.clone(),
+                None => { state.mode = Mode::Normal; return Ok(()); }
+            };
+            let direction = match &action {
+                Action::ColMoveLeft => "left".to_string(),
+                Action::ColMoveRight => "right".to_string(),
+                Action::ColMoveFirst => "first".to_string(),
+                Action::ColMoveLast => "last".to_string(),
+                Action::ColMoveToPosition(n) => n.to_string(),
+                _ => unreachable!(),
+            };
+            let cmd = format!("col move {slug} {direction}");
+            sync_message = crate::command::execute_command(board, state, &cmd, kando_dir)?;
+            state.mode = Mode::Normal;
         }
 
         // Filter / tag filter
@@ -1221,6 +1289,48 @@ fn handle_view_toggle(board: &Board, state: &mut AppState, action: Action) {
         }
         _ => unreachable!(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Handler: Column hide (c-mode h key)
+// ---------------------------------------------------------------------------
+
+fn handle_col_toggle_hidden(
+    board: &mut Board,
+    state: &mut AppState,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let col_idx = state.focused_column;
+    if col_idx >= board.columns.len() {
+        return Ok(None);
+    }
+    let currently_hidden = board.columns[col_idx].hidden;
+    if !currently_hidden {
+        // Guard: don't hide the last visible column.
+        let visible_count = board.columns.iter().filter(|c| !c.hidden).count();
+        if visible_count <= 1 {
+            state.notify_error("Cannot hide the last visible column");
+            return Ok(None);
+        }
+    }
+    let slug = board.columns[col_idx].slug.clone();
+    let name = board.columns[col_idx].name.clone();
+    let new_hidden = !currently_hidden;
+    board.columns[col_idx].hidden = new_hidden;
+    save_board(kando_dir, board)?;
+    let action_name = if new_hidden { "col-hide" } else { "col-show" };
+    append_activity(kando_dir, action_name, &slug, &name, &[]);
+    state.mode = Mode::Normal;
+    if new_hidden && !state.show_hidden_columns {
+        // If hidden columns aren't shown, move focus to first visible column.
+        if let Some(idx) = board.columns.iter().position(|c| !c.hidden) {
+            state.focused_column = idx;
+            state.clamp_selection_filtered(board);
+        }
+    }
+    let label = if new_hidden { "hidden" } else { "visible" };
+    state.notify(format!("{name}: {label}"));
+    Ok(Some(if new_hidden { "Hide column" } else { "Show column" }.into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -3273,7 +3383,7 @@ mod tests {
     // ── Goto failures ──
 
     fn assert_jump_notifies_no_visible(action: Action) {
-        let mut board = test_board(&[("A", &["c1"])]);
+        let board = test_board(&[("A", &["c1"])]);
         let mut state = AppState::new();
         state.active_tag_filters = vec!["missing-tag".into()];
         state.selected_card = 0;
@@ -3330,5 +3440,134 @@ mod tests {
         state.show_hidden_columns = false;
         handle_goto(&board, &mut state, Action::JumpToDone);
         assert_eq!(state.notification.as_deref(), Some("No 'done' column"));
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_col_hide tests
+    // -----------------------------------------------------------------------
+
+    fn setup_col_hide() -> (tempfile::TempDir, std::path::PathBuf, Board, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let state = AppState::new();
+        (dir, kando_dir, board, state)
+    }
+
+    #[test]
+    fn handle_col_hide_marks_column_hidden() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        // Board has 4 columns; hiding first is allowed.
+        state.focused_column = 0;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(board.columns[0].hidden);
+    }
+
+    #[test]
+    fn handle_col_hide_last_visible_column_blocked() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        // Hide all columns except the first.
+        board.columns[1].hidden = true;
+        board.columns[2].hidden = true;
+        board.columns[3].hidden = true;
+        state.focused_column = 0;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        // Column must remain visible.
+        assert!(!board.columns[0].hidden);
+        assert!(state.notification.as_deref().unwrap().contains("Cannot hide"));
+    }
+
+    #[test]
+    fn handle_col_hide_two_visible_allows_hide() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        // Leave exactly 2 visible — hiding one should succeed.
+        board.columns[2].hidden = true;
+        board.columns[3].hidden = true;
+        state.focused_column = 0;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(board.columns[0].hidden, "should be allowed to hide when 2 visible remain");
+    }
+
+    #[test]
+    fn handle_col_hide_focus_moves_to_first_visible_when_hidden_not_shown() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        // Focus is on col 0; show_hidden_columns is false (default).
+        state.focused_column = 0;
+        state.show_hidden_columns = false;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        // Focus should have moved off the now-hidden column 0.
+        let focused = state.focused_column;
+        assert!(!board.columns[focused].hidden, "new focus should be on a visible column");
+    }
+
+    #[test]
+    fn handle_col_hide_mode_resets_to_normal() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        state.mode = Mode::View;
+        state.focused_column = 0;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn handle_col_hide_activity_logged() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        state.focused_column = 0;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        let log = std::fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        assert!(log.contains("\"action\":\"col-hide\""));
+    }
+
+    #[test]
+    fn handle_col_hide_board_persisted() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        let slug = board.columns[0].slug.clone();
+        state.focused_column = 0;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        let reloaded = crate::board::storage::load_board(&kando_dir).unwrap();
+        let col = reloaded.columns.iter().find(|c| c.slug == slug).unwrap();
+        assert!(col.hidden, "hidden flag should be persisted to disk");
+    }
+
+    // -----------------------------------------------------------------------
+    // ColRenameSelected / ColAddBefore / ColRemoveSelected action dispatch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn col_rename_selected_prefills_command_with_slug() {
+        // Verify that the prefilled command string for ColRenameSelected uses the column slug.
+        let mut board = test_board(&[("Backlog", &[])]);
+        board.columns[0].slug = "backlog".into();
+        let slug = board.columns[0].slug.clone();
+        let cmd = crate::command::CommandState::new_with_input(format!("col rename {slug} "));
+        assert_eq!(cmd.buf.input, "col rename backlog ");
+        assert_eq!(cmd.buf.cursor, cmd.buf.input.chars().count());
+    }
+
+    #[test]
+    fn col_add_before_prefills_command() {
+        let cmd = crate::command::CommandState::new_with_input("col add ".into());
+        assert_eq!(cmd.buf.input, "col add ");
+    }
+
+    #[test]
+    fn col_remove_selected_prefills_command_with_slug() {
+        let mut board = test_board(&[("Backlog", &[])]);
+        board.columns[0].slug = "backlog".into();
+        let slug = board.columns[0].slug.clone();
+        let cmd = crate::command::CommandState::new_with_input(format!("col remove {slug}"));
+        assert_eq!(cmd.buf.input, "col remove backlog");
+    }
+
+    #[test]
+    fn handle_col_hide_focus_unchanged_when_show_hidden_true() {
+        let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
+        // When hidden columns are shown, focus should stay on the now-hidden column.
+        state.focused_column = 0;
+        state.show_hidden_columns = true;
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(board.columns[0].hidden);
+        assert_eq!(state.focused_column, 0, "focus should remain when hidden cols are shown");
     }
 }

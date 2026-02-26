@@ -35,8 +35,18 @@ pub enum Action {
     DetailNextCard,
     DetailPrevCard,
 
-    // View
+    // View / Column mode
     ToggleHiddenColumns,
+    ToggleFocusedColumnHidden,
+    ColRenameSelected,
+    ColAddBefore,
+    ColRemoveSelected,
+    EnterColMoveMode,
+    ColMoveLeft,
+    ColMoveRight,
+    ColMoveFirst,
+    ColMoveLast,
+    ColMoveToPosition(usize),
 
     // Search & filter
     StartFilter,

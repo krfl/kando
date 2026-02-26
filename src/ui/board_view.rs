@@ -4,6 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use ratatui::symbols::border;
 use ratatui::widgets::{
     Block, BorderType, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState,
@@ -176,12 +177,25 @@ fn render_column(
         Theme::COLUMN_BORDER
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color).add_modifier(focused_mod))
         .border_type(BorderType::Rounded)
         .title(header_line)
         .padding(Padding::new(1, 1, 0, 0));
+
+    if col.hidden {
+        block = block.border_set(border::Set {
+            top_left: "╭",
+            top_right: "╮",
+            bottom_left: "╰",
+            bottom_right: "╯",
+            vertical_left: "╎",
+            vertical_right: "╎",
+            horizontal_top: "╌",
+            horizontal_bottom: "╌",
+        });
+    }
 
     let inner = block.inner(area);
     f.render_widget(block, area);

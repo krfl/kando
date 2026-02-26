@@ -4,7 +4,8 @@
 //! and runtime configuration changes.
 
 use crate::app::{AppState, TextBuffer};
-use crate::board::storage::{save_board, load_trash, restore_card, load_board, save_local_config};
+use crate::board::storage::{save_board, load_trash, restore_card, load_board, save_local_config, remove_column_dir, rename_column_dir};
+use crate::board::{generate_slug, normalize_column_orders, slug_for_rename, slug_to_name};
 use crate::board::Board;
 
 // ---------------------------------------------------------------------------
@@ -23,7 +24,7 @@ pub struct CommandInfo {
 pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo { name: "archive",  description: "Archive the selected (or specified) card" },
     CommandInfo { name: "assign",   description: "Assign card" },
-    CommandInfo { name: "col",      description: "Column visibility" },
+    CommandInfo { name: "col",      description: "Manage columns (add, remove, rename, move, hide, show)" },
     CommandInfo { name: "count",    description: "Card counts" },
     CommandInfo { name: "find",     description: "Find card" },
     CommandInfo { name: "focus",    description: "Toggle focus mode (dim unfocused columns)" },
@@ -51,7 +52,8 @@ const FOCUS_ARGS: &[&str] = &["on", "off"];
 
 const PRIORITY_NAMES: &[&str] = &["low", "normal", "high", "urgent"];
 const SORT_FIELDS: &[&str] = &["priority", "created", "updated", "title"];
-const COL_SUBCMDS: &[&str] = &["hide", "show"];
+const COL_SUBCMDS: &[&str] = &["add", "hide", "move", "remove", "rename", "show"];
+const COL_MOVE_DIRECTIONS: &[&str] = &["left", "right", "first", "last"];
 
 /// State for command mode: text buffer + optional completion.
 #[derive(Debug, Clone)]
@@ -76,6 +78,14 @@ impl CommandState {
             completion: None,
         }
     }
+
+    /// Create a new CommandState with pre-filled input (cursor at end).
+    pub fn new_with_input(input: String) -> Self {
+        Self {
+            buf: TextBuffer::new(input),
+            completion: None,
+        }
+    }
 }
 
 /// Compute the ghost suffix for the current input (shown as dimmed text after cursor).
@@ -90,10 +100,15 @@ pub fn compute_ghost(input: &str, board: &Board, card_tags: &[String], card_assi
         }
         return None;
     }
-    let token_lower = token.to_lowercase();
+    // All candidates are ASCII slugs/command names — to_ascii_lowercase avoids
+    // Unicode allocation overhead and is semantically correct here.
+    let token_lower = token.to_ascii_lowercase();
     candidates
         .into_iter()
-        .find(|c| c.to_lowercase().starts_with(&token_lower) && c.to_lowercase() != token_lower)
+        .find(|c| {
+            let cl = c.to_ascii_lowercase();
+            cl.starts_with(&token_lower) && cl != token_lower
+        })
         .map(|c| {
             // Return the suffix after what the user typed
             c[token.len()..].to_string()
@@ -145,10 +160,18 @@ fn current_token_and_candidates(input: &str, board: &Board, card_tags: &[String]
         "priority" | "pri" => PRIORITY_NAMES.iter().map(|s| s.to_string()).collect(),
         "sort" => SORT_FIELDS.iter().map(|s| s.to_string()).collect(),
         "col" => {
-            if arg_idx <= 1 {
-                column_names(board)
-            } else {
-                COL_SUBCMDS.iter().map(|s| s.to_string()).collect()
+            match (arg_idx, parts.get(1).copied()) {
+                (1, _) => COL_SUBCMDS.iter().map(|s| s.to_string()).collect(),
+                (2, Some("remove") | Some("rm") | Some("rename") | Some("hide") | Some("show")) => column_names(board),
+                (2, Some("move")) => column_names(board),
+                (3, Some("move")) => {
+                    let mut dirs = COL_MOVE_DIRECTIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+                    // Also offer position numbers 1..len
+                    dirs.extend((1..=board.columns.len()).map(|n| n.to_string()));
+                    dirs
+                }
+                (2, Some("add")) => vec![], // free text — no completion
+                _ => COL_SUBCMDS.iter().map(|s| s.to_string()).collect(),
             }
         }
         "wip" => {
@@ -250,10 +273,18 @@ pub fn palette_items(input: &str, board: &Board, card_tags: &[String], card_assi
         "priority" | "pri" => ("priorities", PRIORITY_NAMES.iter().map(|s| (s.to_string(), String::new())).collect()),
         "sort" => ("sort", SORT_FIELDS.iter().map(|s| (s.to_string(), String::new())).collect()),
         "col" => {
-            if arg_idx <= 1 {
-                ("columns", column_names(board).into_iter().map(|n| (n, String::new())).collect())
-            } else {
-                ("action", COL_SUBCMDS.iter().map(|s| (s.to_string(), String::new())).collect())
+            match (arg_idx, parts.get(1).copied()) {
+                (1, _) => {
+                    ("col", COL_SUBCMDS.iter().map(|s| (s.to_string(), String::new())).collect())
+                }
+                (2, Some("remove") | Some("rm") | Some("rename") | Some("move") | Some("hide") | Some("show")) =>
+                    ("columns", column_names(board).into_iter().map(|n| (n, String::new())).collect()),
+                (3, Some("move")) => {
+                    let mut items: Vec<(String, String)> = COL_MOVE_DIRECTIONS.iter().map(|s| (s.to_string(), String::new())).collect();
+                    items.extend((1..=board.columns.len()).map(|n| (n.to_string(), String::new())));
+                    ("position", items)
+                }
+                _ => return ("", vec![]),
             }
         }
         "wip" => {
@@ -887,7 +918,7 @@ fn cmd_find(
     Ok(None)
 }
 
-/// :col <name> [hide|show] — Jump to or toggle column visibility.
+/// :col — Column management (add, remove, rename, move, hide, show).
 fn cmd_col(
     board: &mut Board,
     state: &mut AppState,
@@ -896,46 +927,318 @@ fn cmd_col(
 ) -> color_eyre::Result<Option<String>> {
     let parts: Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
-        state.notify_error("Usage: col <name> [hide|show]");
+        state.notify_error("Usage: col <subcommand|name> — subcommands: add, remove, rename, move, hide, show");
         return Ok(None);
     }
 
-    let col_idx = match resolve_column(board, parts[0], None) {
-        Ok(i) => i,
-        Err(e) => {
-            state.notify_error(e);
-            return Ok(None);
-        }
-    };
-
-    if parts.len() == 1 {
-        // Jump to column
-        state.focused_column = col_idx;
-        state.clamp_selection(board);
-        state.notify(format!("Jumped to {}", board.columns[col_idx].name));
-        return Ok(None);
-    }
-
-    match parts[1] {
-        "hide" => {
-            board.columns[col_idx].hidden = true;
-            let name = board.columns[col_idx].name.clone();
-            save_board(kando_dir, board)?;
-            state.notify(format!("Hidden: {name}"));
-            Ok(Some("Hide column".into()))
-        }
-        "show" => {
-            board.columns[col_idx].hidden = false;
-            let name = board.columns[col_idx].name.clone();
-            save_board(kando_dir, board)?;
-            state.notify(format!("Visible: {name}"));
-            Ok(Some("Show column".into()))
-        }
-        other => {
-            state.notify_error(format!("Unknown subcommand: {other} (use hide or show)"));
+    match parts[0] {
+        "add" => cmd_col_add(board, state, &parts[1..], kando_dir),
+        "remove" | "rm" => cmd_col_remove(board, state, &parts[1..], kando_dir),
+        "rename" => cmd_col_rename(board, state, &parts[1..], kando_dir),
+        "move" => cmd_col_move(board, state, &parts[1..], kando_dir),
+        "hide" => cmd_col_set_hidden(board, state, &parts[1..], kando_dir, true),
+        "show" => cmd_col_set_hidden(board, state, &parts[1..], kando_dir, false),
+        _ => {
+            state.notify_error(format!("Unknown col subcommand: {}", parts[0]));
             Ok(None)
         }
     }
+}
+
+/// :col hide/show <column> — Set the hidden flag on a column.
+fn cmd_col_set_hidden(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &[&str],
+    kando_dir: &std::path::Path,
+    hidden: bool,
+) -> color_eyre::Result<Option<String>> {
+    if args.is_empty() {
+        state.notify_error(if hidden {
+            "Usage: col hide <column>"
+        } else {
+            "Usage: col show <column>"
+        });
+        return Ok(None);
+    }
+    // Only args[0] is used; additional tokens are intentionally ignored,
+    // consistent with other single-argument subcommands.
+    let col_idx = match resolve_column(board, args[0], None) {
+        Ok(i) => i,
+        Err(e) => { state.notify_error(e); return Ok(None); }
+    };
+    // Guard: don't hide the last visible column.
+    if hidden {
+        let visible_count = board.columns.iter().filter(|c| !c.hidden).count();
+        if visible_count <= 1 {
+            state.notify_error("Cannot hide the last visible column");
+            return Ok(None);
+        }
+    }
+    let name = board.columns[col_idx].name.clone();
+    let slug = board.columns[col_idx].slug.clone();
+    board.columns[col_idx].hidden = hidden;
+    save_board(kando_dir, board)?;
+    let action_str = if hidden { "col-hide" } else { "col-show" };
+    crate::board::storage::append_activity(kando_dir, action_str, &slug, &name, &[]);
+    if hidden {
+        state.notify(format!("Hidden: {name}"));
+        Ok(Some("Hide column".into()))
+    } else {
+        state.notify(format!("Visible: {name}"));
+        Ok(Some("Show column".into()))
+    }
+}
+
+/// :col add <name> — Add a new column (inserted before the focused column).
+fn cmd_col_add(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &[&str],
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let name = args.join(" ").trim().to_string();
+    if name.is_empty() {
+        state.notify_error("Usage: col add <name>");
+        return Ok(None);
+    }
+
+    let slug = generate_slug(&name, &board.columns);
+
+    // Insert before the focused column, or at the end if the focus is invalid.
+    let insert_order = board.columns
+        .get(state.focused_column)
+        .map(|c| c.order)
+        .unwrap_or(u32::try_from(board.columns.len()).unwrap_or(u32::MAX));
+
+    for col in board.columns.iter_mut() {
+        if col.order >= insert_order {
+            col.order += 1;
+        }
+    }
+    // Derive the display name from the slug so in-memory state matches what
+    // a load_board round-trip would produce.
+    let derived_name = slug_to_name(&slug);
+    board.columns.push(crate::board::Column {
+        slug: slug.clone(),
+        name: derived_name.clone(),
+        order: insert_order,
+        wip_limit: None,
+        hidden: false,
+        cards: vec![],
+    });
+    normalize_column_orders(&mut board.columns);
+
+    save_board(kando_dir, board)?;
+    crate::board::storage::append_activity(kando_dir, "col-add", &slug, &derived_name, &[]);
+
+    // Focus the new column.
+    if let Some(idx) = board.columns.iter().position(|c| c.slug == slug) {
+        state.focused_column = idx;
+        state.clamp_selection(board);
+    }
+    state.notify(format!("Added column: {derived_name}"));
+    Ok(Some(format!("Add column \"{derived_name}\"")))
+}
+
+/// :col remove <col> — Remove a column (must be empty; "archive" is reserved).
+fn cmd_col_remove(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &[&str],
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    if args.is_empty() {
+        state.notify_error("Usage: col remove <name>");
+        return Ok(None);
+    }
+    let col_idx = match resolve_column(board, args[0], None) {
+        Ok(i) => i,
+        Err(e) => { state.notify_error(e); return Ok(None); }
+    };
+
+    let slug = board.columns[col_idx].slug.clone();
+    let name = board.columns[col_idx].name.clone();
+
+    if slug == "archive" {
+        state.notify_error("The 'archive' column is reserved and cannot be removed");
+        return Ok(None);
+    }
+    if board.columns.len() == 1 {
+        state.notify_error("Cannot remove the last column");
+        return Ok(None);
+    }
+    let card_count = board.columns[col_idx].cards.len();
+    if card_count > 0 {
+        state.notify_error(format!("Column has {card_count} card(s); move them first with :move <card> <col>"));
+        return Ok(None);
+    }
+
+    // Capture focused slug for recovery.
+    let focused_slug = board.columns.get(state.focused_column).map(|c| c.slug.clone());
+
+    board.columns.remove(col_idx);
+    normalize_column_orders(&mut board.columns);
+
+    save_board(kando_dir, board)?;
+    remove_column_dir(kando_dir, &slug)?;
+    crate::board::storage::append_activity(kando_dir, "col-remove", &slug, &name, &[]);
+
+    // Recover focused_column by slug; fall back to 0.
+    state.focused_column = focused_slug
+        .and_then(|s| board.columns.iter().position(|c| c.slug == s))
+        .unwrap_or(0);
+    state.clamp_selection(board);
+
+    state.notify(format!("Removed column: {name}"));
+    Ok(Some(format!("Remove column \"{name}\"")))
+}
+
+/// :col rename <col> <new-name> — Rename a column (changes slug + moves directory).
+fn cmd_col_rename(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &[&str],
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    if args.len() < 2 {
+        state.notify_error("Usage: col rename <col> <new-name>");
+        return Ok(None);
+    }
+    let col_idx = match resolve_column(board, args[0], None) {
+        Ok(i) => i,
+        Err(e) => { state.notify_error(e); return Ok(None); }
+    };
+    let new_name = args[1..].join(" ").trim().to_string();
+    if new_name.is_empty() {
+        state.notify_error("Column name cannot be empty");
+        return Ok(None);
+    }
+
+    // slug_for_rename centralises the "archive" reservation check so callers
+    // don't have to remember it independently.
+    let new_slug = match slug_for_rename(&new_name) {
+        Ok(s) => s,
+        Err(e) => { state.notify_error(e); return Ok(None); }
+    };
+
+    let old_slug = board.columns[col_idx].slug.clone();
+    let old_name = board.columns[col_idx].name.clone();
+
+    // No-op if slug is unchanged.
+    if new_slug == old_slug {
+        state.notify(format!("{old_name} unchanged"));
+        return Ok(None);
+    }
+
+    // Conflict check: another column already has this slug.
+    if board.columns.iter().enumerate().any(|(i, c)| i != col_idx && c.slug == new_slug) {
+        state.notify_error(format!("A column with slug '{new_slug}' already exists"));
+        return Ok(None);
+    }
+
+    // Update board state in memory.
+    let derived_name = slug_to_name(&new_slug);
+    let old_auto_close = board.policies.auto_close_target.clone();
+    board.columns[col_idx].slug = new_slug.clone();
+    board.columns[col_idx].name = derived_name.clone();
+    if board.policies.auto_close_target == old_slug {
+        board.policies.auto_close_target = new_slug.clone();
+    }
+
+    // Rename the directory first so save_board writes card files into the
+    // correct location. On save failure we roll back both the directory and
+    // the in-memory board state so the caller isn't left with a stale board.
+    rename_column_dir(kando_dir, &old_slug, &new_slug).map_err(|e| {
+        color_eyre::eyre::eyre!("Could not rename column directory: {e}")
+    })?;
+    if let Err(e) = save_board(kando_dir, board) {
+        let _ = rename_column_dir(kando_dir, &new_slug, &old_slug);
+        board.columns[col_idx].slug = old_slug.clone();
+        board.columns[col_idx].name = old_name.clone();
+        board.policies.auto_close_target = old_auto_close;
+        return Err(e.into());
+    }
+
+    crate::board::storage::append_activity(kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug)]);
+
+    state.notify(format!("Renamed: {old_name} → {derived_name}"));
+    Ok(Some(format!("Rename column \"{old_name}\" to \"{derived_name}\"")))
+}
+
+/// :col move <col> <left|right|first|last|N> — Reorder a column.
+fn cmd_col_move(
+    board: &mut Board,
+    state: &mut AppState,
+    args: &[&str],
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    if args.len() < 2 {
+        state.notify_error("Usage: col move <col> <left|right|first|last|N>");
+        return Ok(None);
+    }
+    let col_idx = match resolve_column(board, args[0], None) {
+        Ok(i) => i,
+        Err(e) => { state.notify_error(e); return Ok(None); }
+    };
+
+    let slug = board.columns[col_idx].slug.clone();
+    let name = board.columns[col_idx].name.clone();
+    let len = board.columns.len();
+    let focused_slug = board.columns.get(state.focused_column).map(|c| c.slug.clone());
+
+    let target_idx = match args[1] {
+        "left" => {
+            if col_idx == 0 {
+                state.notify_error("Already leftmost column");
+                return Ok(None);
+            }
+            col_idx - 1
+        }
+        "right" => {
+            if col_idx + 1 >= len {
+                state.notify_error("Already rightmost column");
+                return Ok(None);
+            }
+            col_idx + 1
+        }
+        "first" => 0,
+        "last" => len - 1,
+        n => match n.parse::<usize>() {
+            Ok(pos) if pos >= 1 && pos <= len => pos - 1,
+            _ => {
+                state.notify_error(format!("Invalid position: {n} (use left, right, first, last, or 1–{len})"));
+                return Ok(None);
+            }
+        },
+    };
+
+    if target_idx == col_idx {
+        state.notify(format!("{name} is already at that position"));
+        return Ok(None);
+    }
+
+    let col = board.columns.remove(col_idx);
+    board.columns.insert(target_idx, col);
+    // Assign orders based on new Vec positions. Do NOT call normalize_column_orders
+    // here: that function sorts by the existing order fields first, which would
+    // undo the remove+insert reordering we just performed.
+    for (i, c) in board.columns.iter_mut().enumerate() {
+        c.order = i as u32;
+    }
+
+    // Recover focused_column by slug.
+    state.focused_column = focused_slug
+        .and_then(|s| board.columns.iter().position(|c| c.slug == s))
+        .unwrap_or(0);
+    state.clamp_selection(board);
+
+    save_board(kando_dir, board)?;
+    let new_pos = target_idx + 1;
+    crate::board::storage::append_activity(kando_dir, "col-move", &slug, &name, &[("to", &new_pos.to_string())]);
+
+    state.notify(format!("Moved {name} to position {new_pos}"));
+    Ok(Some(format!("Move column \"{name}\" to position {new_pos}")))
 }
 
 /// :restore <id> — Restore a card from the trash.
@@ -1787,17 +2090,9 @@ mod tests {
     }
 
     #[test]
-    fn cmd_col_jump() {
-        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
-        execute_command(&mut board, &mut state, "col done", &kando_dir).unwrap();
-        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
-        assert_eq!(state.focused_column, done_idx);
-    }
-
-    #[test]
     fn cmd_col_hide() {
         let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
-        let result = execute_command(&mut board, &mut state, "col backlog hide", &kando_dir).unwrap();
+        let result = execute_command(&mut board, &mut state, "col hide backlog", &kando_dir).unwrap();
         assert!(result.is_some());
         assert!(board.columns[0].hidden);
     }
@@ -1806,7 +2101,7 @@ mod tests {
     fn cmd_col_show() {
         let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
         board.columns[0].hidden = true;
-        let result = execute_command(&mut board, &mut state, "col backlog show", &kando_dir).unwrap();
+        let result = execute_command(&mut board, &mut state, "col show backlog", &kando_dir).unwrap();
         assert!(result.is_some());
         assert!(!board.columns[0].hidden);
     }
@@ -1814,8 +2109,8 @@ mod tests {
     #[test]
     fn cmd_col_unknown_subcmd() {
         let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
-        execute_command(&mut board, &mut state, "col backlog foo", &kando_dir).unwrap();
-        assert!(state.notification.as_ref().unwrap().contains("Unknown subcommand"));
+        execute_command(&mut board, &mut state, "col foobar", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Unknown col subcommand"));
     }
 
     #[test]
@@ -2191,5 +2486,212 @@ mod tests {
         assert!(id_strs.contains(&"001"), "visible backlog card should be archivable");
         assert!(!id_strs.contains(&"002"), "archive-column card must NOT be archivable (slug guard)");
         assert!(!id_strs.contains(&"003"), "hidden-column card must NOT be archivable (hidden guard)");
+    }
+
+    // ── cmd_col_set_hidden (hide/show subcommands) ──
+
+    #[test]
+    fn cmd_col_hide_no_args_returns_usage() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col hide", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_col_show_no_args_returns_usage() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col show", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_col_hide_unknown_column_returns_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col hide zzz-unknown", &kando_dir).unwrap();
+        let note = state.notification.as_ref().unwrap();
+        assert!(note.contains("zzz-unknown") || note.contains("Unknown"), "got: {note}");
+    }
+
+    #[test]
+    fn cmd_col_show_unknown_column_returns_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col show zzz-unknown", &kando_dir).unwrap();
+        let note = state.notification.as_ref().unwrap();
+        assert!(note.contains("zzz-unknown") || note.contains("Unknown"), "got: {note}");
+    }
+
+    #[test]
+    fn cmd_col_hide_activity_log_written() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col hide backlog", &kando_dir).unwrap();
+        let log = std::fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        assert!(log.contains("\"action\":\"col-hide\""));
+        assert!(log.contains("\"id\":\"backlog\""));
+    }
+
+    #[test]
+    fn cmd_col_show_activity_log_written() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.columns[0].hidden = true;
+        execute_command(&mut board, &mut state, "col show backlog", &kando_dir).unwrap();
+        let log = std::fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        assert!(log.contains("\"action\":\"col-show\""));
+        assert!(log.contains("\"id\":\"backlog\""));
+    }
+
+    #[test]
+    fn cmd_col_hide_by_partial_name_match() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col hide back", &kando_dir).unwrap();
+        assert!(board.columns[0].hidden, "backlog should be hidden after partial match");
+    }
+
+    // ── cmd_col_rename ──
+
+    #[test]
+    fn cmd_col_rename_slug_changes() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename backlog queue", &kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "queue").unwrap();
+        assert_eq!(col.name, "Queue");
+    }
+
+    #[test]
+    fn cmd_col_rename_directory_moved_on_disk() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename backlog my-queue", &kando_dir).unwrap();
+        assert!(!kando_dir.join("columns/backlog").exists(), "old dir should be gone");
+        assert!(kando_dir.join("columns/my-queue").exists(), "new dir should exist");
+    }
+
+    #[test]
+    fn cmd_col_rename_display_name_derived_from_slug() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // User types mixed-case new name; display name is always slug_to_name(new_slug).
+        execute_command(&mut board, &mut state, "col rename backlog TODO Items", &kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "todo-items").unwrap();
+        assert_eq!(col.name, "Todo Items");
+    }
+
+    #[test]
+    fn cmd_col_rename_no_args_returns_usage() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_col_rename_only_col_arg_returns_usage() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename backlog", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("Usage"));
+    }
+
+    #[test]
+    fn cmd_col_rename_no_new_name_returns_usage() {
+        // Trailing whitespace is collapsed by split_whitespace; the only-column-arg
+        // path fires the Usage error rather than the "empty name" error.
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename backlog   ", &kando_dir).unwrap();
+        let note = state.notification.as_ref().unwrap();
+        assert!(note.contains("Usage"), "expected Usage error, got: {note}");
+    }
+
+    #[test]
+    fn cmd_col_rename_reserved_archive_slug_rejected() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        let old_slug = board.columns[0].slug.clone();
+        execute_command(&mut board, &mut state, "col rename backlog archive", &kando_dir).unwrap();
+        // Column slug must be unchanged.
+        assert_eq!(board.columns[0].slug, old_slug);
+        assert!(state.notification.as_ref().unwrap().contains("reserved"));
+    }
+
+    #[test]
+    fn cmd_col_rename_same_slug_is_noop() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // "col rename backlog Backlog" generates new_slug="backlog" == old_slug → no-op.
+        execute_command(&mut board, &mut state, "col rename backlog Backlog", &kando_dir).unwrap();
+        assert!(state.notification.as_ref().unwrap().contains("unchanged"));
+        // Slug must be unmodified.
+        assert_eq!(board.columns[0].slug, "backlog");
+    }
+
+    #[test]
+    fn cmd_col_rename_conflict_with_existing_slug_rejected() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        // "done" already exists; renaming "backlog" → "done" must fail.
+        execute_command(&mut board, &mut state, "col rename backlog done", &kando_dir).unwrap();
+        let note = state.notification.as_ref().unwrap();
+        assert!(note.contains("already exists"), "got: {note}");
+        assert_eq!(board.columns[0].slug, "backlog");
+    }
+
+    #[test]
+    fn cmd_col_rename_auto_close_target_updated() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.policies.auto_close_target = "backlog".into();
+        execute_command(&mut board, &mut state, "col rename backlog my-backlog", &kando_dir).unwrap();
+        assert_eq!(board.policies.auto_close_target, "my-backlog");
+    }
+
+    #[test]
+    fn cmd_col_rename_auto_close_target_not_updated_for_other_col() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        board.policies.auto_close_target = "archive".into();
+        execute_command(&mut board, &mut state, "col rename backlog my-backlog", &kando_dir).unwrap();
+        assert_eq!(board.policies.auto_close_target, "archive");
+    }
+
+    #[test]
+    fn cmd_col_rename_activity_log_written() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename backlog my-queue", &kando_dir).unwrap();
+        let log = std::fs::read_to_string(kando_dir.join("activity.log")).unwrap();
+        assert!(log.contains("\"action\":\"col-rename\""));
+        assert!(log.contains("\"id\":\"my-queue\""));
+        assert!(log.contains("\"from\":\"backlog\""));
+    }
+
+    #[test]
+    fn cmd_col_rename_board_persisted_after_rename() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename backlog my-queue", &kando_dir).unwrap();
+        let reloaded = crate::board::storage::load_board(&kando_dir).unwrap();
+        assert!(reloaded.columns.iter().any(|c| c.slug == "my-queue"), "new slug must persist on disk");
+        assert!(!reloaded.columns.iter().any(|c| c.slug == "backlog"), "old slug must be gone from disk");
+    }
+
+    #[test]
+    fn cmd_col_rename_unknown_column_returns_error() {
+        let (_dir, kando_dir, mut board, mut state) = setup_board_with_card();
+        execute_command(&mut board, &mut state, "col rename zzz-unknown new-name", &kando_dir).unwrap();
+        let note = state.notification.as_ref().unwrap();
+        assert!(note.contains("zzz-unknown") || note.contains("Unknown"), "got: {note}");
+    }
+
+    // ── CommandState::new_with_input ──
+
+    #[test]
+    fn new_with_input_sets_input_and_cursor_at_end() {
+        let input = "col add ";
+        let cmd = CommandState::new_with_input(input.into());
+        assert_eq!(cmd.buf.input, input);
+        assert_eq!(cmd.buf.cursor, input.chars().count());
+    }
+
+    #[test]
+    fn new_with_input_empty_string() {
+        let cmd = CommandState::new_with_input("".into());
+        assert_eq!(cmd.buf.input, "");
+        assert_eq!(cmd.buf.cursor, 0);
+    }
+
+    #[test]
+    fn new_with_input_cursor_at_end_for_unicode() {
+        let input = "col rename héllo ";
+        let cmd = CommandState::new_with_input(input.into());
+        assert_eq!(cmd.buf.input, input);
+        assert_eq!(cmd.buf.cursor, input.chars().count());
     }
 }

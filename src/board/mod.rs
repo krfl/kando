@@ -351,6 +351,102 @@ pub fn card_matches_filter(card: &Card, filter: &str, matcher: &SkimMatcherV2) -
     true
 }
 
+/// Derive a raw slug from a display name without uniqueness deduplication.
+///
+/// Maps non-alphanumeric chars to `-`, collapses runs, trims leading/trailing
+/// hyphens, and falls back to `"col"` if the result would be empty.
+///
+/// **Does not** guard the `"archive"` reserved slug — callers that need that
+/// guarantee should use [`slug_for_rename`] or [`generate_slug`].
+pub fn slug_from_name(name: &str) -> String {
+    let base: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    // After split/filter/join the result is guaranteed to start with an
+    // alphanumeric char (or be empty), so only the empty check is needed.
+    let base = base
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if base.is_empty() {
+        "col".to_string()
+    } else {
+        base
+    }
+}
+
+/// Derive the slug to use when **renaming** an existing column.
+///
+/// Like [`slug_from_name`] but also enforces the `"archive"` reservation,
+/// returning `Err` when the derived slug would be reserved. Uniqueness and
+/// same-slug detection remain the caller's responsibility.
+pub fn slug_for_rename(name: &str) -> Result<String, &'static str> {
+    let slug = slug_from_name(name);
+    if slug == "archive" {
+        Err("'archive' is a reserved slug")
+    } else {
+        Ok(slug)
+    }
+}
+
+/// Generate a filesystem-safe slug from a display name, guaranteed unique
+/// among `existing` columns. The reserved slug `"archive"` is never returned.
+///
+/// Algorithm: lowercase → map non-alphanumeric to `-` → collapse/trim hyphens
+/// → fall back to `"col"` if empty → append `-2`, `-3`, … for uniqueness.
+pub fn generate_slug(name: &str, existing: &[Column]) -> String {
+    let base = slug_from_name(name);
+    // "archive" is a reserved slug — never generate it directly.
+    let base = if base == "archive" { "archive-col".to_string() } else { base };
+    // Ensure uniqueness.
+    if !existing.iter().any(|c| c.slug == base) {
+        return base;
+    }
+    for n in 2u32.. {
+        let candidate = format!("{base}-{n}");
+        if !existing.iter().any(|c| c.slug == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("generate_slug: exhausted candidates for base={base:?}")
+}
+
+/// Convert a slug back to a display name: split on `-`, capitalise each word.
+///
+/// # Invariants
+///
+/// Assumes the slug was produced by [`generate_slug`] or [`slug_from_name`]
+/// (no leading/trailing hyphens, all ASCII alphanumeric + hyphens).
+/// Degenerate input such as `"-"` produces degenerate output (`" "`) without
+/// panicking, but callers should rely on [`validate_slug`] to prevent such
+/// input from reaching this function.
+///
+/// Examples: `"backlog"` → `"Backlog"`, `"in-progress"` → `"In Progress"`.
+pub fn slug_to_name(slug: &str) -> String {
+    slug.split('-')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Normalize column orders to dense 0, 1, 2, … sorted by current order.
+/// Call this after every add / remove / reorder operation, before save_board.
+pub fn normalize_column_orders(columns: &mut [Column]) {
+    columns.sort_by_key(|c| c.order);
+    for (i, col) in columns.iter_mut().enumerate() {
+        col.order = i as u32;
+    }
+}
+
 impl Column {
     /// Sort cards by priority (urgent first) then by updated timestamp (most recent first).
     pub fn sort_cards(&mut self) {
@@ -994,5 +1090,215 @@ mod tests {
         assert_eq!(Priority::High.as_str(), "high");
         assert_eq!(Priority::Normal.as_str(), "normal");
         assert_eq!(Priority::Low.as_str(), "low");
+    }
+
+    // ── slug_to_name ──
+
+    #[test]
+    fn slug_to_name_single_word() {
+        assert_eq!(slug_to_name("backlog"), "Backlog");
+    }
+
+    #[test]
+    fn slug_to_name_multi_word() {
+        assert_eq!(slug_to_name("in-progress"), "In Progress");
+    }
+
+    #[test]
+    fn slug_to_name_three_words() {
+        assert_eq!(slug_to_name("ready-for-review"), "Ready For Review");
+    }
+
+    #[test]
+    fn slug_to_name_empty_string() {
+        assert_eq!(slug_to_name(""), "");
+    }
+
+    #[test]
+    fn slug_to_name_with_digits() {
+        assert_eq!(slug_to_name("col-2"), "Col 2");
+    }
+
+    #[test]
+    fn slug_to_name_uppercase_passthrough() {
+        // Only the first char of each segment is uppercased; rest is unchanged.
+        assert_eq!(slug_to_name("in-PROGRESS"), "In PROGRESS");
+    }
+
+    #[test]
+    fn slug_to_name_single_hyphen_does_not_panic() {
+        // "-" splits into two empty segments → no panic.
+        let result = slug_to_name("-");
+        assert_eq!(result, " "); // two empty words joined by space
+    }
+
+    // ── slug_from_name ──
+
+    #[test]
+    fn slug_from_name_single_word() {
+        assert_eq!(slug_from_name("Backlog"), "backlog");
+    }
+
+    #[test]
+    fn slug_from_name_multi_word() {
+        assert_eq!(slug_from_name("In Progress"), "in-progress");
+    }
+
+    #[test]
+    fn slug_from_name_empty_string_falls_back_to_col() {
+        assert_eq!(slug_from_name(""), "col");
+    }
+
+    #[test]
+    fn slug_from_name_only_special_chars_falls_back_to_col() {
+        assert_eq!(slug_from_name("!!! ???"), "col");
+    }
+
+    #[test]
+    fn slug_from_name_leading_trailing_spaces_trimmed() {
+        assert_eq!(slug_from_name("  hello  "), "hello");
+    }
+
+    #[test]
+    fn slug_from_name_consecutive_spaces_collapse_to_one_hyphen() {
+        assert_eq!(slug_from_name("hello   world"), "hello-world");
+    }
+
+    #[test]
+    fn slug_from_name_leading_special_chars_stripped() {
+        assert_eq!(slug_from_name("---hello"), "hello");
+    }
+
+    #[test]
+    fn slug_from_name_unicode_non_ascii_falls_back_to_col() {
+        assert_eq!(slug_from_name("日本語"), "col");
+    }
+
+    #[test]
+    fn slug_from_name_mixed_ascii_unicode_keeps_ascii_part() {
+        assert_eq!(slug_from_name("hello 世界"), "hello");
+    }
+
+    #[test]
+    fn slug_from_name_numbers_in_name() {
+        assert_eq!(slug_from_name("Col 2"), "col-2");
+    }
+
+    #[test]
+    fn slug_from_name_does_not_guard_archive_reservation() {
+        // slug_from_name does NOT remap the reserved "archive" slug —
+        // that guard lives in cmd_col_rename. This is the documented distinction
+        // between slug_from_name and generate_slug.
+        assert_eq!(slug_from_name("Archive"), "archive");
+    }
+
+    // ── generate_slug ──
+
+    fn slug_col(slug: &str) -> Column {
+        Column { slug: slug.into(), name: slug.into(), order: 0, wip_limit: None, hidden: false, cards: vec![] }
+    }
+
+    #[test]
+    fn generate_slug_basic_name() {
+        assert_eq!(generate_slug("My Feature", &[]), "my-feature");
+    }
+
+    #[test]
+    fn generate_slug_spaces_become_hyphens() {
+        assert_eq!(generate_slug("Hello   World!!!", &[]), "hello-world");
+    }
+
+    #[test]
+    fn generate_slug_reserved_archive_avoided() {
+        let slug = generate_slug("Archive", &[]);
+        assert_ne!(slug, "archive", "should not produce the reserved slug 'archive'");
+        // The implementation redirects "archive" to "archive-col", but the key
+        // contract is just that the reserved slug is avoided.
+        assert!(slug.starts_with("archive"), "slug should still be archive-derived: {slug}");
+    }
+
+    #[test]
+    fn generate_slug_uniqueness_appends_suffix() {
+        let existing = vec![slug_col("backlog")];
+        assert_eq!(generate_slug("Backlog", &existing), "backlog-2");
+    }
+
+    #[test]
+    fn generate_slug_uniqueness_skips_taken_suffixes() {
+        let existing = vec![slug_col("backlog"), slug_col("backlog-2")];
+        assert_eq!(generate_slug("Backlog", &existing), "backlog-3");
+    }
+
+    #[test]
+    fn generate_slug_all_non_alphanum_falls_back_to_col() {
+        assert_eq!(generate_slug("!!! ???", &[]), "col");
+    }
+
+    #[test]
+    fn generate_slug_col_uniqueness_when_col_taken() {
+        let existing = vec![slug_col("col")];
+        assert_eq!(generate_slug("!!! ???", &existing), "col-2");
+    }
+
+    #[test]
+    fn generate_slug_unicode_name_produces_valid_ascii() {
+        // All CJK chars are non-ASCII-alphanumeric → stripped → empty base → fallback "col".
+        let slug = generate_slug("日本語", &[]);
+        assert!(slug.chars().all(|c| c.is_ascii()), "slug must be ASCII");
+        assert_eq!(slug, "col", "non-ASCII-only name should fall back to 'col'");
+    }
+
+    #[test]
+    fn generate_slug_leading_special_chars_stripped() {
+        // Name starts with special chars that map to hyphens; leading hyphens removed.
+        let slug = generate_slug("---hello", &[]);
+        assert!(slug.starts_with(|c: char| c.is_ascii_alphanumeric()));
+    }
+
+    // ── normalize_column_orders ──
+
+    fn make_col(slug: &str, order: u32) -> Column {
+        Column { slug: slug.into(), name: slug.into(), order, wip_limit: None, hidden: false, cards: vec![] }
+    }
+
+    #[test]
+    fn normalize_column_orders_dense_already() {
+        let mut cols = vec![make_col("a", 0), make_col("b", 1), make_col("c", 2)];
+        normalize_column_orders(&mut cols);
+        assert_eq!(cols.iter().map(|c| c.order).collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn normalize_column_orders_sparse_orders() {
+        let mut cols = vec![make_col("a", 0), make_col("b", 10), make_col("c", 20)];
+        normalize_column_orders(&mut cols);
+        // Should sort by original order then assign 0,1,2.
+        assert_eq!(cols[0].slug, "a");
+        assert_eq!(cols[1].slug, "b");
+        assert_eq!(cols[2].slug, "c");
+        assert_eq!(cols.iter().map(|c| c.order).collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn normalize_column_orders_reorders_by_order_field() {
+        // Vec is in wrong order relative to the order field.
+        let mut cols = vec![make_col("c", 2), make_col("a", 0), make_col("b", 1)];
+        normalize_column_orders(&mut cols);
+        assert_eq!(cols[0].slug, "a");
+        assert_eq!(cols[1].slug, "b");
+        assert_eq!(cols[2].slug, "c");
+    }
+
+    #[test]
+    fn normalize_column_orders_single_column() {
+        let mut cols = vec![make_col("solo", 42)];
+        normalize_column_orders(&mut cols);
+        assert_eq!(cols[0].order, 0);
+    }
+
+    #[test]
+    fn normalize_column_orders_empty_vec_does_not_panic() {
+        let mut cols: Vec<Column> = vec![];
+        normalize_column_orders(&mut cols); // must not panic
     }
 }

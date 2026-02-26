@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Board, Card, Column, Policies};
+use super::{slug_to_name, Board, Card, Column, Policies};
 use crate::config::BoardConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -154,7 +154,7 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
 
         let mut col = Column {
             slug: col_config.slug.clone(),
-            name: meta.name,
+            name: slug_to_name(&col_config.slug),
             order: meta.order,
             wip_limit: meta.wip_limit,
             hidden: meta.hidden.unwrap_or(false),
@@ -188,6 +188,11 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
 pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
     let columns_dir = kando_dir.join("columns");
 
+    // Validate all slugs before doing any work or allocating.
+    for col in &board.columns {
+        validate_slug(&col.slug)?;
+    }
+
     // Build config
     let column_configs: Vec<ColumnConfig> = board
         .columns
@@ -213,11 +218,6 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
         },
         columns: column_configs,
     };
-    // Validate all slugs upfront before writing anything
-    for col in &board.columns {
-        validate_slug(&col.slug)?;
-    }
-
     let config_str = toml::to_string_pretty(&config)?;
     fs::write(kando_dir.join("config.toml"), config_str)?;
 
@@ -264,6 +264,44 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
         }
     }
 
+    Ok(())
+}
+
+/// Remove a column's on-disk directory (.kando/columns/{slug}/).
+///
+/// Callers must call `save_board` **before** this function so the column config
+/// is removed from config.toml and stale card files are written out first.
+/// The slug is validated before any I/O is attempted.
+pub fn remove_column_dir(kando_dir: &Path, slug: &str) -> Result<(), StorageError> {
+    validate_slug(slug)?;
+    let col_dir = kando_dir.join("columns").join(slug);
+    if col_dir.exists() {
+        fs::remove_dir_all(&col_dir)?;
+    }
+    Ok(())
+}
+
+/// Rename a column's on-disk directory from `old_slug` to `new_slug`.
+///
+/// Both slugs are validated before any I/O is attempted.
+/// If the old directory does not exist the function is a no-op (idempotent).
+pub fn rename_column_dir(kando_dir: &Path, old_slug: &str, new_slug: &str) -> Result<(), StorageError> {
+    validate_slug(old_slug)?;
+    validate_slug(new_slug)?;
+    if old_slug == new_slug {
+        return Ok(()); // same path — no-op
+    }
+    let old_dir = kando_dir.join("columns").join(old_slug);
+    let new_dir = kando_dir.join("columns").join(new_slug);
+    if new_dir.exists() {
+        return Err(StorageError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("column directory '{}' already exists", new_slug),
+        )));
+    }
+    if old_dir.exists() {
+        fs::rename(&old_dir, &new_dir)?;
+    }
     Ok(())
 }
 
@@ -393,8 +431,17 @@ pub struct BoardSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnConfig {
+    // `#[serde(default)]` lets boards whose `_meta.toml` lacks a `slug` field
+    // still parse; the resulting empty string is caught immediately by
+    // `validate_slug` in `load_board`, so no silent bad state persists.
     #[serde(default)]
     pub slug: String,
+    /// Legacy field: previously stored in `_meta.toml` but now always derived
+    /// from the slug via [`slug_to_name`] at load time. Kept only for
+    /// backwards-compatible deserialization of existing boards; never written
+    /// back to disk (`skip_serializing`).
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     pub name: String,
     pub order: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1665,5 +1712,130 @@ mod tests {
         assert!(lines[1].contains("\"action\":\"auto-close\""));
         assert!(lines[1].contains("\"id\":\"2\""));
         assert!(lines[1].contains("\"from\":\"in-progress\""));
+    }
+
+    // ── rename_column_dir ──
+
+    #[test]
+    fn rename_column_dir_happy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Write a card into backlog so we can verify it moves.
+        let card_path = kando_dir.join("columns/backlog/001.md");
+        fs::write(&card_path, "---\nid = \"001\"\ntitle = \"Card\"\n---\n").unwrap();
+
+        rename_column_dir(&kando_dir, "backlog", "queue").unwrap();
+
+        assert!(!kando_dir.join("columns/backlog").exists(), "old dir should be gone");
+        assert!(kando_dir.join("columns/queue").exists(), "new dir should exist");
+        assert!(kando_dir.join("columns/queue/001.md").exists(), "card should have moved");
+    }
+
+    #[test]
+    fn rename_column_dir_old_does_not_exist_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // "nonexistent-col" directory was never created.
+        let result = rename_column_dir(&kando_dir, "nonexistent-col", "new-col");
+        assert!(result.is_ok(), "missing old dir should be a no-op, got: {result:?}");
+        assert!(!kando_dir.join("columns/new-col").exists());
+    }
+
+    #[test]
+    fn rename_column_dir_new_already_exists_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Both "backlog" and "done" exist after init_board.
+        let result = rename_column_dir(&kando_dir, "backlog", "done");
+        assert!(result.is_err(), "should fail when new dir already exists");
+        // Old dir must be untouched.
+        assert!(kando_dir.join("columns/backlog").exists());
+        assert!(kando_dir.join("columns/done").exists());
+    }
+
+    #[test]
+    fn rename_column_dir_same_slug_is_noop() {
+        // When old_slug == new_slug the function short-circuits before any I/O.
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let result = rename_column_dir(&kando_dir, "backlog", "backlog");
+        assert!(result.is_ok(), "same-slug rename should be a no-op, got: {result:?}");
+        assert!(kando_dir.join("columns/backlog").exists(), "directory must remain intact");
+    }
+
+    #[test]
+    fn rename_column_dir_invalid_slug_rejected_before_io() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // "INVALID!" contains upper-case and a special char — validate_slug should reject it.
+        let result = rename_column_dir(&kando_dir, "INVALID!", "valid");
+        assert!(result.is_err(), "invalid old slug should be rejected");
+
+        let result2 = rename_column_dir(&kando_dir, "valid", "INVALID!");
+        assert!(result2.is_err(), "invalid new slug should be rejected");
+    }
+
+    // ── ColumnConfig: name not written to disk ──
+
+    #[test]
+    fn column_config_name_not_written_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let board = load_board(&kando_dir).unwrap();
+        save_board(&kando_dir, &board).unwrap();
+
+        let meta_content = fs::read_to_string(kando_dir.join("columns/backlog/_meta.toml")).unwrap();
+        assert!(
+            !meta_content.contains("name ="),
+            "`name` field should not be written to _meta.toml, got:\n{meta_content}"
+        );
+    }
+
+    #[test]
+    fn column_name_derived_from_slug_not_stored_name() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Inject a wrong name into the meta file.
+        let meta_path = kando_dir.join("columns/in-progress/_meta.toml");
+        let original = fs::read_to_string(&meta_path).unwrap();
+        let with_wrong_name = format!("name = \"WRONG_NAME\"\n{original}");
+        fs::write(&meta_path, with_wrong_name).unwrap();
+
+        let board = load_board(&kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "in-progress").unwrap();
+        assert_eq!(col.name, "In Progress", "name should be derived from slug, not the stored value");
+    }
+
+    #[test]
+    fn load_board_column_names_match_slugs() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let board = load_board(&kando_dir).unwrap();
+        // Verify all four default columns have names derived from their slugs.
+        let expected = [
+            ("backlog", "Backlog"),
+            ("in-progress", "In Progress"),
+            ("done", "Done"),
+            ("archive", "Archive"),
+        ];
+        for (slug, expected_name) in &expected {
+            let col = board.columns.iter().find(|c| c.slug == *slug).unwrap();
+            assert_eq!(&col.name, expected_name, "slug={slug}");
+        }
     }
 }
