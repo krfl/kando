@@ -44,7 +44,7 @@ fn build_left_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>
         Mode::Normal => "NORMAL",
         Mode::Goto => "GOTO",
         Mode::Space => "SPACE",
-        Mode::View => "VIEW",
+        Mode::Column => "COLUMN",
         Mode::ColMove => "MOVE COL",
         Mode::FilterMenu => "FILTER",
         Mode::CardDetail { .. } => "DETAIL",

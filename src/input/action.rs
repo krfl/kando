@@ -35,7 +35,7 @@ pub enum Action {
     DetailNextCard,
     DetailPrevCard,
 
-    // View / Column mode
+    // Column mode
     ToggleHiddenColumns,
     ToggleFocusedColumnHidden,
     ColRenameSelected,
@@ -67,7 +67,7 @@ pub enum Action {
     // Minor mode entry
     EnterGotoMode,
     EnterSpaceMode,
-    EnterViewMode,
+    EnterColumnMode,
     EnterCommandMode,
 
     // Input modal

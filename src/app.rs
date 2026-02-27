@@ -98,7 +98,7 @@ pub enum Mode {
     Normal,
     Goto,
     Space,
-    View,
+    Column,
     ColMove,
     FilterMenu,
     Input {
@@ -584,7 +584,7 @@ fn process_action(
     terminal: &mut DefaultTerminal,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
-    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::View | Mode::ColMove | Mode::FilterMenu);
+    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::Column | Mode::ColMove | Mode::FilterMenu);
     let mut sync_message: Option<String> = None;
 
     match action {
@@ -634,9 +634,9 @@ fn process_action(
             sync_message = handle_card_action(board, state, action, terminal, kando_dir, was_minor_mode)?;
         }
 
-        // View toggles
+        // Visibility toggles
         Action::ToggleHiddenColumns => {
-            handle_view_toggle(board, state, action);
+            handle_visibility_toggle(board, state, action);
         }
 
         // Column mode actions
@@ -729,7 +729,7 @@ fn process_action(
         // Mode entry
         Action::EnterGotoMode => state.mode = Mode::Goto,
         Action::EnterSpaceMode => state.mode = Mode::Space,
-        Action::EnterViewMode => state.mode = Mode::View,
+        Action::EnterColumnMode => state.mode = Mode::Column,
         Action::EnterFilterMode => state.mode = Mode::FilterMenu,
         Action::EnterCommandMode => {
             state.cached_trash_ids = load_trash(kando_dir)
@@ -1259,10 +1259,10 @@ fn handle_card_action<B: ratatui::backend::Backend>(
 }
 
 // ---------------------------------------------------------------------------
-// Handler: View toggles
+// Handler: Visibility toggles
 // ---------------------------------------------------------------------------
 
-fn handle_view_toggle(board: &Board, state: &mut AppState, action: Action) {
+fn handle_visibility_toggle(board: &Board, state: &mut AppState, action: Action) {
     state.mode = Mode::Normal;
     match action {
         Action::ToggleHiddenColumns => {
@@ -2027,7 +2027,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // View toggle tests
+    // Visibility toggle tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2035,10 +2035,10 @@ mod tests {
         let board = test_board(&[("A", &[])]);
         let mut state = AppState::new();
         assert!(!state.show_hidden_columns);
-        handle_view_toggle(&board, &mut state, Action::ToggleHiddenColumns);
+        handle_visibility_toggle(&board, &mut state, Action::ToggleHiddenColumns);
         assert!(state.show_hidden_columns);
         assert_eq!(state.notification.as_deref(), Some("Showing hidden columns"));
-        handle_view_toggle(&board, &mut state, Action::ToggleHiddenColumns);
+        handle_visibility_toggle(&board, &mut state, Action::ToggleHiddenColumns);
         assert!(!state.show_hidden_columns);
         assert_eq!(state.notification.as_deref(), Some("Hiding hidden columns"));
     }
@@ -2050,7 +2050,7 @@ mod tests {
         let mut state = AppState::new();
         state.show_hidden_columns = true;
         state.focused_column = 1;
-        handle_view_toggle(&board, &mut state, Action::ToggleHiddenColumns);
+        handle_visibility_toggle(&board, &mut state, Action::ToggleHiddenColumns);
         assert_eq!(state.focused_column, 0);
     }
 
@@ -3500,7 +3500,7 @@ mod tests {
     #[test]
     fn handle_col_hide_mode_resets_to_normal() {
         let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
-        state.mode = Mode::View;
+        state.mode = Mode::Column;
         state.focused_column = 0;
         handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
         assert!(matches!(state.mode, Mode::Normal));

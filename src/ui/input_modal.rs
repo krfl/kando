@@ -8,7 +8,7 @@ use super::theme::Theme;
 use crate::app::Mode;
 use crate::input::keymap;
 
-/// Render the minor-mode hint popup (shown for g, space, z modes).
+/// Render the minor-mode hint popup (shown for g, space, c, cm, f modes).
 pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
     let bindings = keymap::mode_bindings(mode);
     if bindings.is_empty() {
@@ -30,7 +30,7 @@ pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
     let mode_name = match mode {
         Mode::Goto => "goto",
         Mode::Space => "commands",
-        Mode::View => "view",
+        Mode::Column => "column",
         Mode::ColMove => "move column",
         Mode::FilterMenu => "filter",
         _ => "",

@@ -9,7 +9,7 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Normal => map_normal(key),
         Mode::Goto => map_goto(key),
         Mode::Space => map_space(key),
-        Mode::View => map_view(key),
+        Mode::Column => map_column(key),
         Mode::ColMove => map_col_move(key),
         Mode::FilterMenu => map_filter_menu(key),
         Mode::Input { .. } => map_input(key),
@@ -59,7 +59,7 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Char('g') => Action::EnterGotoMode,
         KeyCode::Char(' ') => Action::EnterSpaceMode,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
-        KeyCode::Char('c') => Action::EnterViewMode,
+        KeyCode::Char('c') => Action::EnterColumnMode,
         KeyCode::Char('u') => Action::Undo,
         KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Char(':') => Action::EnterCommandMode,
@@ -103,8 +103,8 @@ fn map_space(key: KeyEvent) -> Action {
 }
 
 /// Map keys for column-management mode, entered by pressing `c` in Normal mode.
-/// Displayed as "Column (c)" in the help panel; uses [`Mode::View`] internally.
-fn map_view(key: KeyEvent) -> Action {
+/// Displayed as "Column (c)" in the help panel; uses [`Mode::Column`] internally.
+fn map_column(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('h') => Action::ToggleFocusedColumnHidden,
         KeyCode::Char('s') => Action::ToggleHiddenColumns,
@@ -262,7 +262,7 @@ pub const GOTO_BINDINGS: &[Binding] = &[
     Binding { key: "e", description: "Last card", tutorial: false },
 ];
 
-pub const VIEW_BINDINGS: &[Binding] = &[
+pub const COLUMN_BINDINGS: &[Binding] = &[
     Binding { key: "r", description: "Rename focused column",      tutorial: false },
     Binding { key: "a", description: "Add column before focused",  tutorial: false },
     Binding { key: "m", description: "Move focused column",        tutorial: false },
@@ -303,7 +303,7 @@ pub const HELP_GROUPS: &[BindingGroup] = &[
     BindingGroup { name: "Normal Mode", bindings: NORMAL_BINDINGS },
     BindingGroup { name: "Commands (Space)", bindings: SPACE_BINDINGS },
     BindingGroup { name: "Goto (g)", bindings: GOTO_BINDINGS },
-    BindingGroup { name: "Column (c)", bindings: VIEW_BINDINGS },
+    BindingGroup { name: "Column (c)", bindings: COLUMN_BINDINGS },
     BindingGroup { name: "Column Move (cm)", bindings: COL_MOVE_BINDINGS },
     BindingGroup { name: "Card Detail", bindings: DETAIL_BINDINGS },
 ];
@@ -320,7 +320,7 @@ pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
     match mode {
         Mode::Goto => GOTO_BINDINGS,
         Mode::Space => SPACE_BINDINGS,
-        Mode::View => VIEW_BINDINGS,
+        Mode::Column => COLUMN_BINDINGS,
         Mode::ColMove => COL_MOVE_BINDINGS,
         Mode::FilterMenu => FILTER_BINDINGS,
         _ => &[],
@@ -405,13 +405,13 @@ mod tests {
     }
 
     #[test]
-    fn normal_c_enters_view_mode() {
-        assert_eq!(map_key(key(KeyCode::Char('c')), &Mode::Normal), Action::EnterViewMode);
+    fn normal_c_enters_column_mode() {
+        assert_eq!(map_key(key(KeyCode::Char('c')), &Mode::Normal), Action::EnterColumnMode);
     }
 
     #[test]
     fn normal_ctrl_c_quits_not_column_mode() {
-        // CONTROL+c must map to Quit even though bare 'c' maps to EnterViewMode.
+        // CONTROL+c must map to Quit even though bare 'c' maps to EnterColumnMode.
         assert_eq!(map_key(key_ctrl(KeyCode::Char('c')), &Mode::Normal), Action::Quit);
     }
 
@@ -627,36 +627,36 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('?')), &Mode::Space), Action::ShowHelp);
     }
 
-    // ── View / Column mode bindings ──
+    // ── Column mode bindings ──
 
     #[test]
-    fn view_h_hides_focused_column() {
-        assert_eq!(map_key(key(KeyCode::Char('h')), &Mode::View), Action::ToggleFocusedColumnHidden);
+    fn column_h_hides_focused_column() {
+        assert_eq!(map_key(key(KeyCode::Char('h')), &Mode::Column), Action::ToggleFocusedColumnHidden);
     }
 
     #[test]
-    fn view_s_toggles_hidden_columns() {
-        assert_eq!(map_key(key(KeyCode::Char('s')), &Mode::View), Action::ToggleHiddenColumns);
+    fn column_s_toggles_hidden_columns() {
+        assert_eq!(map_key(key(KeyCode::Char('s')), &Mode::Column), Action::ToggleHiddenColumns);
     }
 
     #[test]
-    fn view_r_enters_rename_prefilled() {
-        assert_eq!(map_key(key(KeyCode::Char('r')), &Mode::View), Action::ColRenameSelected);
+    fn column_r_enters_rename_prefilled() {
+        assert_eq!(map_key(key(KeyCode::Char('r')), &Mode::Column), Action::ColRenameSelected);
     }
 
     #[test]
-    fn view_a_enters_add_prefilled() {
-        assert_eq!(map_key(key(KeyCode::Char('a')), &Mode::View), Action::ColAddBefore);
+    fn column_a_enters_add_prefilled() {
+        assert_eq!(map_key(key(KeyCode::Char('a')), &Mode::Column), Action::ColAddBefore);
     }
 
     #[test]
-    fn view_d_enters_remove_prefilled() {
-        assert_eq!(map_key(key(KeyCode::Char('d')), &Mode::View), Action::ColRemoveSelected);
+    fn column_d_enters_remove_prefilled() {
+        assert_eq!(map_key(key(KeyCode::Char('d')), &Mode::Column), Action::ColRemoveSelected);
     }
 
     #[test]
-    fn view_esc_cancels() {
-        assert_eq!(map_key(key(KeyCode::Esc), &Mode::View), Action::None);
+    fn column_esc_cancels() {
+        assert_eq!(map_key(key(KeyCode::Esc), &Mode::Column), Action::None);
     }
 
     // ── Confirm mode bindings ──
@@ -795,8 +795,8 @@ mod tests {
     }
 
     #[test]
-    fn mode_bindings_view_returns_bindings() {
-        let bindings = mode_bindings(&Mode::View);
+    fn mode_bindings_column_returns_bindings() {
+        let bindings = mode_bindings(&Mode::Column);
         assert!(!bindings.is_empty());
     }
 
