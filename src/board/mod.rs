@@ -15,7 +15,6 @@ pub struct Board {
     pub next_card_id: u32,
     pub policies: Policies,
     pub sync_branch: Option<String>,
-    pub tutorial_shown: bool,
     pub nerd_font: bool,
     /// When the board was created. None for legacy boards.
     pub created_at: Option<DateTime<Utc>>,
@@ -476,7 +475,7 @@ mod tests {
             next_card_id: 10,
             policies: Policies::default(),
             sync_branch: None,
-            tutorial_shown: true,
+
             nerd_font: false,
             created_at: None,
             columns: vec![
@@ -545,7 +544,7 @@ mod tests {
             next_card_id: 10,
             policies: Policies::default(),
             sync_branch: None,
-            tutorial_shown: true,
+
             nerd_font: false,
             created_at: None,
             columns: vec![
@@ -593,7 +592,7 @@ mod tests {
             next_card_id: 10,
             policies: Policies::default(),
             sync_branch: None,
-            tutorial_shown: true,
+
             nerd_font: false,
             created_at: None,
             columns: vec![

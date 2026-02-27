@@ -185,99 +185,88 @@ fn map_picker(key: KeyEvent) -> Action {
 
 // ---------------------------------------------------------------------------
 // Binding registry — single source of truth for keybinding documentation.
-// Used by help overlay, tutorial, status bar hints, and minor-mode popup.
+// Used by help overlay, status bar hints, and minor-mode popup.
 // ---------------------------------------------------------------------------
 
-/// A documented keybinding for display in help/tutorial/hints.
+/// A documented keybinding for display in help/hints.
 pub struct Binding {
     pub key: &'static str,
     pub description: &'static str,
-    /// Include in the first-launch tutorial overlay?
-    pub tutorial: bool,
 }
 
-/// A group of related bindings (one section in help/tutorial).
+/// A group of related bindings (one section in help overlay).
 pub struct BindingGroup {
     pub name: &'static str,
     pub bindings: &'static [Binding],
 }
 
 pub const NORMAL_BINDINGS: &[Binding] = &[
-    Binding { key: "h / l", description: "Switch columns", tutorial: true },
-    Binding { key: "H / L", description: "Move card left/right", tutorial: true },
-    Binding { key: "j / k", description: "Move between cards", tutorial: true },
-    Binding { key: "n / N", description: "Next/prev match", tutorial: false },
-    Binding { key: "Enter", description: "Open card detail", tutorial: true },
-    Binding { key: "/", description: "Search cards", tutorial: false },
-    Binding { key: "s", description: "Sort column", tutorial: false },
-    Binding { key: "m", description: "Board metrics", tutorial: false },
-    Binding { key: "r", description: "Reload board", tutorial: false },
-    Binding { key: "u", description: "Undo last delete", tutorial: true },
-    Binding { key: "?", description: "Help", tutorial: true },
-    Binding { key: "Esc", description: "Clear filters", tutorial: false },
-    Binding { key: "q", description: "Quit", tutorial: false },
+    Binding { key: "h / l", description: "Switch columns" },
+    Binding { key: "H / L", description: "Move card left/right" },
+    Binding { key: "j / k", description: "Move between cards" },
+    Binding { key: "n / N", description: "Next/prev match" },
+    Binding { key: "Enter", description: "Open card detail" },
+    Binding { key: "/", description: "Search cards" },
+    Binding { key: "s", description: "Sort column" },
+    Binding { key: "m", description: "Board metrics" },
+    Binding { key: "r", description: "Reload board" },
+    Binding { key: "u", description: "Undo last delete" },
+    Binding { key: "?", description: "Help" },
+    Binding { key: "Esc", description: "Clear filters" },
+    Binding { key: "q", description: "Quit" },
 ];
 
 pub const SPACE_BINDINGS: &[Binding] = &[
-    Binding { key: "n", description: "New card", tutorial: true },
-    Binding { key: "d", description: "Delete card", tutorial: true },
-    Binding { key: "e", description: "Edit in $EDITOR", tutorial: true },
-    Binding { key: "t", description: "Edit tags", tutorial: false },
-    Binding { key: "a", description: "Edit assignees", tutorial: false },
-    Binding { key: "p", description: "Set priority", tutorial: true },
-    Binding { key: "m", description: "Move to column", tutorial: true },
-    Binding { key: "b", description: "Toggle blocker", tutorial: false },
-    Binding { key: "x", description: "Archive card", tutorial: false },
-    Binding { key: "u", description: "Undo last delete", tutorial: false },
+    Binding { key: "n", description: "New card" },
+    Binding { key: "d", description: "Delete card" },
+    Binding { key: "e", description: "Edit in $EDITOR" },
+    Binding { key: "t", description: "Edit tags" },
+    Binding { key: "a", description: "Edit assignees" },
+    Binding { key: "p", description: "Set priority" },
+    Binding { key: "m", description: "Move to column" },
+    Binding { key: "b", description: "Toggle blocker" },
+    Binding { key: "x", description: "Archive card" },
+    Binding { key: "u", description: "Undo last delete" },
 ];
 
 pub const FILTER_BINDINGS: &[Binding] = &[
-    Binding { key: "t", description: "By tag", tutorial: false },
-    Binding { key: "a", description: "By assignee", tutorial: false },
-    Binding { key: "s", description: "By staleness", tutorial: false },
-    Binding { key: "/", description: "Text search", tutorial: false },
+    Binding { key: "t", description: "By tag" },
+    Binding { key: "a", description: "By assignee" },
+    Binding { key: "s", description: "By staleness" },
+    Binding { key: "/", description: "Text search" },
 ];
 
 pub const GOTO_BINDINGS: &[Binding] = &[
-    Binding { key: "1-9", description: "Jump to column", tutorial: false },
-    Binding { key: "b", description: "Backlog", tutorial: false },
-    Binding { key: "d", description: "Done", tutorial: false },
-    Binding { key: "g", description: "First card", tutorial: false },
-    Binding { key: "e", description: "Last card", tutorial: false },
+    Binding { key: "1-9", description: "Jump to column" },
+    Binding { key: "b", description: "Backlog" },
+    Binding { key: "d", description: "Done" },
+    Binding { key: "g", description: "First card" },
+    Binding { key: "e", description: "Last card" },
 ];
 
 pub const COLUMN_BINDINGS: &[Binding] = &[
-    Binding { key: "a", description: "Add column before focused",  tutorial: false },
-    Binding { key: "d", description: "Delete focused column",      tutorial: false },
-    Binding { key: "h", description: "Toggle column hidden",       tutorial: false },
-    Binding { key: "m", description: "Move focused column",        tutorial: false },
-    Binding { key: "r", description: "Rename focused column",      tutorial: false },
-    Binding { key: "s", description: "Toggle showing hidden cols", tutorial: false },
-    Binding { key: "w", description: "Set WIP limit",              tutorial: false },
+    Binding { key: "a", description: "Add column before focused" },
+    Binding { key: "d", description: "Delete focused column" },
+    Binding { key: "h", description: "Toggle column hidden" },
+    Binding { key: "m", description: "Move focused column" },
+    Binding { key: "r", description: "Rename focused column" },
+    Binding { key: "s", description: "Toggle showing hidden cols" },
+    Binding { key: "w", description: "Set WIP limit" },
 ];
 
 pub const COL_MOVE_BINDINGS: &[Binding] = &[
-    Binding { key: "1-9", description: "Move to position N",   tutorial: false },
-    Binding { key: "h",   description: "Move column left",     tutorial: false },
-    Binding { key: "l",   description: "Move column right",    tutorial: false },
-    Binding { key: "g",   description: "Move column to first", tutorial: false },
-    Binding { key: "e",   description: "Move column to last",  tutorial: false },
+    Binding { key: "1-9", description: "Move to position N" },
+    Binding { key: "h",   description: "Move column left" },
+    Binding { key: "l",   description: "Move column right" },
+    Binding { key: "g",   description: "Move column to first" },
+    Binding { key: "e",   description: "Move column to last" },
 ];
 
 pub const DETAIL_BINDINGS: &[Binding] = &[
-    Binding { key: "j / k", description: "Scroll", tutorial: false },
-    Binding { key: "Tab/S-Tab", description: "Next/prev card", tutorial: false },
-    Binding { key: "e", description: "Edit in $EDITOR", tutorial: false },
-    Binding { key: "Esc", description: "Close", tutorial: false },
-];
-
-/// Extra bindings shown only in the tutorial "More" section.
-/// Must not duplicate entries already in NORMAL_BINDINGS with tutorial: true.
-const TUTORIAL_EXTRA: &[Binding] = &[
-    Binding { key: "g", description: "Goto mode (jump to columns)", tutorial: true },
-    Binding { key: "c", description: "Column mode (hide/rename/…)", tutorial: true },
-    Binding { key: "/", description: "Search cards", tutorial: true },
-    Binding { key: "q", description: "Quit", tutorial: true },
+    Binding { key: "j / k", description: "Scroll" },
+    Binding { key: "Tab/S-Tab", description: "Next/prev card" },
+    Binding { key: "e", description: "Edit in $EDITOR" },
+    Binding { key: "Esc", description: "Close" },
 ];
 
 /// All binding groups for the help overlay.
@@ -289,13 +278,6 @@ pub const HELP_GROUPS: &[BindingGroup] = &[
     BindingGroup { name: "Column (c)", bindings: COLUMN_BINDINGS },
     BindingGroup { name: "Column Move (cm)", bindings: COL_MOVE_BINDINGS },
     BindingGroup { name: "Card Detail", bindings: DETAIL_BINDINGS },
-];
-
-/// Binding groups for the first-launch tutorial (different organization).
-pub const TUTORIAL_GROUPS: &[BindingGroup] = &[
-    BindingGroup { name: "Navigation", bindings: NORMAL_BINDINGS },
-    BindingGroup { name: "Commands (Space)", bindings: SPACE_BINDINGS },
-    BindingGroup { name: "More", bindings: TUTORIAL_EXTRA },
 ];
 
 /// Get bindings for a minor mode (for popup and status display).
@@ -854,24 +836,11 @@ mod tests {
     // ── Binding registry tests ──
 
     #[test]
-    fn normal_bindings_contains_question_mark_tutorial() {
+    fn normal_bindings_contains_question_mark() {
         let entry = NORMAL_BINDINGS.iter().find(|b| b.key == "?");
         assert!(entry.is_some(), "? binding missing from NORMAL_BINDINGS");
-        let entry = entry.unwrap();
-        assert_eq!(entry.description, "Help");
-        assert!(entry.tutorial, "? binding should be marked tutorial: true");
+        assert_eq!(entry.unwrap().description, "Help");
     }
-
-    #[test]
-    fn tutorial_extra_has_no_question_mark() {
-        // ? is in NORMAL_BINDINGS (tutorial: true) — it must not also appear in
-        // TUTORIAL_EXTRA, which would cause it to render twice in the tutorial overlay.
-        assert!(
-            TUTORIAL_EXTRA.iter().all(|b| b.key != "?"),
-            "? must not appear in TUTORIAL_EXTRA — it is already in NORMAL_BINDINGS"
-        );
-    }
-
 
     // ── mode_bindings tests ──
 

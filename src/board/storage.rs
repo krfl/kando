@@ -104,7 +104,6 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
             next_card_id: 1,
             policies: Policies::default(),
             sync_branch: sync_branch.map(|s| s.to_string()),
-            tutorial_shown: false,
             nerd_font: false,
             created_at: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         },
@@ -112,6 +111,9 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
     };
     let config_str = toml::to_string_pretty(&config)?;
     fs::write(kando_dir.join("config.toml"), config_str)?;
+
+    // Create default local.toml (gitignored, per-user preferences)
+    save_local_config(&kando_dir, &crate::config::LocalConfig::default())?;
 
     Ok(kando_dir)
 }
@@ -177,7 +179,6 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
         next_card_id: config.board.next_card_id,
         policies: config.board.policies,
         sync_branch: config.board.sync_branch,
-        tutorial_shown: config.board.tutorial_shown,
         nerd_font: config.board.nerd_font,
         created_at,
         columns,
@@ -212,7 +213,6 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
             next_card_id: board.next_card_id,
             policies: board.policies.clone(),
             sync_branch: board.sync_branch.clone(),
-            tutorial_shown: board.tutorial_shown,
             nerd_font: board.nerd_font,
             created_at: board.created_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         },
@@ -418,9 +418,6 @@ pub struct BoardSection {
     /// Git branch to sync with. None = no sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_branch: Option<String>,
-    /// Whether the first-launch tutorial has been shown.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub tutorial_shown: bool,
     /// Use Nerd Font glyphs instead of ASCII icons.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nerd_font: bool,
@@ -692,11 +689,6 @@ pub fn load_local_config(kando_dir: &Path) -> Result<crate::config::LocalConfig,
 /// Persist per-user local preferences to `.kando/local.toml`.
 /// A best-effort attempt is made to add `local.toml` to `.kando/.gitignore`;
 /// gitignore failures are intentionally ignored so they never block the save.
-///
-/// Currently unused at runtime (LocalConfig is empty), but kept as
-/// infrastructure for future local preferences.
-/// When LocalConfig gains new fields, restore this to non-test visibility.
-#[cfg(test)]
 pub fn save_local_config(kando_dir: &Path, config: &crate::config::LocalConfig) -> Result<(), StorageError> {
     let content = toml::to_string_pretty(config)?;
     fs::write(kando_dir.join("local.toml"), content)?;
@@ -706,7 +698,6 @@ pub fn save_local_config(kando_dir: &Path, config: &crate::config::LocalConfig) 
 
 /// Ensure `.kando/.gitignore` contains a `local.toml` entry.
 /// Opens the file once with read+write access to avoid a TOCTOU window.
-#[cfg(test)]
 fn ensure_local_gitignore(kando_dir: &Path) -> Result<(), StorageError> {
     use std::io::{Read, Seek, Write};
     let path = kando_dir.join(".gitignore");
@@ -1435,7 +1426,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        let cfg = crate::config::LocalConfig {};
+        let cfg = crate::config::LocalConfig::default();
         save_local_config(&kando_dir, &cfg).unwrap();
         assert!(kando_dir.join("local.toml").exists());
     }
@@ -1445,7 +1436,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        let original = crate::config::LocalConfig {};
+        let original = crate::config::LocalConfig::default();
         save_local_config(&kando_dir, &original).unwrap();
         let _loaded = load_local_config(&kando_dir).unwrap();
     }
@@ -1494,6 +1485,65 @@ mod tests {
         save_local_config(&kando_dir, &crate::config::LocalConfig::default()).unwrap();
         let gitignore = fs::read_to_string(kando_dir.join(".gitignore")).unwrap();
         assert_eq!(gitignore, "*.log\nlocal.toml\n");
+    }
+
+    // ── init_board local.toml tests ──
+
+    #[test]
+    fn test_init_board_creates_local_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        assert!(kando_dir.join("local.toml").exists());
+    }
+
+    #[test]
+    fn test_init_board_local_toml_has_default_tutorial_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let cfg = load_local_config(&kando_dir).unwrap();
+        assert!(!cfg.tutorial_shown);
+    }
+
+    #[test]
+    fn test_init_board_creates_gitignore_with_local_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let gitignore = fs::read_to_string(kando_dir.join(".gitignore")).unwrap();
+        assert!(gitignore.lines().any(|l| l.trim() == "local.toml"));
+    }
+
+    #[test]
+    fn test_load_board_ignores_legacy_tutorial_shown_in_config() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Inject legacy tutorial_shown into config.toml's [board] section
+        let config_path = kando_dir.join("config.toml");
+        let config_str = fs::read_to_string(&config_path).unwrap();
+        let patched = config_str.replace(
+            "[board]",
+            "[board]\ntutorial_shown = true",
+        );
+        fs::write(&config_path, patched).unwrap();
+
+        // load_board must not error on the unknown field
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.name, "Test");
+    }
+
+    #[test]
+    fn save_local_config_tutorial_shown_true_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let cfg = crate::config::LocalConfig { tutorial_shown: true };
+        save_local_config(&kando_dir, &cfg).unwrap();
+        let loaded = load_local_config(&kando_dir).unwrap();
+        assert!(loaded.tutorial_shown);
     }
 
     // ── json_escape tests ──

@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::board::age::{run_auto_archive, run_auto_close};
-use crate::board::storage::{append_activity, find_kando_dir, load_board, load_local_config, load_trash, save_board, trash_card, restore_card, TrashEntry};
+use crate::board::storage::{append_activity, find_kando_dir, load_board, load_local_config, load_trash, save_board, save_local_config, trash_card, restore_card, TrashEntry};
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
@@ -195,6 +195,8 @@ pub struct AppState {
     pub deleted_this_session: bool,
     /// Use Nerd Font glyphs instead of ASCII icons.
     pub nerd_font: bool,
+    /// Whether the first-launch tutorial has been shown (from local.toml).
+    pub tutorial_shown: bool,
 }
 
 impl AppState {
@@ -216,6 +218,7 @@ impl AppState {
             last_delete: None,
             deleted_this_session: false,
             nerd_font: false,
+            tutorial_shown: false,
         }
     }
 
@@ -548,9 +551,14 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
     // CLI --nerd-font flag overrides config; otherwise use board config value
     state.nerd_font = nerd_font_flag || board.nerd_font;
 
-    // Load per-user local preferences (currently empty, kept for extensibility).
-    if let Err(e) = load_local_config(&kando_dir) {
-        state.notify_error(format!("local.toml: {e}"));
+    // Load per-user local preferences.
+    match load_local_config(&kando_dir) {
+        Ok(local_cfg) => {
+            state.tutorial_shown = local_cfg.tutorial_shown;
+        }
+        Err(e) => {
+            state.notify_error(format!("local.toml: {e}"));
+        }
     }
 
     // Initialize git sync if configured
@@ -582,7 +590,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
     state.clamp_selection(&board);
 
     // Show tutorial on first launch
-    if !board.tutorial_shown {
+    if !state.tutorial_shown {
         state.mode = Mode::Tutorial { scroll: 0 };
     }
 
@@ -879,8 +887,10 @@ fn process_action(
         Action::ShowMetrics => state.mode = Mode::Metrics { scroll: 0 },
         Action::DismissTutorial => {
             state.mode = Mode::Normal;
-            board.tutorial_shown = true;
-            save_board(kando_dir, board)?;
+            state.tutorial_shown = true;
+            let mut local_cfg = load_local_config(kando_dir).unwrap_or_default();
+            local_cfg.tutorial_shown = true;
+            save_local_config(kando_dir, &local_cfg)?;
         }
         Action::Quit => {
             match &state.mode {
@@ -2196,7 +2206,6 @@ mod tests {
             next_card_id: 100,
             policies: Policies::default(),
             sync_branch: None,
-            tutorial_shown: true,
             nerd_font: false,
             created_at: None,
             columns: cols,

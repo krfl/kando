@@ -516,7 +516,7 @@ mod tests {
             next_card_id: 100,
             policies: Policies::default(),
             sync_branch: None,
-            tutorial_shown: true,
+
             nerd_font: false,
             created_at: None,
             columns,

@@ -289,7 +289,7 @@ mod tests {
             next_card_id: 100,
             policies,
             sync_branch: None,
-            tutorial_shown: true,
+
             nerd_font: false,
             created_at: None,
             columns,
