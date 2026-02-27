@@ -18,8 +18,8 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board: &Bo
     }
 
     // Three-zone layout for all other modes
-    let left = build_left_zone(state, &board.name);
-    let right = build_right_zone(state, board);
+    let left = build_left_zone(state);
+    let right = build_right_zone(state, &board.name);
 
     let left_width: usize = left.iter().map(|s| s.content.width()).sum();
     let right_width: usize = right.iter().map(|s| s.content.width()).sum();
@@ -38,8 +38,8 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board: &Bo
     f.render_widget(paragraph, area);
 }
 
-/// Build the left zone: mode badge + board name + active filters/tags.
-fn build_left_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>> {
+/// Build the left zone: mode badge + active filters.
+fn build_left_zone(state: &AppState) -> Vec<Span<'_>> {
     let mode_str = match &state.mode {
         Mode::Normal => "NORMAL",
         Mode::Goto => "GOTO",
@@ -64,7 +64,6 @@ fn build_left_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ),
         Span::raw(" "),
-        Span::styled(format!("{board_name} "), Style::default().fg(Theme::DIM)),
     ];
 
     // Show text filter if active
@@ -76,13 +75,19 @@ fn build_left_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>
     }
 
     // Show active tag filters
-    if !state.active_tag_filters.is_empty() {
-        for tag in &state.active_tag_filters {
-            spans.push(Span::styled(
-                format!("@{tag} "),
-                Style::default().fg(Theme::tag_color(tag)),
-            ));
-        }
+    for tag in &state.active_tag_filters {
+        spans.push(Span::styled(
+            format!("@{tag} "),
+            Style::default().fg(Theme::tag_color(tag)),
+        ));
+    }
+
+    // Show active assignee filters
+    for assignee in &state.active_assignee_filters {
+        spans.push(Span::styled(
+            format!("@{assignee} "),
+            Style::default().fg(Theme::ASSIGNEE),
+        ));
     }
 
     // Show active staleness filters
@@ -97,29 +102,17 @@ fn build_left_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>
     spans
 }
 
-/// Build the right zone: column position + sync status.
-fn build_right_zone<'a>(state: &'a AppState, board: &'a Board) -> Vec<Span<'a>> {
+/// Build the right zone: board name + sync status.
+fn build_right_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>> {
     let mut spans = Vec::new();
 
-    // Column name + card count + position
-    if let Some(col) = board.columns.get(state.focused_column) {
-        let card_count = col.cards.len();
-        let pos = if card_count > 0 {
-            format!(" {}/{}",  state.selected_card + 1, card_count)
-        } else {
-            " 0".to_string()
-        };
-        spans.push(Span::styled(
-            format!("{}[{}]", col.name, card_count),
-            Style::default().fg(Theme::DIM),
-        ));
-        spans.push(Span::styled(
-            pos,
-            Style::default().fg(Theme::FG),
-        ));
-    }
+    // Board name
+    spans.push(Span::styled(
+        board_name,
+        Style::default().fg(Theme::DIM),
+    ));
 
-    // Sync status
+    // Sync status (at far right edge)
     if let Some(ref sync_state) = state.sync_state {
         spans.push(Span::raw(" "));
         let icons = theme::icons(state.nerd_font);
@@ -300,5 +293,126 @@ mod tests {
         assert_eq!(spans[0].content.as_ref(), " ");
         assert_eq!(spans[1].content.as_ref(), " ");
         assert!(spans[1].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    // --- build_left_zone tests ---
+
+    /// Collect span text content into a Vec for semantic assertions.
+    fn span_texts<'a>(spans: &'a [Span<'a>]) -> Vec<&'a str> {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn left_zone_normal_mode_no_filters() {
+        let state = AppState::new();
+        let spans = build_left_zone(&state);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), " NORMAL ");
+        assert_eq!(spans[1].content.as_ref(), " ");
+    }
+
+    #[test]
+    fn left_zone_shows_active_text_filter() {
+        let mut state = AppState::new();
+        state.active_filter = Some("bug".to_string());
+        let spans = build_left_zone(&state);
+        assert!(span_texts(&spans).contains(&"/bug "));
+    }
+
+    #[test]
+    fn left_zone_shows_tag_filters() {
+        let mut state = AppState::new();
+        state.active_tag_filters = vec!["urgent".to_string()];
+        let spans = build_left_zone(&state);
+        let tag_span = spans.iter().find(|s| s.content.contains("@urgent")).unwrap();
+        assert_eq!(tag_span.style.fg, Some(Theme::tag_color("urgent")));
+    }
+
+    #[test]
+    fn left_zone_shows_assignee_filters() {
+        let mut state = AppState::new();
+        state.active_assignee_filters = vec!["alice".to_string()];
+        let spans = build_left_zone(&state);
+        let assignee_span = spans.iter().find(|s| s.content.contains("@alice")).unwrap();
+        assert_eq!(assignee_span.style.fg, Some(Theme::ASSIGNEE));
+    }
+
+    #[test]
+    fn left_zone_shows_staleness_filters() {
+        let mut state = AppState::new();
+        state.active_staleness_filters = vec!["stale".to_string(), "very stale".to_string()];
+        let spans = build_left_zone(&state);
+        assert!(span_texts(&spans).contains(&"[stale,very stale] "));
+    }
+
+    #[test]
+    fn left_zone_multiple_filters_together() {
+        let mut state = AppState::new();
+        state.active_filter = Some("bug".to_string());
+        state.active_tag_filters = vec!["urgent".to_string()];
+        state.active_assignee_filters = vec!["alice".to_string()];
+        state.active_staleness_filters = vec!["new".to_string()];
+        let spans = build_left_zone(&state);
+        let texts = span_texts(&spans);
+        assert!(texts.contains(&"/bug "));
+        assert!(texts.contains(&"@urgent "));
+        assert!(texts.contains(&"@alice "));
+        assert!(texts.contains(&"[new] "));
+    }
+
+    // --- build_right_zone tests ---
+
+    #[test]
+    fn right_zone_shows_board_name() {
+        let state = AppState::new();
+        let spans = build_right_zone(&state, "my-project");
+        assert_eq!(spans[0].content.as_ref(), "my-project");
+        assert_eq!(spans[0].style.fg, Some(Theme::DIM));
+    }
+
+    #[test]
+    fn right_zone_no_sync_has_two_spans() {
+        let state = AppState::new();
+        let spans = build_right_zone(&state, "board");
+        // board name + trailing space
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content.as_ref(), "board");
+        assert_eq!(spans[1].content.as_ref(), " ");
+    }
+
+    #[test]
+    fn right_zone_sync_online_shows_icon() {
+        use std::path::PathBuf;
+        use crate::board::sync::SyncState;
+        let mut state = AppState::new();
+        state.sync_state = Some(SyncState {
+            shadow_path: PathBuf::new(),
+            branch: String::new(),
+            online: true,
+            last_error: None,
+        });
+        let spans = build_right_zone(&state, "board");
+        // board name, space, sync icon, trailing space
+        assert_eq!(spans.len(), 4);
+        let icons = super::super::theme::icons(false);
+        assert_eq!(spans[2].content.as_ref(), icons.sync_online);
+        assert_eq!(spans[2].style.fg, Some(Theme::WIP_OK));
+    }
+
+    #[test]
+    fn right_zone_sync_offline_shows_icon() {
+        use std::path::PathBuf;
+        use crate::board::sync::SyncState;
+        let mut state = AppState::new();
+        state.sync_state = Some(SyncState {
+            shadow_path: PathBuf::new(),
+            branch: String::new(),
+            online: false,
+            last_error: None,
+        });
+        let spans = build_right_zone(&state, "board");
+        let icons = super::super::theme::icons(false);
+        assert_eq!(spans[2].content.as_ref(), icons.sync_offline);
+        assert_eq!(spans[2].style.fg, Some(Theme::WIP_OVER));
     }
 }
