@@ -1,5 +1,5 @@
 use fuzzy_matcher::skim::SkimMatcherV2;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
@@ -250,9 +250,16 @@ fn render_column(
 
     // Scroll indicator
     if cards.len() > max_visible {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-        let mut scrollbar_state = ScrollbarState::new(cards.len()).position(scroll_offset);
-        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some(" "))
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(border_color))
+            .begin_symbol(None)
+            .end_symbol(None);
+        let mut scrollbar_state = ScrollbarState::new(cards.len())
+            .position(selected_in_col);
+        let scrollbar_area = area.inner(Margin { vertical: 1, horizontal: 0 });
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }
 
