@@ -53,23 +53,11 @@ pub fn render(f: &mut Frame, board: &Board, state: &AppState, now: DateTime<Utc>
         crate::app::Mode::Tutorial => {
             tutorial::render_tutorial(f, f.area());
         }
-        crate::app::Mode::Help => {
-            help::render_help(f, f.area());
+        crate::app::Mode::Help { scroll } => {
+            help::render_help(f, f.area(), *scroll);
         }
         crate::app::Mode::Metrics { scroll } => {
             metrics::render_metrics(f, f.area(), board, *scroll, now);
-        }
-        crate::app::Mode::Command { cmd } => {
-            let (card_tags, card_assignees) = state.selected_card_metadata(board);
-            let (title, items) = crate::command::palette_items(&cmd.buf.input, board, &card_tags, &card_assignees, &state.cached_trash_ids);
-            if !items.is_empty() {
-                // Determine which name is selected (from active completion state)
-                let selected_name = cmd.completion.as_ref().and_then(|c| {
-                    c.candidates.get(c.index).map(|s| s.as_str())
-                });
-                let query = crate::command::current_token(&cmd.buf.input);
-                input_modal::render_command_palette(f, chunks[0], title, &items, selected_name, &query);
-            }
         }
         _ => {}
     }

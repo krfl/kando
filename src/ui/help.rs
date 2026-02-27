@@ -7,7 +7,7 @@ use ratatui::Frame;
 use super::theme::Theme;
 use crate::input::keymap;
 
-pub fn render_help(f: &mut Frame, area: Rect) {
+pub fn render_help(f: &mut Frame, area: Rect, scroll: u16) {
     let panel_area = super::centered_rect(area, 70, 85, 60, 24);
 
     f.render_widget(Clear, panel_area);
@@ -49,10 +49,12 @@ pub fn render_help(f: &mut Frame, area: Rect) {
         lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
-        "Press Esc to close",
+        "J/K scroll  |  Esc close",
         Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
     )));
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(paragraph, inner);
 }

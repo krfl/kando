@@ -10,8 +10,8 @@ use crate::app::{AppState, Mode, NotificationLevel, TextBuffer};
 use crate::board::Board;
 
 pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board: &Board) {
-    // Full-line modes: Filter, Input, Confirm, Command — take over entire bar
-    if let Some(line) = render_full_line_mode(state, board) {
+    // Full-line modes: Filter, Input, Confirm — take over entire bar
+    if let Some(line) = render_full_line_mode(state) {
         let paragraph = Paragraph::new(line).style(Theme::status_style());
         f.render_widget(paragraph, area);
         return;
@@ -50,10 +50,10 @@ fn build_left_zone(state: &AppState) -> Vec<Span<'_>> {
         Mode::CardDetail { .. } => "DETAIL",
         Mode::Metrics { .. } => "METRICS",
         Mode::Tutorial => "TUTORIAL",
-        Mode::Help => "HELP",
+        Mode::Help { .. } => "HELP",
         Mode::Picker { .. } => "PICKER",
         // Full-line modes handled separately
-        Mode::Input { .. } | Mode::Confirm { .. } | Mode::Filter { .. } | Mode::Command { .. } => "",
+        Mode::Input { .. } | Mode::Confirm { .. } | Mode::Filter { .. } => "",
     };
 
     let mut spans = vec![
@@ -186,8 +186,8 @@ fn cursor_spans(buf: &TextBuffer) -> Vec<Span<'_>> {
     }
 }
 
-/// Render full-line modes (Filter, Input, Confirm, Command).
-fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<'a>> {
+/// Render full-line modes (Filter, Input, Confirm).
+fn render_full_line_mode<'a>(state: &'a AppState) -> Option<Line<'a>> {
     match &state.mode {
         Mode::Filter { buf } => {
             let mut spans = vec![
@@ -220,25 +220,6 @@ fn render_full_line_mode<'a>(state: &'a AppState, board: &Board) -> Option<Line<
                     .fg(Theme::FG)
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             )];
-            Some(Line::from(spans))
-        }
-        Mode::Command { cmd } => {
-            let (card_tags, card_assignees) = state.selected_card_metadata(board);
-            let mut spans = vec![
-                Span::styled(
-                    " : ",
-                    Style::default()
-                        .fg(Theme::FG)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                ),
-            ];
-            spans.extend(cursor_spans(&cmd.buf));
-            // Ghost completion text (dimmed, after cursor) — only when NOT actively cycling
-            if cmd.completion.is_none() {
-                if let Some(ghost) = crate::command::compute_ghost(&cmd.buf.input, board, &card_tags, &card_assignees, &state.cached_trash_ids) {
-                    spans.push(Span::styled(ghost, Style::default().fg(Theme::DIM)));
-                }
-            }
             Some(Line::from(spans))
         }
         _ => None,

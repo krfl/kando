@@ -15,11 +15,12 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Input { .. } => map_input(key),
         Mode::Confirm { .. } => map_confirm(key),
         Mode::Filter { .. } => map_input(key),
-        Mode::Command { .. } => map_command(key),
         Mode::Picker { .. } => map_picker(key),
         Mode::Tutorial => Action::DismissTutorial,
-        Mode::Help => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Action::Quit,
+        Mode::Help { .. } => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::ClosePanel,
+            KeyCode::Char('J') | KeyCode::Down => Action::DetailScrollDown,
+            KeyCode::Char('K') | KeyCode::Up => Action::DetailScrollUp,
             _ => Action::None,
         },
         Mode::Metrics { .. } => match key.code {
@@ -61,8 +62,12 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
         KeyCode::Char('c') => Action::EnterColumnMode,
         KeyCode::Char('u') => Action::Undo,
+        KeyCode::Char('m') => Action::ShowMetrics,
+        KeyCode::Char('r') => Action::ReloadBoard,
+        KeyCode::Char('s') => Action::StartSort,
+        KeyCode::Char('n') => Action::FindNext,
+        KeyCode::Char('N') => Action::FindPrev,
         KeyCode::Char('?') => Action::ShowHelp,
-        KeyCode::Char(':') => Action::EnterCommandMode,
         KeyCode::Tab => Action::CycleNextCard,
         KeyCode::BackTab => Action::CyclePrevCard,
         KeyCode::Esc => Action::ClearFilters,
@@ -92,11 +97,10 @@ fn map_space(key: KeyEvent) -> Action {
         KeyCode::Char('p') => Action::PickPriority,
         KeyCode::Char('m') => Action::MoveToColumn,
         KeyCode::Char('b') => Action::ToggleBlocker,
-        KeyCode::Char('s') => Action::ShowMetrics,
+        KeyCode::Char('x') => Action::ArchiveCard,
         KeyCode::Char('u') => Action::Undo,
         KeyCode::Char('/') => Action::StartFilter,
         KeyCode::Char('?') => Action::ShowHelp,
-        KeyCode::Char('r') => Action::ReloadBoard,
         KeyCode::Esc => Action::None,
         _ => Action::None,
     }
@@ -111,6 +115,7 @@ fn map_column(key: KeyEvent) -> Action {
         KeyCode::Char('r') => Action::ColRenameSelected,
         KeyCode::Char('a') => Action::ColAddBefore,
         KeyCode::Char('d') => Action::ColRemoveSelected,
+        KeyCode::Char('w') => Action::ColSetWip,
         KeyCode::Char('m') => Action::EnterColMoveMode,
         KeyCode::Esc => Action::None,
         _ => Action::None,
@@ -144,28 +149,6 @@ fn map_filter_menu(key: KeyEvent) -> Action {
 
 fn map_input(key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Enter => Action::InputConfirm,
-        KeyCode::Esc => Action::InputCancel,
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::InputHome,
-        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::InputEnd,
-        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Action::InputDeleteWord
-        }
-        KeyCode::Char(c) => Action::InputChar(c),
-        KeyCode::Backspace => Action::InputBackspace,
-        KeyCode::Left => Action::InputLeft,
-        KeyCode::Right => Action::InputRight,
-        KeyCode::Home => Action::InputHome,
-        KeyCode::End => Action::InputEnd,
-        _ => Action::None,
-    }
-}
-
-fn map_command(key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Tab => Action::InputComplete,
-        KeyCode::BackTab => Action::InputCompleteBack,
-        // Everything else same as map_input
         KeyCode::Enter => Action::InputConfirm,
         KeyCode::Esc => Action::InputCancel,
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => Action::InputHome,
@@ -222,12 +205,15 @@ pub struct BindingGroup {
 
 pub const NORMAL_BINDINGS: &[Binding] = &[
     Binding { key: "h / l", description: "Switch columns", tutorial: true },
-    Binding { key: "j / k", description: "Move between cards", tutorial: true },
     Binding { key: "H / L", description: "Move card left/right", tutorial: true },
+    Binding { key: "j / k", description: "Move between cards", tutorial: true },
+    Binding { key: "n / N", description: "Next/prev match", tutorial: false },
     Binding { key: "Enter", description: "Open card detail", tutorial: true },
-    Binding { key: "u", description: "Undo last delete", tutorial: true },
     Binding { key: "/", description: "Search cards", tutorial: false },
-    Binding { key: ":", description: "Command mode", tutorial: false },
+    Binding { key: "s", description: "Sort column", tutorial: false },
+    Binding { key: "m", description: "Board metrics", tutorial: false },
+    Binding { key: "r", description: "Reload board", tutorial: false },
+    Binding { key: "u", description: "Undo last delete", tutorial: true },
     Binding { key: "?", description: "Help", tutorial: true },
     Binding { key: "Esc", description: "Clear filters", tutorial: false },
     Binding { key: "q", description: "Quit", tutorial: false },
@@ -242,9 +228,8 @@ pub const SPACE_BINDINGS: &[Binding] = &[
     Binding { key: "p", description: "Set priority", tutorial: true },
     Binding { key: "m", description: "Move to column", tutorial: true },
     Binding { key: "b", description: "Toggle blocker", tutorial: false },
-    Binding { key: "s", description: "Board metrics", tutorial: true },
+    Binding { key: "x", description: "Archive card", tutorial: false },
     Binding { key: "u", description: "Undo last delete", tutorial: false },
-    Binding { key: "r", description: "Reload board", tutorial: false },
     Binding { key: "/", description: "Search all", tutorial: false },
     Binding { key: "?", description: "Help", tutorial: false },
 ];
@@ -265,12 +250,13 @@ pub const GOTO_BINDINGS: &[Binding] = &[
 ];
 
 pub const COLUMN_BINDINGS: &[Binding] = &[
-    Binding { key: "r", description: "Rename focused column",      tutorial: false },
     Binding { key: "a", description: "Add column before focused",  tutorial: false },
-    Binding { key: "m", description: "Move focused column",        tutorial: false },
-    Binding { key: "h", description: "Toggle column hidden",        tutorial: false },
-    Binding { key: "s", description: "Toggle showing hidden cols", tutorial: false },
     Binding { key: "d", description: "Delete focused column",      tutorial: false },
+    Binding { key: "h", description: "Toggle column hidden",       tutorial: false },
+    Binding { key: "m", description: "Move focused column",        tutorial: false },
+    Binding { key: "r", description: "Rename focused column",      tutorial: false },
+    Binding { key: "s", description: "Toggle showing hidden cols", tutorial: false },
+    Binding { key: "w", description: "Set WIP limit",              tutorial: false },
 ];
 
 pub const COL_MOVE_BINDINGS: &[Binding] = &[
@@ -305,6 +291,7 @@ pub const HELP_GROUPS: &[BindingGroup] = &[
     BindingGroup { name: "Normal Mode", bindings: NORMAL_BINDINGS },
     BindingGroup { name: "Commands (Space)", bindings: SPACE_BINDINGS },
     BindingGroup { name: "Goto (g)", bindings: GOTO_BINDINGS },
+    BindingGroup { name: "Filter (f)", bindings: FILTER_BINDINGS },
     BindingGroup { name: "Column (c)", bindings: COLUMN_BINDINGS },
     BindingGroup { name: "Column Move (cm)", bindings: COL_MOVE_BINDINGS },
     BindingGroup { name: "Card Detail", bindings: DETAIL_BINDINGS },
@@ -339,9 +326,15 @@ mod tests {
     }
 
     #[test]
-    fn space_s_maps_to_show_metrics() {
-        let action = map_key(key(KeyCode::Char('s')), &Mode::Space);
+    fn normal_m_maps_to_show_metrics() {
+        let action = map_key(key(KeyCode::Char('m')), &Mode::Normal);
         assert_eq!(action, Action::ShowMetrics);
+    }
+
+    #[test]
+    fn normal_r_maps_to_reload_board() {
+        let action = map_key(key(KeyCode::Char('r')), &Mode::Normal);
+        assert_eq!(action, Action::ReloadBoard);
     }
 
     #[test]
@@ -371,6 +364,62 @@ mod tests {
     #[test]
     fn metrics_mode_other_key_is_noop() {
         let action = map_key(key(KeyCode::Char('x')), &Mode::Metrics { scroll: 0 });
+        assert_eq!(action, Action::None);
+    }
+
+    // ── Help mode bindings ──
+
+    #[test]
+    fn help_mode_esc_closes() {
+        let action = map_key(key(KeyCode::Esc), &Mode::Help { scroll: 5 });
+        assert_eq!(action, Action::ClosePanel);
+    }
+
+    #[test]
+    fn help_mode_q_closes() {
+        let action = map_key(key(KeyCode::Char('q')), &Mode::Help { scroll: 0 });
+        assert_eq!(action, Action::ClosePanel);
+    }
+
+    #[test]
+    fn help_mode_shift_j_scrolls_down() {
+        let action = map_key(key(KeyCode::Char('J')), &Mode::Help { scroll: 0 });
+        assert_eq!(action, Action::DetailScrollDown);
+    }
+
+    #[test]
+    fn help_mode_shift_k_scrolls_up() {
+        let action = map_key(key(KeyCode::Char('K')), &Mode::Help { scroll: 3 });
+        assert_eq!(action, Action::DetailScrollUp);
+    }
+
+    #[test]
+    fn help_mode_down_arrow_scrolls_down() {
+        let action = map_key(key(KeyCode::Down), &Mode::Help { scroll: 0 });
+        assert_eq!(action, Action::DetailScrollDown);
+    }
+
+    #[test]
+    fn help_mode_up_arrow_scrolls_up() {
+        let action = map_key(key(KeyCode::Up), &Mode::Help { scroll: 3 });
+        assert_eq!(action, Action::DetailScrollUp);
+    }
+
+    #[test]
+    fn help_mode_other_key_is_noop() {
+        let action = map_key(key(KeyCode::Char('x')), &Mode::Help { scroll: 0 });
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn help_mode_lowercase_j_is_noop() {
+        let action = map_key(key(KeyCode::Char('j')), &Mode::Help { scroll: 0 });
+        assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn help_mode_lowercase_k_is_noop() {
+        let action = map_key(key(KeyCode::Char('k')), &Mode::Help { scroll: 0 });
         assert_eq!(action, Action::None);
     }
 
@@ -425,11 +474,6 @@ mod tests {
     #[test]
     fn normal_slash_starts_filter() {
         assert_eq!(map_key(key(KeyCode::Char('/')), &Mode::Normal), Action::StartFilter);
-    }
-
-    #[test]
-    fn normal_colon_enters_command() {
-        assert_eq!(map_key(key(KeyCode::Char(':')), &Mode::Normal), Action::EnterCommandMode);
     }
 
     #[test]
@@ -547,21 +591,6 @@ mod tests {
         };
         assert_eq!(map_key(key(KeyCode::Left), &mode), Action::InputLeft);
         assert_eq!(map_key(key(KeyCode::Right), &mode), Action::InputRight);
-    }
-
-    // ── Command mode bindings ──
-
-    #[test]
-    fn command_tab_completes() {
-        let mode = Mode::Command { cmd: crate::command::CommandState::new() };
-        assert_eq!(map_key(key(KeyCode::Tab), &mode), Action::InputComplete);
-        assert_eq!(map_key(key(KeyCode::BackTab), &mode), Action::InputCompleteBack);
-    }
-
-    #[test]
-    fn command_enter_confirms() {
-        let mode = Mode::Command { cmd: crate::command::CommandState::new() };
-        assert_eq!(map_key(key(KeyCode::Enter), &mode), Action::InputConfirm);
     }
 
     // ── Goto mode bindings ──

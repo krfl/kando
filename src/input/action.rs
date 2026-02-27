@@ -28,6 +28,7 @@ pub enum Action {
     PickPriority,
     MoveToColumn,
     ToggleBlocker,
+    ArchiveCard,
     OpenCardDetail,
     ClosePanel,
     DetailScrollUp,
@@ -41,6 +42,7 @@ pub enum Action {
     ColRenameSelected,
     ColAddBefore,
     ColRemoveSelected,
+    ColSetWip,
     EnterColMoveMode,
     ColMoveLeft,
     ColMoveRight,
@@ -48,12 +50,17 @@ pub enum Action {
     ColMoveLast,
     ColMoveToPosition(usize),
 
+    // Sort
+    StartSort,
+
     // Search & filter
     StartFilter,
     StartTagFilter,
     StartAssigneeFilter,
     StartStalenessFilter,
     EnterFilterMode,
+    FindNext,
+    FindPrev,
     ClearFilters,
     // Undo
     Undo,
@@ -69,8 +76,6 @@ pub enum Action {
     EnterGotoMode,
     EnterSpaceMode,
     EnterColumnMode,
-    EnterCommandMode,
-
     // Input modal
     InputConfirm,
     InputCancel,
@@ -81,8 +86,6 @@ pub enum Action {
     InputHome,
     InputEnd,
     InputDeleteWord,
-    InputComplete,
-    InputCompleteBack,
 
     // Confirmation
     Confirm,

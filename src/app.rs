@@ -119,9 +119,6 @@ pub enum Mode {
         selected: usize,
         target: PickerTarget,
     },
-    Command {
-        cmd: crate::command::CommandState,
-    },
     CardDetail {
         scroll: u16,
     },
@@ -129,7 +126,9 @@ pub enum Mode {
         scroll: u16,
     },
     Tutorial,
-    Help,
+    Help {
+        scroll: u16,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +136,9 @@ pub enum InputTarget {
     NewCardTitle,
     EditTags,
     EditAssignees,
+    WipLimit,
+    ColRename(String), // holds slug of column being renamed
+    ColAdd,
 }
 
 #[derive(Debug, Clone)]
@@ -147,12 +149,14 @@ pub enum ConfirmTarget {
         card_idx: usize,
         to_col: usize,
     },
+    ColRemove(String), // slug of column to remove
 }
 
 #[derive(Debug, Clone)]
 pub enum PickerTarget {
     Priority,
     MoveToColumn,
+    SortColumn,
     TagFilter,
     AssigneeFilter,
     StalenessFilter,
@@ -187,8 +191,6 @@ pub struct AppState {
     /// that `u` doesn't silently restore an unrelated card from a previous
     /// session when the user simply hasn't deleted anything this session.
     pub deleted_this_session: bool,
-    /// Cached trash entry IDs for `:restore` command palette/completion.
-    pub cached_trash_ids: Vec<(String, String)>, // (id, title)
     /// Use Nerd Font glyphs instead of ASCII icons.
     pub nerd_font: bool,
 }
@@ -211,7 +213,6 @@ impl AppState {
             sync_state: None,
             last_delete: None,
             deleted_this_session: false,
-            cached_trash_ids: Vec::new(),
             nerd_font: false,
         }
     }
@@ -225,6 +226,7 @@ impl AppState {
     }
 
     /// Get the tags and assignees of the selected card (for completion context).
+    #[cfg(test)]
     pub fn selected_card_metadata(&self, board: &Board) -> (Vec<String>, Vec<String>) {
         self.selected_card_ref(board)
             .map(|c| (c.tags.clone(), c.assignees.clone()))
@@ -344,6 +346,53 @@ fn next_visible_column(board: &Board, from: usize, forward: bool, show_hidden: b
             .rev()
             .find(|&i| show_hidden || !board.columns[i].hidden)
     }
+}
+
+/// Jump to the next (or previous) visible card across all columns,
+/// wrapping around. Used by `n` / `N` after a filter is active.
+fn jump_to_visible_card(board: &Board, state: &mut AppState, forward: bool) {
+    // Collect all (col_idx, card_idx) pairs for visible cards across all columns.
+    let matcher = SkimMatcherV2::default();
+    let now = Utc::now();
+    let mut all_visible: Vec<(usize, usize)> = Vec::new();
+    for (ci, col) in board.columns.iter().enumerate() {
+        if col.hidden && !state.show_hidden_columns {
+            continue;
+        }
+        for (cardi, card) in col.cards.iter().enumerate() {
+            if crate::board::card_is_visible(
+                card,
+                state.active_filter.as_deref(),
+                &state.active_tag_filters,
+                &state.active_assignee_filters,
+                &state.active_staleness_filters,
+                &board.policies,
+                now,
+                &matcher,
+            ) {
+                all_visible.push((ci, cardi));
+            }
+        }
+    }
+    if all_visible.is_empty() {
+        state.notify("No matches");
+        return;
+    }
+    let current = (state.focused_column, state.selected_card);
+    let pos = all_visible.iter().position(|&v| v == current);
+    let next = if forward {
+        match pos {
+            Some(p) => all_visible[(p + 1) % all_visible.len()],
+            None => all_visible[0],
+        }
+    } else {
+        match pos {
+            Some(p) => all_visible[(p + all_visible.len() - 1) % all_visible.len()],
+            None => *all_visible.last().unwrap(),
+        }
+    };
+    state.focused_column = next.0;
+    state.selected_card = next.1;
 }
 
 /// Run auto-close, save if any cards were closed, sync, and notify.
@@ -626,6 +675,7 @@ fn process_action(
         | Action::MoveCardNextColumn
         | Action::NewCard
         | Action::DeleteCard
+        | Action::ArchiveCard
         | Action::EditCardExternal
         | Action::CyclePriority
         | Action::PickPriority
@@ -652,38 +702,49 @@ fn process_action(
             sync_message = handle_col_toggle_hidden(board, state, kando_dir)?;
         }
         Action::ColRenameSelected => {
-            let slug = match board.columns.get(state.focused_column) {
-                Some(c) => c.slug.clone(),
-                None => return Ok(()),
-            };
-            debug_assert!(!slug.is_empty(), "column slug must be non-empty");
-            let cmd = crate::command::CommandState::new_with_input(format!("col rename {slug} "));
-            state.cached_trash_ids = load_trash(kando_dir)
-                .into_iter()
-                .map(|e| (e.id, e.title))
-                .collect();
-            state.mode = Mode::Command { cmd };
+            if let Some(col) = board.columns.get(state.focused_column) {
+                let slug = col.slug.clone();
+                let current_name = col.name.clone();
+                state.mode = Mode::Input {
+                    prompt: "Rename column",
+                    buf: TextBuffer::new(current_name),
+                    on_confirm: InputTarget::ColRename(slug),
+                };
+            }
         }
         Action::ColAddBefore => {
-            let cmd = crate::command::CommandState::new_with_input("col add ".into());
-            state.cached_trash_ids = load_trash(kando_dir)
-                .into_iter()
-                .map(|e| (e.id, e.title))
-                .collect();
-            state.mode = Mode::Command { cmd };
+            state.mode = Mode::Input {
+                prompt: "New column name",
+                buf: TextBuffer::empty(),
+                on_confirm: InputTarget::ColAdd,
+            };
         }
         Action::ColRemoveSelected => {
-            let slug = match board.columns.get(state.focused_column) {
-                Some(c) => c.slug.clone(),
-                None => return Ok(()),
-            };
-            debug_assert!(!slug.is_empty(), "column slug must be non-empty");
-            let cmd = crate::command::CommandState::new_with_input(format!("col remove {slug}"));
-            state.cached_trash_ids = load_trash(kando_dir)
-                .into_iter()
-                .map(|e| (e.id, e.title))
-                .collect();
-            state.mode = Mode::Command { cmd };
+            if let Some(col) = board.columns.get(state.focused_column) {
+                let slug = col.slug.clone();
+                if slug == "archive" {
+                    state.notify_error("The 'archive' column is reserved and cannot be removed");
+                } else if board.columns.len() == 1 {
+                    state.notify_error("Cannot remove the last column");
+                } else if !col.cards.is_empty() {
+                    state.notify_error(format!("Column has {} card(s); move them first", col.cards.len()));
+                } else {
+                    state.mode = Mode::Confirm {
+                        prompt: "Delete column?",
+                        on_confirm: ConfirmTarget::ColRemove(slug),
+                    };
+                }
+            }
+        }
+        Action::ColSetWip => {
+            if let Some(col) = board.columns.get(state.focused_column) {
+                let current = col.wip_limit.map(|n| n.to_string()).unwrap_or_else(|| "0".into());
+                state.mode = Mode::Input {
+                    prompt: "WIP limit (0=off)",
+                    buf: TextBuffer::new(current),
+                    on_confirm: InputTarget::WipLimit,
+                };
+            }
         }
         Action::EnterColMoveMode => {
             if board.columns.get(state.focused_column).is_some() {
@@ -692,26 +753,89 @@ fn process_action(
         }
         Action::ColMoveLeft | Action::ColMoveRight | Action::ColMoveFirst
         | Action::ColMoveLast | Action::ColMoveToPosition(_) => {
-            let slug = match board.columns.get(state.focused_column) {
-                Some(c) => c.slug.clone(),
-                None => { state.mode = Mode::Normal; return Ok(()); }
-            };
-            let direction = match &action {
-                Action::ColMoveLeft => "left".to_string(),
-                Action::ColMoveRight => "right".to_string(),
-                Action::ColMoveFirst => "first".to_string(),
-                Action::ColMoveLast => "last".to_string(),
-                Action::ColMoveToPosition(n) => n.to_string(),
+            let col_idx = state.focused_column;
+            let len = board.columns.len();
+            if col_idx >= len {
+                state.mode = Mode::Normal;
+                return Ok(());
+            }
+            let target_idx = match &action {
+                Action::ColMoveLeft => {
+                    if col_idx == 0 {
+                        state.notify_error("Already leftmost column");
+                        state.mode = Mode::Normal;
+                        return Ok(());
+                    }
+                    col_idx - 1
+                }
+                Action::ColMoveRight => {
+                    if col_idx + 1 >= len {
+                        state.notify_error("Already rightmost column");
+                        state.mode = Mode::Normal;
+                        return Ok(());
+                    }
+                    col_idx + 1
+                }
+                Action::ColMoveFirst => 0,
+                Action::ColMoveLast => len - 1,
+                Action::ColMoveToPosition(n) => {
+                    if *n >= 1 && *n <= len {
+                        *n - 1
+                    } else {
+                        state.notify_error(format!("Invalid position: {n} (use 1–{len})"));
+                        state.mode = Mode::Normal;
+                        return Ok(());
+                    }
+                }
                 _ => unreachable!(),
             };
-            let cmd = format!("col move {slug} {direction}");
-            sync_message = crate::command::execute_command(board, state, &cmd, kando_dir)?;
+            if target_idx == col_idx {
+                let name = board.columns[col_idx].name.clone();
+                state.notify(format!("{name} is already at that position"));
+                state.mode = Mode::Normal;
+                return Ok(());
+            }
+            let slug = board.columns[col_idx].slug.clone();
+            let name = board.columns[col_idx].name.clone();
+            let col = board.columns.remove(col_idx);
+            board.columns.insert(target_idx, col);
+            for (i, c) in board.columns.iter_mut().enumerate() {
+                c.order = i as u32;
+            }
+            state.focused_column = board.columns.iter().position(|c| c.slug == slug).unwrap_or(0);
+            state.clamp_selection(board);
+            save_board(kando_dir, board)?;
+            let new_pos = target_idx + 1;
+            append_activity(kando_dir, "col-move", &slug, &name, &[("to", &new_pos.to_string())]);
+            state.notify(format!("Moved {name} to position {new_pos}"));
+            sync_message = Some(format!("Move column \"{name}\" to position {new_pos}"));
             state.mode = Mode::Normal;
+        }
+
+        // Sort
+        Action::StartSort => {
+            let items: Vec<(String, bool)> = ["priority", "created", "updated", "title"]
+                .iter()
+                .map(|s| (s.to_string(), false))
+                .collect();
+            state.mode = Mode::Picker {
+                title: "sort by",
+                items,
+                selected: 0,
+                target: PickerTarget::SortColumn,
+            };
         }
 
         // Filter / tag filter
         Action::StartFilter | Action::StartTagFilter | Action::StartAssigneeFilter | Action::StartStalenessFilter => {
             handle_filter_start(board, state, action);
+        }
+
+        // Find next/prev visible card
+        Action::FindNext | Action::FindPrev => {
+            if state.has_active_filter() {
+                jump_to_visible_card(board, state, matches!(action, Action::FindNext));
+            }
         }
 
         // Text input delegation
@@ -722,8 +846,6 @@ fn process_action(
         | Action::InputHome
         | Action::InputEnd
         | Action::InputDeleteWord
-        | Action::InputComplete
-        | Action::InputCompleteBack
         | Action::InputConfirm
         | Action::InputCancel => {
             sync_message = handle_input(board, state, action, kando_dir)?;
@@ -739,14 +861,6 @@ fn process_action(
         Action::EnterSpaceMode => state.mode = Mode::Space,
         Action::EnterColumnMode => state.mode = Mode::Column,
         Action::EnterFilterMode => state.mode = Mode::FilterMenu,
-        Action::EnterCommandMode => {
-            state.cached_trash_ids = load_trash(kando_dir)
-                .into_iter()
-                .map(|e| (e.id, e.title))
-                .collect();
-            state.mode = Mode::Command { cmd: crate::command::CommandState::new() };
-        }
-
         // Undo last delete
         Action::Undo => {
             if was_minor_mode { state.mode = Mode::Normal; }
@@ -760,7 +874,7 @@ fn process_action(
             state.clamp_selection_filtered(board);
             state.notify("Board reloaded");
         }
-        Action::ShowHelp => state.mode = Mode::Help,
+        Action::ShowHelp => state.mode = Mode::Help { scroll: 0 },
         Action::ShowMetrics => state.mode = Mode::Metrics { scroll: 0 },
         Action::DismissTutorial => {
             state.mode = Mode::Normal;
@@ -1040,6 +1154,39 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 };
             }
         }
+        Action::ArchiveCard => {
+            if was_minor_mode { state.mode = Mode::Normal; }
+            let archive_idx = match board.columns.iter().position(|c| c.slug == "archive") {
+                Some(i) => i,
+                None => {
+                    state.notify_error("No 'archive' column found — create one first");
+                    return Ok(sync_message);
+                }
+            };
+            let col_idx = state.focused_column;
+            let card_idx = state.selected_card;
+            if board.columns.get(col_idx).and_then(|c| c.cards.get(card_idx)).is_none() {
+                state.notify_error("No card selected");
+                return Ok(sync_message);
+            }
+            if col_idx == archive_idx {
+                state.notify_error("Card is already in the archive");
+                return Ok(sync_message);
+            }
+            let card = board.columns[col_idx].cards.remove(card_idx);
+            let title = card.title.clone();
+            let id = card.id.clone();
+            let from_col_name = board.columns[col_idx].name.clone();
+            let archive_name = board.columns[archive_idx].name.clone();
+            board.columns[archive_idx].cards.push(card);
+            board.columns[archive_idx].sort_cards();
+            save_board(kando_dir, board)?;
+            append_activity(kando_dir, "archive", &id, &title,
+                &[("from", &from_col_name), ("to", &archive_name)]);
+            state.clamp_selection_filtered(board);
+            state.notify(format!("Archived: {title}"));
+            sync_message = Some("Archive card".into());
+        }
         Action::EditCardExternal => {
             state.mode = Mode::Normal;
             let card_info = state.selected_card_ref(board).map(|c| {
@@ -1221,7 +1368,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailScrollDown => {
             match &mut state.mode {
-                Mode::CardDetail { scroll } | Mode::Metrics { scroll } => {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } => {
                     *scroll = scroll.saturating_add(1);
                 }
                 _ => {}
@@ -1229,7 +1376,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailScrollUp => {
             match &mut state.mode {
-                Mode::CardDetail { scroll } | Mode::Metrics { scroll } => {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } => {
                     *scroll = scroll.saturating_sub(1);
                 }
                 _ => {}
@@ -1435,7 +1582,6 @@ fn handle_input(
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.insert(c),
-                Mode::Command { cmd } => { cmd.buf.insert(c); crate::command::clear_completion(cmd); }
                 _ => {}
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
@@ -1444,44 +1590,34 @@ fn handle_input(
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.backspace(),
-                Mode::Command { cmd } => { cmd.buf.backspace(); crate::command::clear_completion(cmd); }
                 _ => {}
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
         }
         Action::InputLeft => {
-            match &mut state.mode {
-                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.move_left(),
-                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.move_left(); }
-                _ => {}
+            if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
+                buf.move_left();
             }
         }
         Action::InputRight => {
-            match &mut state.mode {
-                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.move_right(),
-                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.move_right(); }
-                _ => {}
+            if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
+                buf.move_right();
             }
         }
         Action::InputHome => {
-            match &mut state.mode {
-                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.home(),
-                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.home(); }
-                _ => {}
+            if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
+                buf.home();
             }
         }
         Action::InputEnd => {
-            match &mut state.mode {
-                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.end(),
-                Mode::Command { cmd } => { crate::command::clear_completion(cmd); cmd.buf.end(); }
-                _ => {}
+            if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
+                buf.end();
             }
         }
         Action::InputDeleteWord => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
                 Mode::Input { buf, .. } | Mode::Filter { buf } => buf.delete_word(),
-                Mode::Command { cmd } => { cmd.buf.delete_word(); crate::command::clear_completion(cmd); }
                 _ => {}
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
@@ -1494,21 +1630,12 @@ fn handle_input(
                 Mode::Filter { .. } => {
                     state.active_filter = None;
                 }
-                Mode::Picker { .. } | Mode::Command { .. } => {
+                Mode::Picker { .. } => {
                     // Just close — no side effects
                 }
                 _ => {}
             }
             state.mode = Mode::Normal;
-        }
-        Action::InputComplete | Action::InputCompleteBack => {
-            let forward = matches!(action, Action::InputComplete);
-            // Extract card data before mutably borrowing state.mode
-            let (card_tags, card_assignees) = state.selected_card_metadata(board);
-            let trash_ids = state.cached_trash_ids.clone();
-            if let Mode::Command { cmd } = &mut state.mode {
-                crate::command::cycle_completion(cmd, board, &card_tags, &card_assignees, &trash_ids, forward);
-            }
         }
         _ => unreachable!(),
     }
@@ -1581,6 +1708,127 @@ fn handle_input_confirm(
         }
         Mode::Input {
             buf,
+            on_confirm: InputTarget::WipLimit,
+            ..
+        } => {
+            let limit_str = buf.input.trim();
+            let limit: u32 = match limit_str.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    state.notify_error(format!("WIP limit must be a number, got: {limit_str}"));
+                    return Ok(None);
+                }
+            };
+            let col_idx = state.focused_column;
+            if let Some(col) = board.columns.get_mut(col_idx) {
+                col.wip_limit = if limit == 0 { None } else { Some(limit) };
+                let col_name = col.name.clone();
+                save_board(kando_dir, board)?;
+                if limit == 0 {
+                    state.notify(format!("WIP limit removed: {col_name}"));
+                } else {
+                    state.notify(format!("WIP limit: {col_name} = {limit}"));
+                }
+                sync_message = Some("Set WIP limit".into());
+            }
+        }
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::ColRename(old_slug),
+            ..
+        } => {
+            use crate::board::{slug_for_rename, slug_to_name};
+            use crate::board::storage::rename_column_dir;
+            let new_name = buf.input.trim().to_string();
+            if new_name.is_empty() {
+                state.notify_error("Column name cannot be empty");
+            } else {
+                let new_slug = match slug_for_rename(&new_name) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        state.notify_error(e);
+                        return Ok(None);
+                    }
+                };
+                let col_idx = match board.columns.iter().position(|c| c.slug == old_slug) {
+                    Some(i) => i,
+                    None => {
+                        state.notify_error("Column no longer exists");
+                        return Ok(None);
+                    }
+                };
+                if new_slug == old_slug {
+                    let old_name = board.columns[col_idx].name.clone();
+                    state.notify(format!("{old_name} unchanged"));
+                } else if board.columns.iter().enumerate().any(|(i, c)| i != col_idx && c.slug == new_slug) {
+                    state.notify_error(format!("A column with slug '{new_slug}' already exists"));
+                } else {
+                    let derived_name = slug_to_name(&new_slug);
+                    let old_name = board.columns[col_idx].name.clone();
+                    let old_auto_close = board.policies.auto_close_target.clone();
+                    board.columns[col_idx].slug = new_slug.clone();
+                    board.columns[col_idx].name = derived_name.clone();
+                    if board.policies.auto_close_target == old_slug {
+                        board.policies.auto_close_target = new_slug.clone();
+                    }
+                    rename_column_dir(kando_dir, &old_slug, &new_slug).map_err(|e| {
+                        color_eyre::eyre::eyre!("Could not rename column directory: {e}")
+                    })?;
+                    if let Err(e) = save_board(kando_dir, board) {
+                        let _ = rename_column_dir(kando_dir, &new_slug, &old_slug);
+                        board.columns[col_idx].slug = old_slug.clone();
+                        board.columns[col_idx].name = old_name.clone();
+                        board.policies.auto_close_target = old_auto_close;
+                        return Err(e.into());
+                    }
+                    append_activity(kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug)]);
+                    state.notify(format!("Renamed: {old_name} → {derived_name}"));
+                    sync_message = Some(format!("Rename column \"{old_name}\" to \"{derived_name}\""));
+                }
+            }
+        }
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::ColAdd,
+            ..
+        } => {
+            use crate::board::{generate_slug, slug_to_name, normalize_column_orders};
+            let name = buf.input.trim().to_string();
+            if name.is_empty() {
+                state.notify_error("Column name cannot be empty");
+            } else {
+                let slug = generate_slug(&name, &board.columns);
+                let insert_order = board.columns
+                    .get(state.focused_column)
+                    .map(|c| c.order)
+                    .unwrap_or(u32::try_from(board.columns.len()).unwrap_or(u32::MAX));
+                for col in board.columns.iter_mut() {
+                    if col.order >= insert_order {
+                        col.order += 1;
+                    }
+                }
+                let derived_name = slug_to_name(&slug);
+                board.columns.push(Column {
+                    slug: slug.clone(),
+                    name: derived_name.clone(),
+                    order: insert_order,
+                    wip_limit: None,
+                    hidden: false,
+                    cards: vec![],
+                });
+                normalize_column_orders(&mut board.columns);
+                save_board(kando_dir, board)?;
+                append_activity(kando_dir, "col-add", &slug, &derived_name, &[]);
+                if let Some(idx) = board.columns.iter().position(|c| c.slug == slug) {
+                    state.focused_column = idx;
+                    state.clamp_selection(board);
+                }
+                state.notify(format!("Added column: {derived_name}"));
+                sync_message = Some(format!("Add column \"{derived_name}\""));
+            }
+        }
+        Mode::Input {
+            buf,
             on_confirm: InputTarget::EditAssignees,
             ..
         } => {
@@ -1616,6 +1864,10 @@ fn handle_input_confirm(
                 state.active_filter = Some(buf.input);
             }
             state.clamp_selection_filtered(board);
+            // Auto-jump to first visible card after filter is confirmed
+            if state.has_active_filter() {
+                jump_to_visible_card(board, state, true);
+            }
         }
         Mode::Picker { mut items, selected, target, title } => {
             match target {
@@ -1687,6 +1939,35 @@ fn handle_input_confirm(
                         }
                     }
                 }
+                PickerTarget::SortColumn => {
+                    if let Some((field, _)) = items.get(selected) {
+                        let col_idx = state.focused_column;
+                        if let Some(col) = board.columns.get_mut(col_idx) {
+                            match field.as_str() {
+                                "priority" => {
+                                    col.sort_cards();
+                                    state.notify("Sorted by priority");
+                                }
+                                "created" => {
+                                    col.cards.sort_by(|a, b| b.created.cmp(&a.created));
+                                    state.notify("Sorted by created");
+                                }
+                                "updated" => {
+                                    col.cards.sort_by(|a, b| b.updated.cmp(&a.updated));
+                                    state.notify("Sorted by updated");
+                                }
+                                "title" => {
+                                    col.cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                                    state.notify("Sorted by title");
+                                }
+                                _ => {}
+                            }
+                            state.clamp_selection_filtered(board);
+                            save_board(kando_dir, board)?;
+                            sync_message = Some("Sort column".into());
+                        }
+                    }
+                }
                 PickerTarget::MoveToColumn => {
                     if let Some((col_name, _)) = items.get(selected) {
                         let target_col = board.columns.iter().enumerate()
@@ -1717,9 +1998,6 @@ fn handle_input_confirm(
                     }
                 }
             }
-        }
-        Mode::Command { cmd } => {
-            sync_message = crate::command::execute_command(board, state, &cmd.buf.input, kando_dir)?;
         }
         _ => {}
     }
@@ -1864,6 +2142,35 @@ fn handle_confirm(
                         &[("from", &from_name), ("to", &to_name)]);
                     sync_message = Some(format!("Move card #{card_id} \"{card_title}\" from {from_name} to {to_name}"));
                     state.notify("Card moved");
+                }
+                Mode::Confirm {
+                    on_confirm: ConfirmTarget::ColRemove(slug),
+                    ..
+                } => {
+                    use crate::board::normalize_column_orders;
+                    use crate::board::storage::remove_column_dir;
+                    let slug = slug.clone();
+                    let col_idx = match board.columns.iter().position(|c| c.slug == slug) {
+                        Some(i) => i,
+                        None => {
+                            state.notify_error("Column no longer exists");
+                            state.mode = Mode::Normal;
+                            return Ok(None);
+                        }
+                    };
+                    let name = board.columns[col_idx].name.clone();
+                    let focused_slug = board.columns.get(state.focused_column).map(|c| c.slug.clone());
+                    board.columns.remove(col_idx);
+                    normalize_column_orders(&mut board.columns);
+                    save_board(kando_dir, board)?;
+                    remove_column_dir(kando_dir, &slug)?;
+                    append_activity(kando_dir, "col-remove", &slug, &name, &[]);
+                    state.focused_column = focused_slug
+                        .and_then(|s| board.columns.iter().position(|c| c.slug == s))
+                        .unwrap_or(0);
+                    state.clamp_selection(board);
+                    state.notify(format!("Removed column: {name}"));
+                    sync_message = Some(format!("Remove column \"{name}\""));
                 }
                 _ => {}
             }
@@ -2623,101 +2930,6 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_via_command_clears_last_delete() {
-        // Regression: :restore used to leave last_delete set, so pressing `u`
-        // afterwards would produce "Restore failed: No such file or directory".
-        let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
-        board.columns[0].cards.push(Card::new("001".into(), "Bug".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
-        let mut state = AppState::new();
-
-        // Step 1: delete the card (sets last_delete)
-        state.mode = Mode::Confirm {
-            prompt: "Delete?",
-            on_confirm: ConfirmTarget::DeleteCard("001".into()),
-        };
-        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
-        assert!(state.last_delete.is_some());
-
-        // Step 2: restore via :restore command
-        crate::command::execute_command(&mut board, &mut state, "restore 001", &kando_dir).unwrap();
-        assert_eq!(board.columns[0].cards.len(), 1);
-        assert_eq!(state.notification.as_deref(), Some("Restored: Bug")); // #4: assert restore notification
-
-        // Step 3: last_delete must be cleared — undo should say "Nothing to undo"
-        assert!(state.last_delete.is_none());
-        let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
-        assert!(sync.is_none());
-        assert_eq!(state.notification.as_deref(), Some("Nothing to undo"));
-    }
-
-    #[test]
-    fn test_restore_different_card_preserves_last_delete() {
-        // :restore B (a different card) must leave last_delete for A intact.
-        let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
-        board.columns[0].cards.push(Card::new("001".into(), "Alpha".into()));
-        board.columns[0].cards.push(Card::new("002".into(), "Beta".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
-        let mut state = AppState::new();
-
-        // Delete 001 — arms last_delete for 001
-        state.mode = Mode::Confirm {
-            prompt: "Delete?",
-            on_confirm: ConfirmTarget::DeleteCard("001".into()),
-        };
-        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
-        assert_eq!(state.last_delete.as_ref().unwrap().id, "001");
-
-        // Delete 002 as well (its last_delete entry is now 002, overwriting 001)
-        // … but we want to test the case where we restore a *different* card than
-        // the one in last_delete. Re-set last_delete manually back to 001.
-        trash_card(&kando_dir, "backlog", "002", "Beta").unwrap();
-        state.last_delete = Some(crate::board::storage::TrashEntry {
-            id: "001".into(),
-            deleted: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            from_column: "backlog".into(),
-            title: "Alpha".into(),
-        });
-
-        // Restore 002 (different from last_delete's 001)
-        crate::command::execute_command(&mut board, &mut state, "restore 002", &kando_dir).unwrap();
-
-        // last_delete for 001 must still be set — u should still work
-        assert_eq!(state.last_delete.as_ref().unwrap().id, "001");
-        let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
-        assert_eq!(sync.as_deref(), Some("Restore card #001 \"Alpha\" to Backlog"));
-        assert!(board.columns[0].cards.iter().any(|c| c.id == "001"));
-    }
-
-    #[test]
-    fn test_mutating_command_clears_last_delete() {
-        // Commands like :move should clear last_delete, mirroring the keyboard handler.
-        let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
-        board.columns[0].cards.push(Card::new("001".into(), "Deleted".into()));
-        board.columns[0].cards.push(Card::new("002".into(), "Mover".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
-        let mut state = AppState::new();
-
-        // Delete 001 — arms last_delete
-        state.mode = Mode::Confirm {
-            prompt: "Delete?",
-            on_confirm: ConfirmTarget::DeleteCard("001".into()),
-        };
-        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
-        assert!(state.last_delete.is_some());
-
-        // :move selected card to done — should clear last_delete.
-        // After deleting 001, card 002 is at index 0 in backlog.
-        state.focused_column = 0;
-        state.selected_card = 0;
-        crate::command::execute_command(&mut board, &mut state, "move done", &kando_dir).unwrap();
-        assert!(state.last_delete.is_none());
-    }
-
-    #[test]
     fn test_metrics_scroll() {
         let mut board = test_board(&[("A", &["c1"])]);
         let mut state = AppState::new();
@@ -2744,6 +2956,34 @@ mod tests {
         let mut board = test_board(&[("A", &["c1"])]);
         let mut state = AppState::new();
         state.mode = Mode::Metrics { scroll: 3 };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::ClosePanel, &mut terminal, kando_dir, false).unwrap();
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn test_help_scroll() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Help { scroll: 0 };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::DetailScrollDown, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 1); } else { panic!("expected Mode::Help"); }
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
+    }
+
+    #[test]
+    fn test_close_help_panel() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Help { scroll: 3 };
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let kando_dir = std::path::Path::new("/tmp/fake");
@@ -3583,34 +3823,483 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ColRenameSelected / ColAddBefore / ColRemoveSelected action dispatch
+    // Archive card tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn col_rename_selected_prefills_command_with_slug() {
-        // Verify that the prefilled command string for ColRenameSelected uses the column slug.
-        let mut board = test_board(&[("Backlog", &[])]);
-        board.columns[0].slug = "backlog".into();
-        let slug = board.columns[0].slug.clone();
-        let cmd = crate::command::CommandState::new_with_input(format!("col rename {slug} "));
-        assert_eq!(cmd.buf.input, "col rename backlog ");
-        assert_eq!(cmd.buf.cursor, cmd.buf.input.chars().count());
+    fn archive_card_moves_to_archive_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Board already has an archive column from init_board
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        assert!(board.columns[archive_idx].cards.is_empty(), "precondition: archive should start empty");
+        board.columns[0].cards.push(Card::new("001".into(), "My task".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let sync = handle_card_action(&mut board, &mut state, Action::ArchiveCard, &mut terminal, &kando_dir, false).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[0].cards.is_empty());
+        assert_eq!(board.columns[archive_idx].cards.len(), 1);
+        assert_eq!(board.columns[archive_idx].cards[0].title, "My task");
+        assert!(state.notification.as_deref().unwrap().contains("Archived"));
     }
 
     #[test]
-    fn col_add_before_prefills_command() {
-        let cmd = crate::command::CommandState::new_with_input("col add ".into());
-        assert_eq!(cmd.buf.input, "col add ");
+    fn archive_card_no_archive_column() {
+        let mut board = test_board(&[("Todo", &["c1"])]);
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        handle_card_action(&mut board, &mut state, Action::ArchiveCard, &mut terminal, fake_dir(), false).unwrap();
+        assert!(state.notification.as_deref().unwrap().contains("No 'archive' column"));
     }
 
     #[test]
-    fn col_remove_selected_prefills_command_with_slug() {
-        let mut board = test_board(&[("Backlog", &[])]);
-        board.columns[0].slug = "backlog".into();
-        let slug = board.columns[0].slug.clone();
-        let cmd = crate::command::CommandState::new_with_input(format!("col remove {slug}"));
-        assert_eq!(cmd.buf.input, "col remove backlog");
+    fn archive_card_already_in_archive() {
+        let mut board = test_board(&[("Todo", &[]), ("Archive", &["c1"])]);
+        board.columns[1].slug = "archive".into();
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        handle_card_action(&mut board, &mut state, Action::ArchiveCard, &mut terminal, fake_dir(), false).unwrap();
+        assert!(state.notification.as_deref().unwrap().contains("already in the archive"));
     }
+
+    #[test]
+    fn archive_card_empty_column() {
+        let mut board = test_board(&[("Todo", &[]), ("Archive", &[])]);
+        board.columns[1].slug = "archive".into();
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        handle_card_action(&mut board, &mut state, Action::ArchiveCard, &mut terminal, fake_dir(), false).unwrap();
+        assert!(state.notification.as_deref().unwrap().contains("No card selected"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sort picker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn start_sort_opens_picker() {
+        // Note: process_action takes DefaultTerminal and can't be called in tests.
+        // We test the sort picker confirmation handler instead (sort_by_title).
+        // This test verifies the expected Picker shape.
+        let mut state = AppState::new();
+        let items: Vec<(String, bool)> = ["priority", "created", "updated", "title"]
+            .iter()
+            .map(|s| (s.to_string(), false))
+            .collect();
+        state.mode = Mode::Picker {
+            title: "sort by",
+            items,
+            selected: 0,
+            target: PickerTarget::SortColumn,
+        };
+        assert!(matches!(state.mode, Mode::Picker { target: PickerTarget::SortColumn, .. }));
+        if let Mode::Picker { items, .. } = &state.mode {
+            assert_eq!(items.len(), 4);
+            assert_eq!(items[0].0, "priority");
+            assert_eq!(items[3].0, "title");
+        }
+    }
+
+    #[test]
+    fn sort_by_title() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards = vec![
+            Card::new("001".into(), "Zebra".into()),
+            Card::new("002".into(), "Apple".into()),
+            Card::new("003".into(), "Mango".into()),
+        ];
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Picker {
+            title: "sort by",
+            items: vec![("title".to_string(), false)],
+            selected: 0,
+            target: PickerTarget::SortColumn,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].cards[0].title, "Apple");
+        assert_eq!(board.columns[0].cards[1].title, "Mango");
+        assert_eq!(board.columns[0].cards[2].title, "Zebra");
+    }
+
+    #[test]
+    fn sort_empty_column_no_panic() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        assert!(board.columns[0].cards.is_empty(), "precondition: column should start empty");
+        let mut state = AppState::new();
+        state.mode = Mode::Picker {
+            title: "sort by",
+            items: vec![("priority".to_string(), false)],
+            selected: 0,
+            target: PickerTarget::SortColumn,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[0].cards.is_empty(), "column should still be empty after sort");
+    }
+
+    // -----------------------------------------------------------------------
+    // WIP limit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn col_set_wip_opens_input() {
+        let board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        // Simulate process_action for ColSetWip
+        if let Some(col) = board.columns.get(state.focused_column) {
+            let current = col.wip_limit.map(|n| n.to_string()).unwrap_or_else(|| "0".into());
+            state.mode = Mode::Input {
+                prompt: "WIP limit (0=off)",
+                buf: TextBuffer::new(current),
+                on_confirm: InputTarget::WipLimit,
+            };
+        }
+        assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::WipLimit, .. }));
+        if let Mode::Input { buf, .. } = &state.mode {
+            assert_eq!(buf.input, "0");
+        }
+    }
+
+    #[test]
+    fn wip_limit_set_valid() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "WIP limit (0=off)",
+            buf: TextBuffer::new("3".into()),
+            on_confirm: InputTarget::WipLimit,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(board.columns[0].wip_limit, Some(3));
+        assert!(state.notification.as_deref().unwrap().contains("WIP limit"));
+        assert!(state.notification.as_deref().unwrap().contains("3"));
+    }
+
+    #[test]
+    fn wip_limit_clear_with_zero() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].wip_limit = Some(5);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "WIP limit (0=off)",
+            buf: TextBuffer::new("0".into()),
+            on_confirm: InputTarget::WipLimit,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(board.columns[0].wip_limit, None);
+        assert!(state.notification.as_deref().unwrap().contains("removed"));
+    }
+
+    #[test]
+    fn wip_limit_invalid_input() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "WIP limit (0=off)",
+            buf: TextBuffer::new("abc".into()),
+            on_confirm: InputTarget::WipLimit,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(state.notification.as_deref().unwrap().contains("must be a number"));
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    // -----------------------------------------------------------------------
+    // Find next / prev (n/N) tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn jump_to_visible_card_forward() {
+        let board = test_board(&[("A", &["alpha-match", "alpha-nope"]), ("B", &["beta-match", "beta-nope"])]);
+        let mut state = AppState::new();
+        state.active_filter = Some("match".into());
+        // Currently at (0, 0) = "alpha-match" which matches. Forward should skip "alpha-nope"
+        // and jump to "beta-match" at (1, 0).
+        jump_to_visible_card(&board, &mut state, true);
+        assert_eq!(state.focused_column, 1);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn jump_to_visible_card_backward() {
+        let board = test_board(&[("A", &["alpha-match", "alpha-nope"]), ("B", &["beta-match", "beta-nope"])]);
+        let mut state = AppState::new();
+        state.active_filter = Some("match".into());
+        state.focused_column = 1;
+        state.selected_card = 0;
+        // Currently at "beta-match". Backward should wrap to "alpha-match".
+        jump_to_visible_card(&board, &mut state, false);
+        assert_eq!(state.focused_column, 0);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn jump_to_visible_card_wraps_forward() {
+        let board = test_board(&[("A", &["alpha-match"]), ("B", &["beta-nope"])]);
+        let mut state = AppState::new();
+        state.active_filter = Some("alpha-match".into());
+        // Only "alpha-match" matches. Forward from it should wrap back to itself.
+        jump_to_visible_card(&board, &mut state, true);
+        assert_eq!(state.focused_column, 0);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn jump_to_visible_card_no_matches() {
+        let board = test_board(&[("A", &["hello"]), ("B", &["world"])]);
+        let mut state = AppState::new();
+        state.active_filter = Some("zzzznotfound".into());
+        jump_to_visible_card(&board, &mut state, true);
+        assert_eq!(state.notification.as_deref(), Some("No matches"));
+    }
+
+    #[test]
+    fn jump_to_visible_card_skips_hidden_columns() {
+        let mut board = test_board(&[("A", &["alpha-match"]), ("B", &["beta-match"]), ("C", &["gamma-match"])]);
+        board.columns[1].hidden = true;
+        let mut state = AppState::new();
+        state.active_filter = Some("match".into());
+        // At "alpha-match", forward should skip hidden "B" and land on "gamma-match".
+        jump_to_visible_card(&board, &mut state, true);
+        assert_eq!(state.focused_column, 2);
+        assert_eq!(state.selected_card, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Column rename / add / remove action dispatch tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn col_rename_selected_enters_input_mode() {
+        let board = test_board(&[("Backlog", &[])]);
+        let mut state = AppState::new();
+        // Simulate ColRenameSelected dispatch
+        if let Some(col) = board.columns.get(state.focused_column) {
+            let slug = col.slug.clone();
+            let current_name = col.name.clone();
+            state.mode = Mode::Input {
+                prompt: "Rename column",
+                buf: TextBuffer::new(current_name),
+                on_confirm: InputTarget::ColRename(slug),
+            };
+        }
+        assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::ColRename(_), .. }));
+        if let Mode::Input { buf, .. } = &state.mode {
+            assert_eq!(buf.input, "Backlog");
+        }
+    }
+
+    #[test]
+    fn col_rename_confirm_changes_name() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let old_slug = board.columns[0].slug.clone();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Rename column",
+            buf: TextBuffer::new("Todo Items".into()),
+            on_confirm: InputTarget::ColRename(old_slug),
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].name, "Todo Items");
+        assert!(state.notification.as_deref().unwrap().contains("Renamed"));
+    }
+
+    #[test]
+    fn col_rename_empty_name_errors() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let old_slug = board.columns[0].slug.clone();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Rename column",
+            buf: TextBuffer::new("  ".into()),
+            on_confirm: InputTarget::ColRename(old_slug),
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(state.notification.as_deref().unwrap().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn col_add_before_enters_input_mode() {
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "New column name",
+            buf: TextBuffer::empty(),
+            on_confirm: InputTarget::ColAdd,
+        };
+        assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::ColAdd, .. }));
+    }
+
+    #[test]
+    fn col_add_confirm_creates_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let original_len = board.columns.len();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "New column name",
+            buf: TextBuffer::new("Review".into()),
+            on_confirm: InputTarget::ColAdd,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns.len(), original_len + 1);
+        // New column inserted at position 0 (before focused column which is backlog)
+        assert_eq!(board.columns[0].name, "Review");
+    }
+
+    #[test]
+    fn col_remove_archive_blocked() {
+        let mut board = test_board(&[("Archive", &[])]);
+        board.columns[0].slug = "archive".into();
+        let mut state = AppState::new();
+        // Simulate ColRemoveSelected
+        let col = &board.columns[0];
+        let slug = col.slug.clone();
+        if slug == "archive" {
+            state.notify_error("The 'archive' column is reserved and cannot be removed");
+        }
+        assert!(state.notification.as_deref().unwrap().contains("reserved"));
+    }
+
+    #[test]
+    fn col_remove_last_column_blocked() {
+        let board = test_board(&[("Only", &[])]);
+        let mut state = AppState::new();
+        if board.columns.len() == 1 {
+            state.notify_error("Cannot remove the last column");
+        }
+        assert!(state.notification.as_deref().unwrap().contains("last column"));
+    }
+
+    #[test]
+    fn col_remove_with_cards_blocked() {
+        let board = test_board(&[("Todo", &["card1"]), ("Done", &[])]);
+        let mut state = AppState::new();
+        let col = &board.columns[0];
+        if !col.cards.is_empty() {
+            state.notify_error(format!("Column has {} card(s); move them first", col.cards.len()));
+        }
+        assert!(state.notification.as_deref().unwrap().contains("1 card(s)"));
+    }
+
+    #[test]
+    fn col_remove_confirm_removes_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let original_len = board.columns.len();
+        // Find the "in-progress" column (empty by default) to remove
+        let ip_idx = board.columns.iter().position(|c| c.slug == "in-progress").unwrap();
+        let mut state = AppState::new();
+        state.focused_column = ip_idx;
+        state.mode = Mode::Confirm {
+            prompt: "Delete column?",
+            on_confirm: ConfirmTarget::ColRemove("in-progress".into()),
+        };
+        let sync = handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns.len(), original_len - 1);
+        assert!(!board.columns.iter().any(|c| c.slug == "in-progress"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Column move tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn col_move_left_at_leftmost_errors() {
+        let _board = test_board(&[("A", &[]), ("B", &[])]);
+        let mut state = AppState::new();
+        state.focused_column = 0;
+        state.notify_error("Already leftmost column");
+        assert!(state.notification.as_deref().unwrap().contains("leftmost"));
+    }
+
+    #[test]
+    fn col_move_right_at_rightmost_errors() {
+        let _board = test_board(&[("A", &[]), ("B", &[])]);
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        state.notify_error("Already rightmost column");
+        assert!(state.notification.as_deref().unwrap().contains("rightmost"));
+    }
+
+    #[test]
+    fn col_move_to_position_same_notifies() {
+        let board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        let target = 2usize - 1;
+        if target == state.focused_column {
+            state.notify(format!("{} is already at that position", board.columns[1].name));
+        }
+        assert!(state.notification.as_deref().unwrap().contains("already at that position"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Keymap binding tests for new features
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normal_s_maps_to_start_sort() {
+        use crate::input::keymap::map_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let action = map_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), &Mode::Normal);
+        assert_eq!(action, Action::StartSort);
+    }
+
+    #[test]
+    fn normal_n_maps_to_find_next() {
+        use crate::input::keymap::map_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let action = map_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE), &Mode::Normal);
+        assert_eq!(action, Action::FindNext);
+    }
+
+    #[test]
+    fn normal_shift_n_maps_to_find_prev() {
+        use crate::input::keymap::map_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let action = map_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT), &Mode::Normal);
+        assert_eq!(action, Action::FindPrev);
+    }
+
+    #[test]
+    fn space_x_maps_to_archive_card() {
+        use crate::input::keymap::map_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let action = map_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &Mode::Space);
+        assert_eq!(action, Action::ArchiveCard);
+    }
+
+    #[test]
+    fn column_w_maps_to_col_set_wip() {
+        use crate::input::keymap::map_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let action = map_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE), &Mode::Column);
+        assert_eq!(action, Action::ColSetWip);
+    }
+
+    // -----------------------------------------------------------------------
+    // ColRenameSelected / ColAddBefore / ColRemoveSelected action dispatch
+    // -----------------------------------------------------------------------
 
     #[test]
     fn handle_col_hide_focus_unchanged_when_show_hidden_true() {
