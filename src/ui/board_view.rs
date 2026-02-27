@@ -125,7 +125,7 @@ fn render_column(
     matcher: &SkimMatcherV2,
     icons: &Icons,
 ) {
-    // Text search (/) takes precedence; tag/assignee picker filters apply otherwise
+    // Text search (/) takes precedence; tag/assignee/staleness picker filters apply otherwise
     let cards: Vec<(usize, &Card)> = col
         .cards
         .iter()
@@ -136,13 +136,16 @@ fn render_column(
                 state.active_filter.as_deref(),
                 &state.active_tag_filters,
                 &state.active_assignee_filters,
+                &state.active_staleness_filters,
+                policies,
+                now,
                 matcher,
             )
         })
         .collect();
 
     // Build header
-    let card_count = if state.active_filter.is_some() || !state.active_tag_filters.is_empty() || !state.active_assignee_filters.is_empty() {
+    let card_count = if state.has_active_filter() {
         format!("{}/{}", cards.len(), col.cards.len())
     } else {
         format!("{}", col.cards.len())

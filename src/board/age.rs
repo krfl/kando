@@ -42,6 +42,26 @@ pub fn staleness(card: &Card, policies: &Policies, now: DateTime<Utc>) -> Stalen
     }
 }
 
+/// Classify a card's staleness as a human-readable label for the filter picker.
+///
+/// - `"new"` — created today (same UTC day)
+/// - `"normal"` — fresh but not new
+/// - `"stale"` — past the bubble-up threshold
+/// - `"very stale"` — past 2× the bubble-up threshold
+pub fn card_staleness_label(card: &Card, policies: &Policies, now: DateTime<Utc>) -> &'static str {
+    match staleness(card, policies, now) {
+        Staleness::VeryStale => "very stale",
+        Staleness::Stale => "stale",
+        Staleness::Fresh => {
+            if card.created.date_naive() == now.date_naive() {
+                "new"
+            } else {
+                "normal"
+            }
+        }
+    }
+}
+
 /// Check if a card should be auto-closed.
 pub fn should_auto_close(card: &Card, policies: &Policies, now: DateTime<Utc>) -> bool {
     if policies.auto_close_days == 0 {
@@ -978,5 +998,95 @@ mod tests {
         let archived = run_auto_archive(&mut board, now);
         assert!(archived.is_empty(), "card with future completed timestamp must not be archived");
         assert_eq!(board.columns[0].cards.len(), 1);
+    }
+
+    // ── card_staleness_label tests ──
+
+    #[test]
+    fn card_staleness_label_returns_new_for_card_created_today() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        let card = Card {
+            created: now,
+            updated: now,
+            ..Card::new("1".into(), "Test".into())
+        };
+        assert_eq!(card_staleness_label(&card, &policies, now), "new");
+    }
+
+    #[test]
+    fn card_staleness_label_returns_normal_for_fresh_non_new() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        let card = Card {
+            created: Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap(),
+            updated: Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap(),
+            ..Card::new("1".into(), "Test".into())
+        };
+        assert_eq!(card_staleness_label(&card, &policies, now), "normal");
+    }
+
+    #[test]
+    fn card_staleness_label_returns_stale() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        let card = Card {
+            created: Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap(),
+            updated: Utc.with_ymd_and_hms(2025, 6, 8, 12, 0, 0).unwrap(), // exactly 7 days ago
+            ..Card::new("1".into(), "Test".into())
+        };
+        assert_eq!(card_staleness_label(&card, &policies, now), "stale");
+    }
+
+    #[test]
+    fn card_staleness_label_returns_very_stale() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        let card = Card {
+            created: Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap(),
+            updated: Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap(), // 14 days ago (2x threshold)
+            ..Card::new("1".into(), "Test".into())
+        };
+        assert_eq!(card_staleness_label(&card, &policies, now), "very stale");
+    }
+
+    #[test]
+    fn card_staleness_label_stale_days_zero_new_card() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 0, ..Default::default() };
+        let card = Card {
+            created: now,
+            updated: now,
+            ..Card::new("1".into(), "Test".into())
+        };
+        assert_eq!(card_staleness_label(&card, &policies, now), "new");
+    }
+
+    #[test]
+    fn card_staleness_label_stale_days_zero_old_card() {
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 0, ..Default::default() };
+        let card = Card {
+            created: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            updated: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            ..Card::new("1".into(), "Test".into())
+        };
+        // stale_days=0 means staleness is always Fresh, but card is old → "normal"
+        assert_eq!(card_staleness_label(&card, &policies, now), "normal");
+    }
+
+    #[test]
+    fn card_staleness_label_utc_day_boundary() {
+        // Card created just before midnight, now is just after midnight → different UTC days
+        let created = Utc.with_ymd_and_hms(2025, 6, 14, 23, 59, 59).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 0, 0, 1).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        let card = Card {
+            created,
+            updated: created,
+            ..Card::new("1".into(), "Test".into())
+        };
+        // Card is only 2 seconds old but created on a different UTC day → "normal" not "new"
+        assert_eq!(card_staleness_label(&card, &policies, now), "normal");
     }
 }

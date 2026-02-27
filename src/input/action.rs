@@ -52,6 +52,7 @@ pub enum Action {
     StartFilter,
     StartTagFilter,
     StartAssigneeFilter,
+    StartStalenessFilter,
     EnterFilterMode,
     ClearFilters,
     // Undo

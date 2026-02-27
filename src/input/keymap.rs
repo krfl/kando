@@ -135,6 +135,7 @@ fn map_filter_menu(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('t') => Action::StartTagFilter,
         KeyCode::Char('a') => Action::StartAssigneeFilter,
+        KeyCode::Char('s') => Action::StartStalenessFilter,
         KeyCode::Char('/') => Action::StartFilter,
         KeyCode::Esc => Action::None,
         _ => Action::None,
@@ -251,6 +252,7 @@ pub const SPACE_BINDINGS: &[Binding] = &[
 pub const FILTER_BINDINGS: &[Binding] = &[
     Binding { key: "t", description: "By tag", tutorial: false },
     Binding { key: "a", description: "By assignee", tutorial: false },
+    Binding { key: "s", description: "By staleness", tutorial: false },
     Binding { key: "/", description: "Text search", tutorial: false },
 ];
 
@@ -716,6 +718,11 @@ mod tests {
     #[test]
     fn filter_menu_a_starts_assignee_filter() {
         assert_eq!(map_key(key(KeyCode::Char('a')), &Mode::FilterMenu), Action::StartAssigneeFilter);
+    }
+
+    #[test]
+    fn filter_menu_s_starts_staleness_filter() {
+        assert_eq!(map_key(key(KeyCode::Char('s')), &Mode::FilterMenu), Action::StartStalenessFilter);
     }
 
     // ── CardDetail mode bindings ──

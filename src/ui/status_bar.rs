@@ -85,6 +85,15 @@ fn build_left_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>
         }
     }
 
+    // Show active staleness filters
+    if !state.active_staleness_filters.is_empty() {
+        let labels = state.active_staleness_filters.join(",");
+        spans.push(Span::styled(
+            format!("[{labels}] "),
+            Style::default().fg(Theme::FG),
+        ));
+    }
+
     spans
 }
 

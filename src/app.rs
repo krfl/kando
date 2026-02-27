@@ -155,6 +155,7 @@ pub enum PickerTarget {
     MoveToColumn,
     TagFilter,
     AssigneeFilter,
+    StalenessFilter,
 }
 
 /// Notification severity for statusbar coloring.
@@ -173,6 +174,7 @@ pub struct AppState {
     pub active_filter: Option<String>,
     pub active_tag_filters: Vec<String>,
     pub active_assignee_filters: Vec<String>,
+    pub active_staleness_filters: Vec<String>,
     pub notification: Option<String>,
     pub notification_level: NotificationLevel,
     pub notification_expires: Option<Instant>,
@@ -201,6 +203,7 @@ impl AppState {
             active_filter: None,
             active_tag_filters: Vec::new(),
             active_assignee_filters: Vec::new(),
+            active_staleness_filters: Vec::new(),
             notification: None,
             notification_level: NotificationLevel::Info,
             notification_expires: None,
@@ -269,6 +272,7 @@ impl AppState {
         self.active_filter.is_some()
             || !self.active_tag_filters.is_empty()
             || !self.active_assignee_filters.is_empty()
+            || !self.active_staleness_filters.is_empty()
     }
 
     /// Clamp selection to the nearest visible card under active filters.
@@ -279,7 +283,7 @@ impl AppState {
             return;
         }
         if let Some(col) = board.columns.get(self.focused_column) {
-            let visible = visible_card_indices(col, self);
+            let visible = visible_card_indices(col, self, board);
             if visible.is_empty() {
                 self.selected_card = 0;
             } else if !visible.contains(&self.selected_card) {
@@ -296,8 +300,9 @@ impl AppState {
 }
 
 /// Return the unfiltered indices of cards visible under the current filters.
-fn visible_card_indices(col: &Column, state: &AppState) -> Vec<usize> {
+fn visible_card_indices(col: &Column, state: &AppState, board: &Board) -> Vec<usize> {
     let matcher = SkimMatcherV2::default();
+    let now = Utc::now();
     col.cards
         .iter()
         .enumerate()
@@ -307,6 +312,9 @@ fn visible_card_indices(col: &Column, state: &AppState) -> Vec<usize> {
                 state.active_filter.as_deref(),
                 &state.active_tag_filters,
                 &state.active_assignee_filters,
+                &state.active_staleness_filters,
+                &board.policies,
+                now,
                 &matcher,
             )
         })
@@ -702,7 +710,7 @@ fn process_action(
         }
 
         // Filter / tag filter
-        Action::StartFilter | Action::StartTagFilter | Action::StartAssigneeFilter => {
+        Action::StartFilter | Action::StartTagFilter | Action::StartAssigneeFilter | Action::StartStalenessFilter => {
             handle_filter_start(board, state, action);
         }
 
@@ -766,10 +774,11 @@ fn process_action(
             }
         }
         Action::ClearFilters => {
-            if state.active_filter.is_some() || !state.active_tag_filters.is_empty() || !state.active_assignee_filters.is_empty() {
+            if state.has_active_filter() {
                 state.active_filter = None;
                 state.active_tag_filters.clear();
                 state.active_assignee_filters.clear();
+                state.active_staleness_filters.clear();
                 state.notify("Filters cleared");
             }
         }
@@ -813,7 +822,7 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
                 _ => {
                     if was_minor_mode { state.mode = Mode::Normal; }
                     if let Some(col) = board.columns.get(state.focused_column) {
-                        let visible = visible_card_indices(col, state);
+                        let visible = visible_card_indices(col, state, board);
                         if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
                             if pos > 0 {
                                 state.selected_card = visible[pos - 1];
@@ -833,7 +842,7 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
                 _ => {
                     if was_minor_mode { state.mode = Mode::Normal; }
                     if let Some(col) = board.columns.get(state.focused_column) {
-                        let visible = visible_card_indices(col, state);
+                        let visible = visible_card_indices(col, state, board);
                         if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
                             if pos + 1 < visible.len() {
                                 state.selected_card = visible[pos + 1];
@@ -848,7 +857,7 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
         Action::CycleNextCard => {
             if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = board.columns.get(state.focused_column) {
-                let visible = visible_card_indices(col, state);
+                let visible = visible_card_indices(col, state, board);
                 let pos = visible.iter().position(|&i| i == state.selected_card);
                 let advanced = match pos {
                     Some(p) if p + 1 < visible.len() => {
@@ -860,7 +869,7 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
                 if !advanced {
                     let mut from = state.focused_column;
                     while let Some(next) = next_visible_column(board, from, true, state.show_hidden_columns) {
-                        let next_visible = visible_card_indices(&board.columns[next], state);
+                        let next_visible = visible_card_indices(&board.columns[next], state, board);
                         if let Some(&first) = next_visible.first() {
                             state.focused_column = next;
                             state.selected_card = first;
@@ -874,7 +883,7 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
         Action::CyclePrevCard => {
             if was_minor_mode { state.mode = Mode::Normal; }
             if let Some(col) = board.columns.get(state.focused_column) {
-                let visible = visible_card_indices(col, state);
+                let visible = visible_card_indices(col, state, board);
                 let pos = visible.iter().position(|&i| i == state.selected_card);
                 let retreated = match pos {
                     Some(p) if p > 0 => {
@@ -886,7 +895,7 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
                 if !retreated {
                     let mut from = state.focused_column;
                     while let Some(prev) = next_visible_column(board, from, false, state.show_hidden_columns) {
-                        let prev_visible = visible_card_indices(&board.columns[prev], state);
+                        let prev_visible = visible_card_indices(&board.columns[prev], state, board);
                         if let Some(&last) = prev_visible.last() {
                             state.focused_column = prev;
                             state.selected_card = last;
@@ -923,7 +932,7 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
         }
         Action::JumpToFirstCard => {
             if let Some(col) = board.columns.get(state.focused_column) {
-                let visible = visible_card_indices(col, state);
+                let visible = visible_card_indices(col, state, board);
                 if let Some(&first) = visible.first() {
                     state.selected_card = first;
                 } else {
@@ -933,7 +942,7 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
         }
         Action::JumpToLastCard => {
             if let Some(col) = board.columns.get(state.focused_column) {
-                let visible = visible_card_indices(col, state);
+                let visible = visible_card_indices(col, state, board);
                 if let Some(&last) = visible.last() {
                     state.selected_card = last;
                 } else {
@@ -1000,7 +1009,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
     );
     if needs_visible_card && state.has_active_filter() {
         if let Some(col) = board.columns.get(state.focused_column) {
-            let visible = visible_card_indices(col, state);
+            let visible = visible_card_indices(col, state, board);
             if !visible.contains(&state.selected_card) {
                 state.notify("No visible card selected");
                 return Ok(None);
@@ -1228,7 +1237,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailNextCard => {
             if let Some(col) = board.columns.get(state.focused_column) {
-                let visible = visible_card_indices(col, state);
+                let visible = visible_card_indices(col, state, board);
                 if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
                     if pos + 1 < visible.len() {
                         state.selected_card = visible[pos + 1];
@@ -1241,7 +1250,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailPrevCard => {
             if let Some(col) = board.columns.get(state.focused_column) {
-                let visible = visible_card_indices(col, state);
+                let visible = visible_card_indices(col, state, board);
                 if let Some(pos) = visible.iter().position(|&i| i == state.selected_card) {
                     if pos > 0 {
                         state.selected_card = visible[pos - 1];
@@ -1383,6 +1392,27 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                     target: PickerTarget::AssigneeFilter,
                 };
             }
+        }
+        Action::StartStalenessFilter => {
+            let labels: [(&str, &str); 4] = [
+                ("new", "Created today"),
+                ("normal", "Not stale"),
+                ("stale", "Needs attention"),
+                ("very stale", "Overdue"),
+            ];
+            let items: Vec<(String, bool)> = labels
+                .iter()
+                .map(|(label, _)| {
+                    let active = state.active_staleness_filters.contains(&label.to_string());
+                    (label.to_string(), active)
+                })
+                .collect();
+            state.mode = Mode::Picker {
+                title: "filter by staleness",
+                items,
+                selected: 0,
+                target: PickerTarget::StalenessFilter,
+            };
         }
         _ => unreachable!(),
     }
@@ -1618,6 +1648,21 @@ fn handle_input_confirm(
                     }
                     state.clamp_selection_filtered(board);
                     state.mode = Mode::Picker { title, items, selected, target: PickerTarget::AssigneeFilter };
+                }
+                PickerTarget::StalenessFilter => {
+                    if let Some((label, _)) = items.get(selected) {
+                        let label = label.clone();
+                        if state.active_staleness_filters.contains(&label) {
+                            state.active_staleness_filters.retain(|l| *l != label);
+                        } else {
+                            state.active_staleness_filters.push(label);
+                        }
+                    }
+                    for (label, active) in items.iter_mut() {
+                        *active = state.active_staleness_filters.contains(label);
+                    }
+                    state.clamp_selection_filtered(board);
+                    state.mode = Mode::Picker { title, items, selected, target: PickerTarget::StalenessFilter };
                 }
                 PickerTarget::Priority => {
                     use crate::board::Priority;
@@ -3028,6 +3073,13 @@ mod tests {
         assert!(state.has_active_filter());
     }
 
+    #[test]
+    fn has_active_filter_staleness_only() {
+        let mut state = AppState::new();
+        state.active_staleness_filters = vec!["stale".into()];
+        assert!(state.has_active_filter());
+    }
+
     // ── clamp_selection tests ──
 
     #[test]
@@ -3105,7 +3157,7 @@ mod tests {
     fn visible_card_indices_no_filter() {
         let board = test_board(&[("A", &["c1", "c2", "c3"])]);
         let state = AppState::new();
-        let indices = visible_card_indices(&board.columns[0], &state);
+        let indices = visible_card_indices(&board.columns[0], &state, &board);
         assert_eq!(indices, vec![0, 1, 2]);
     }
 
@@ -3114,7 +3166,7 @@ mod tests {
         let board = test_board(&[("A", &["apple", "banana", "avocado"])]);
         let mut state = AppState::new();
         state.active_filter = Some("a".into()); // matches apple and avocado (and banana has 'a' too)
-        let indices = visible_card_indices(&board.columns[0], &state);
+        let indices = visible_card_indices(&board.columns[0], &state, &board);
         // Fuzzy match: "a" matches all three titles
         assert!(!indices.is_empty());
     }
@@ -3125,7 +3177,7 @@ mod tests {
         board.columns[0].cards[0].tags = vec!["bug".into()];
         let mut state = AppState::new();
         state.active_tag_filters = vec!["bug".into()];
-        let indices = visible_card_indices(&board.columns[0], &state);
+        let indices = visible_card_indices(&board.columns[0], &state, &board);
         assert_eq!(indices, vec![0]); // only first card has "bug" tag
     }
 
@@ -3171,11 +3223,13 @@ mod tests {
         state.active_filter = Some("search".into());
         state.active_tag_filters = vec!["bug".into()];
         state.active_assignee_filters = vec!["alice".into()];
+        state.active_staleness_filters = vec!["stale".into()];
         assert!(state.has_active_filter());
         // Simulate the ClearFilters action effect
         state.active_filter = None;
         state.active_tag_filters.clear();
         state.active_assignee_filters.clear();
+        state.active_staleness_filters.clear();
         assert!(!state.has_active_filter());
     }
 

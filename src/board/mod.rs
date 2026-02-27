@@ -282,13 +282,17 @@ impl Board {
 /// Check whether a card is visible under the current set of filters.
 ///
 /// `active_filter` is the text/fuzzy search (from `/`).
-/// `tag_filters` / `assignee_filters` are the picker-based filters.
+/// `tag_filters` / `assignee_filters` / `staleness_filters` are the picker-based filters.
 /// Text search takes precedence over picker filters.
+#[allow(clippy::too_many_arguments)]
 pub fn card_is_visible(
     card: &Card,
     active_filter: Option<&str>,
     tag_filters: &[String],
     assignee_filters: &[String],
+    staleness_filters: &[String],
+    policies: &Policies,
+    now: DateTime<Utc>,
     matcher: &SkimMatcherV2,
 ) -> bool {
     if let Some(filter) = active_filter {
@@ -298,7 +302,11 @@ pub fn card_is_visible(
             tag_filters.is_empty() || card.tags.iter().any(|t| tag_filters.contains(t));
         let assignee_ok = assignee_filters.is_empty()
             || card.assignees.iter().any(|a| assignee_filters.contains(a));
-        tag_ok && assignee_ok
+        let staleness_ok = staleness_filters.is_empty() || {
+            let label = age::card_staleness_label(card, policies, now);
+            staleness_filters.iter().any(|f| f.as_str() == label)
+        };
+        tag_ok && assignee_ok && staleness_ok
     }
 }
 
@@ -766,13 +774,17 @@ mod tests {
     #[test]
     fn card_is_visible_no_filters_shows_all() {
         let matcher = SkimMatcherV2::default();
+        let policies = Policies::default();
+        let now = Utc::now();
         let card = card_with_meta("Test", &[], &[]);
-        assert!(card_is_visible(&card, None, &[], &[], &matcher));
+        assert!(card_is_visible(&card, None, &[], &[], &[], &policies, now, &matcher));
     }
 
     #[test]
     fn card_is_visible_text_filter_overrides_picker() {
         let matcher = SkimMatcherV2::default();
+        let policies = Policies::default();
+        let now = Utc::now();
         let card = card_with_meta("Login feature", &["bug"], &[]);
         // Text filter matches, even though tag filter wouldn't match
         assert!(card_is_visible(
@@ -780,6 +792,9 @@ mod tests {
             Some("login"),
             &["nonexistent".to_string()],
             &[],
+            &[],
+            &policies,
+            now,
             &matcher,
         ));
     }
@@ -787,29 +802,109 @@ mod tests {
     #[test]
     fn card_is_visible_tag_filter_must_match() {
         let matcher = SkimMatcherV2::default();
+        let policies = Policies::default();
+        let now = Utc::now();
         let card = card_with_meta("Test", &["bug"], &[]);
-        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &matcher));
-        assert!(!card_is_visible(&card, None, &["feature".to_string()], &[], &matcher));
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &[], &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &["feature".to_string()], &[], &[], &policies, now, &matcher));
     }
 
     #[test]
     fn card_is_visible_assignee_filter_must_match() {
         let matcher = SkimMatcherV2::default();
+        let policies = Policies::default();
+        let now = Utc::now();
         let card = card_with_meta("Test", &[], &["alice"]);
-        assert!(card_is_visible(&card, None, &[], &["alice".to_string()], &matcher));
-        assert!(!card_is_visible(&card, None, &[], &["bob".to_string()], &matcher));
+        assert!(card_is_visible(&card, None, &[], &["alice".to_string()], &[], &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &[], &["bob".to_string()], &[], &policies, now, &matcher));
     }
 
     #[test]
     fn card_is_visible_both_tag_and_assignee_must_match() {
         let matcher = SkimMatcherV2::default();
+        let policies = Policies::default();
+        let now = Utc::now();
         let card = card_with_meta("Test", &["bug"], &["alice"]);
         // Both match
-        assert!(card_is_visible(&card, None, &["bug".to_string()], &["alice".to_string()], &matcher));
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &["alice".to_string()], &[], &policies, now, &matcher));
         // Tag matches, assignee doesn't
-        assert!(!card_is_visible(&card, None, &["bug".to_string()], &["bob".to_string()], &matcher));
+        assert!(!card_is_visible(&card, None, &["bug".to_string()], &["bob".to_string()], &[], &policies, now, &matcher));
         // Assignee matches, tag doesn't
-        assert!(!card_is_visible(&card, None, &["feature".to_string()], &["alice".to_string()], &matcher));
+        assert!(!card_is_visible(&card, None, &["feature".to_string()], &["alice".to_string()], &[], &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_staleness_filter_matches() {
+        use chrono::TimeZone;
+        let matcher = SkimMatcherV2::default();
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        // Card created yesterday, updated recently → "normal"
+        let mut card = card_with_meta("Test", &[], &[]);
+        card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
+        card.updated = now;
+        assert!(card_is_visible(&card, None, &[], &[], &["normal".to_string()], &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_staleness_filter_no_match() {
+        use chrono::TimeZone;
+        let matcher = SkimMatcherV2::default();
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        // Card is "normal" but filter only accepts "stale"
+        let mut card = card_with_meta("Test", &[], &[]);
+        card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
+        card.updated = now;
+        assert!(!card_is_visible(&card, None, &[], &[], &["stale".to_string()], &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_multiple_staleness_filters() {
+        use chrono::TimeZone;
+        let matcher = SkimMatcherV2::default();
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        // Stale card (updated 7 days ago)
+        let mut stale_card = card_with_meta("Stale", &[], &[]);
+        stale_card.created = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
+        stale_card.updated = Utc.with_ymd_and_hms(2025, 6, 8, 12, 0, 0).unwrap();
+        let filters = vec!["stale".to_string(), "very stale".to_string()];
+        assert!(card_is_visible(&stale_card, None, &[], &[], &filters, &policies, now, &matcher));
+        // Normal card should not match
+        let mut normal_card = card_with_meta("Normal", &[], &[]);
+        normal_card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
+        normal_card.updated = now;
+        assert!(!card_is_visible(&normal_card, None, &[], &[], &filters, &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_staleness_combined_with_tag_filter() {
+        use chrono::TimeZone;
+        let matcher = SkimMatcherV2::default();
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        // Card is "normal" and has tag "bug"
+        let mut card = card_with_meta("Test", &["bug"], &[]);
+        card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
+        card.updated = now;
+        // Both tag and staleness match → visible
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &["normal".to_string()], &policies, now, &matcher));
+        // Tag matches but staleness doesn't → hidden
+        assert!(!card_is_visible(&card, None, &["bug".to_string()], &[], &["stale".to_string()], &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_text_filter_overrides_staleness() {
+        use chrono::TimeZone;
+        let matcher = SkimMatcherV2::default();
+        let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        let policies = Policies { stale_days: 7, ..Default::default() };
+        let mut card = card_with_meta("Login feature", &[], &[]);
+        card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
+        card.updated = now;
+        // Text filter matches, staleness filter would NOT match — text takes precedence
+        assert!(card_is_visible(&card, Some("login"), &[], &[], &["stale".to_string()], &policies, now, &matcher));
     }
 
     // ── Sort tests ──
