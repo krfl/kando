@@ -1364,7 +1364,7 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                     .collect();
                 items.sort_by(|a, b| a.0.cmp(&b.0));
                 state.mode = Mode::Picker {
-                    title: "filter by tag",
+                    title: "tag",
                     items,
                     selected: 0,
                     target: PickerTarget::TagFilter,
@@ -1386,7 +1386,7 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                     .collect();
                 items.sort_by(|a, b| a.0.cmp(&b.0));
                 state.mode = Mode::Picker {
-                    title: "filter by assignee",
+                    title: "assignee",
                     items,
                     selected: 0,
                     target: PickerTarget::AssigneeFilter,
@@ -1408,7 +1408,7 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                 })
                 .collect();
             state.mode = Mode::Picker {
-                title: "filter by staleness",
+                title: "staleness",
                 items,
                 selected: 0,
                 target: PickerTarget::StalenessFilter,
@@ -2263,7 +2263,7 @@ mod tests {
         let mut board = test_board(&[("A", &[])]);
         let mut state = AppState::new();
         state.mode = Mode::Picker {
-            title: "filter by tag",
+            title: "tag",
             items: vec![("bug".into(), false), ("ui".into(), false)],
             selected: 0,
             target: PickerTarget::TagFilter,
