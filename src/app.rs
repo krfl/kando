@@ -1346,13 +1346,14 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                 state.mode = Mode::Normal;
                 state.notify("No tags on the board");
             } else {
-                let items: Vec<(String, bool)> = tags
+                let mut items: Vec<(String, bool)> = tags
                     .iter()
                     .map(|(tag, _count)| {
                         let active = state.active_tag_filters.contains(tag);
                         (tag.clone(), active)
                     })
                     .collect();
+                items.sort_by(|a, b| a.0.cmp(&b.0));
                 state.mode = Mode::Picker {
                     title: "filter by tag",
                     items,
@@ -1367,13 +1368,14 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                 state.mode = Mode::Normal;
                 state.notify("No assignees on the board");
             } else {
-                let items: Vec<(String, bool)> = assignees
+                let mut items: Vec<(String, bool)> = assignees
                     .iter()
                     .map(|(name, _count)| {
                         let active = state.active_assignee_filters.contains(name);
                         (name.clone(), active)
                     })
                     .collect();
+                items.sort_by(|a, b| a.0.cmp(&b.0));
                 state.mode = Mode::Picker {
                     title: "filter by assignee",
                     items,
