@@ -50,26 +50,23 @@ pub(crate) fn fit_icons<'a>(candidates: &[(&'a str, Style)], avail_width: usize)
 ///
 /// Selection is expressed via `BorderType::Thick + Modifier::BOLD`, not via
 /// color — so `is_selected` is intentionally absent from this function.
-pub(crate) fn card_border_color(blocked: bool, is_col_focused: bool, stale: Staleness) -> Color {
+pub(crate) fn card_border_color(blocked: bool, is_col_focused: bool, stale: Staleness, is_new: bool) -> Color {
     if blocked {
         Theme::BLOCKER
     } else {
         match stale {
             Staleness::VeryStale => Theme::VERY_STALE,
             Staleness::Stale => Theme::STALE,
+            Staleness::Fresh if is_new => Theme::NEW_CARD_TITLE,
             Staleness::Fresh if is_col_focused => Theme::CARD_BORDER,
             Staleness::Fresh => Theme::DIM,
         }
     }
 }
 
-/// Title color: green for cards created on the same UTC day as `now`.
-pub(crate) fn title_color(created: DateTime<Utc>, now: DateTime<Utc>) -> Color {
-    if created.date_naive() == now.date_naive() {
-        Theme::NEW_CARD_TITLE
-    } else {
-        Theme::CARD_TITLE
-    }
+/// Whether a card was created on the same UTC day as `now`.
+pub(crate) fn is_new_card(created: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    created.date_naive() == now.date_naive()
 }
 
 pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, now: DateTime<Utc>) {
@@ -281,8 +278,9 @@ fn render_card(
 
     let stale = staleness(card, policies, now);
     let age_str = format_age(card.created, now);
+    let is_new = is_new_card(card.created, now);
 
-    let border_color = card_border_color(card.blocked, is_col_focused, stale);
+    let border_color = card_border_color(card.blocked, is_col_focused, stale, is_new);
 
     let selected_mod = if is_selected { Modifier::BOLD } else { Modifier::empty() };
 
@@ -301,8 +299,6 @@ fn render_card(
     if inner.height == 0 || inner.width < 2 {
         return;
     }
-
-    let title_color = title_color(card.created, now);
 
     // Compute left-side width up front so glyph truncation can use it.
     let marker = format!("{} ", icons.chevron);
@@ -358,11 +354,12 @@ fn render_card(
     let padding_needed =
         (inner.width as usize).saturating_sub(left_width + glyphs_width + 1);
 
+    let age_color = if is_new { Theme::NEW_CARD_TITLE } else { Theme::DIM };
     let mut line1_spans = vec![
         Span::styled(marker_display, marker_style),
         Span::styled(&card.id, Style::default().fg(Theme::DIM).add_modifier(selected_mod)),
         Span::raw(" "),
-        Span::styled(age_str, Style::default().fg(Theme::DIM).add_modifier(selected_mod)),
+        Span::styled(age_str, Style::default().fg(age_color).add_modifier(selected_mod)),
         Span::raw(" ".repeat(padding_needed)),
     ];
     line1_spans.extend(right_glyphs);
@@ -390,7 +387,7 @@ fn render_card(
     let title_line = Line::from(Span::styled(
         title,
         Style::default()
-            .fg(title_color)
+            .fg(Theme::CARD_TITLE)
             .add_modifier(selected_mod),
     ));
 
@@ -569,90 +566,105 @@ mod tests {
 
     #[test]
     fn border_color_blocked_wins_over_all() {
-        assert_eq!(card_border_color(true, true,  Staleness::Fresh),     Theme::BLOCKER);
-        assert_eq!(card_border_color(true, false, Staleness::Fresh),     Theme::BLOCKER);
-        assert_eq!(card_border_color(true, false, Staleness::VeryStale), Theme::BLOCKER);
-        assert_eq!(card_border_color(true, true,  Staleness::Stale),     Theme::BLOCKER);
+        assert_eq!(card_border_color(true, true,  Staleness::Fresh, false),     Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, Staleness::Fresh, false),     Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, Staleness::VeryStale, false), Theme::BLOCKER);
+        assert_eq!(card_border_color(true, true,  Staleness::Stale, false),     Theme::BLOCKER);
+        // Blocker wins even for new cards
+        assert_eq!(card_border_color(true, true,  Staleness::Fresh, true),      Theme::BLOCKER);
     }
 
     #[test]
     fn border_color_unfocused_fresh_returns_dim() {
-        assert_eq!(card_border_color(false, false, Staleness::Fresh), Theme::DIM);
+        assert_eq!(card_border_color(false, false, Staleness::Fresh, false), Theme::DIM);
     }
 
     #[test]
     fn border_color_unfocused_stale_returns_stale_color() {
-        assert_eq!(card_border_color(false, false, Staleness::Stale), Theme::STALE);
+        assert_eq!(card_border_color(false, false, Staleness::Stale, false), Theme::STALE);
     }
 
     #[test]
     fn border_color_unfocused_very_stale_returns_very_stale_color() {
-        assert_eq!(card_border_color(false, false, Staleness::VeryStale), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, Staleness::VeryStale, false), Theme::VERY_STALE);
     }
 
     #[test]
     fn border_color_focused_fresh_is_card_border() {
-        assert_eq!(card_border_color(false, true, Staleness::Fresh), Theme::CARD_BORDER);
+        assert_eq!(card_border_color(false, true, Staleness::Fresh, false), Theme::CARD_BORDER);
     }
 
     #[test]
     fn border_color_focused_stale_is_stale_color() {
-        assert_eq!(card_border_color(false, true, Staleness::Stale), Theme::STALE);
+        assert_eq!(card_border_color(false, true, Staleness::Stale, false), Theme::STALE);
     }
 
     #[test]
     fn border_color_focused_very_stale_is_very_stale_color() {
-        assert_eq!(card_border_color(false, true, Staleness::VeryStale), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, true, Staleness::VeryStale, false), Theme::VERY_STALE);
     }
 
     #[test]
     fn border_color_stale_always_shows_semantic_color() {
-        // Stale border color must be visible regardless of column focus.
-        assert_eq!(card_border_color(false, true, Staleness::Stale), Theme::STALE);
-        assert_eq!(card_border_color(false, false, Staleness::Stale), Theme::STALE);
+        assert_eq!(card_border_color(false, true, Staleness::Stale, false), Theme::STALE);
+        assert_eq!(card_border_color(false, false, Staleness::Stale, false), Theme::STALE);
     }
 
     #[test]
     fn border_color_very_stale_always_shows_semantic_color() {
-        assert_eq!(card_border_color(false, true, Staleness::VeryStale), Theme::VERY_STALE);
-        assert_eq!(card_border_color(false, false, Staleness::VeryStale), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, true, Staleness::VeryStale, false), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, Staleness::VeryStale, false), Theme::VERY_STALE);
     }
 
-    // ── title_color ─────────────────────────────────────────────────────────
+    #[test]
+    fn border_color_new_card_is_green() {
+        // New card border is green regardless of column focus
+        assert_eq!(card_border_color(false, true, Staleness::Fresh, true), Theme::NEW_CARD_TITLE);
+        assert_eq!(card_border_color(false, false, Staleness::Fresh, true), Theme::NEW_CARD_TITLE);
+    }
 
     #[test]
-    fn title_color_created_today_is_green() {
+    fn border_color_staleness_beats_new_card() {
+        // Staleness takes priority over the new-green signal
+        assert_eq!(card_border_color(false, false, Staleness::Stale, true), Theme::STALE);
+        assert_eq!(card_border_color(false, false, Staleness::VeryStale, true), Theme::VERY_STALE);
+    }
+
+    // ── is_new_card ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_new_card_created_today_is_true() {
         use chrono::NaiveDate;
         let day = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
         let now = day.and_hms_opt(12, 0, 0).unwrap().and_utc();
-        assert_eq!(title_color(now, now), Theme::NEW_CARD_TITLE);
+        assert!(is_new_card(now, now));
     }
 
     #[test]
-    fn title_color_created_yesterday_is_default() {
+    fn is_new_card_created_yesterday_is_false() {
         use chrono::NaiveDate;
         let today = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
         let yesterday = today.pred_opt().unwrap();
         let created = yesterday.and_hms_opt(18, 0, 0).unwrap().and_utc();
         let now = today.and_hms_opt(9, 0, 0).unwrap().and_utc();
-        assert_eq!(title_color(created, now), Theme::CARD_TITLE);
+        assert!(!is_new_card(created, now));
     }
 
     #[test]
-    fn title_color_same_day_start_and_end() {
+    fn is_new_card_same_day_start_and_end() {
         use chrono::NaiveDate;
         let day = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
         let start = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
         let end = day.and_hms_opt(23, 59, 59).unwrap().and_utc();
-        assert_eq!(title_color(start, end), Theme::NEW_CARD_TITLE);
+        assert!(is_new_card(start, end));
     }
 
     #[test]
-    fn title_color_one_second_across_midnight_is_not_green() {
+    fn is_new_card_one_second_across_midnight_is_false() {
         use chrono::NaiveDate;
         let day = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
         let before_midnight = day.and_hms_opt(23, 59, 59).unwrap().and_utc();
         let after_midnight = day.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
-        assert_eq!(title_color(before_midnight, after_midnight), Theme::CARD_TITLE);
+        assert!(!is_new_card(before_midnight, after_midnight));
     }
 }
