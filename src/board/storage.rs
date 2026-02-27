@@ -692,6 +692,11 @@ pub fn load_local_config(kando_dir: &Path) -> Result<crate::config::LocalConfig,
 /// Persist per-user local preferences to `.kando/local.toml`.
 /// A best-effort attempt is made to add `local.toml` to `.kando/.gitignore`;
 /// gitignore failures are intentionally ignored so they never block the save.
+///
+/// Currently unused at runtime (LocalConfig is empty), but kept as
+/// infrastructure for future local preferences.
+/// When LocalConfig gains new fields, restore this to non-test visibility.
+#[cfg(test)]
 pub fn save_local_config(kando_dir: &Path, config: &crate::config::LocalConfig) -> Result<(), StorageError> {
     let content = toml::to_string_pretty(config)?;
     fs::write(kando_dir.join("local.toml"), content)?;
@@ -701,6 +706,7 @@ pub fn save_local_config(kando_dir: &Path, config: &crate::config::LocalConfig) 
 
 /// Ensure `.kando/.gitignore` contains a `local.toml` entry.
 /// Opens the file once with read+write access to avoid a TOCTOU window.
+#[cfg(test)]
 fn ensure_local_gitignore(kando_dir: &Path) -> Result<(), StorageError> {
     use std::io::{Read, Seek, Write};
     let path = kando_dir.join(".gitignore");
@@ -1378,28 +1384,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        let cfg = load_local_config(&kando_dir).unwrap();
-        assert!(!cfg.focus_mode);
-    }
-
-    #[test]
-    fn load_local_config_focus_mode_true() {
-        let dir = tempfile::tempdir().unwrap();
-        init_board(dir.path(), "Test", None).unwrap();
-        let kando_dir = dir.path().join(".kando");
-        fs::write(kando_dir.join("local.toml"), "focus_mode = true\n").unwrap();
-        let cfg = load_local_config(&kando_dir).unwrap();
-        assert!(cfg.focus_mode);
-    }
-
-    #[test]
-    fn load_local_config_focus_mode_false_explicit() {
-        let dir = tempfile::tempdir().unwrap();
-        init_board(dir.path(), "Test", None).unwrap();
-        let kando_dir = dir.path().join(".kando");
-        fs::write(kando_dir.join("local.toml"), "focus_mode = false\n").unwrap();
-        let cfg = load_local_config(&kando_dir).unwrap();
-        assert!(!cfg.focus_mode);
+        let _cfg = load_local_config(&kando_dir).unwrap();
     }
 
     #[test]
@@ -1407,7 +1392,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        fs::write(kando_dir.join("local.toml"), "focus_mode = !!!\n").unwrap();
+        fs::write(kando_dir.join("local.toml"), "bad = !!!\n").unwrap();
         assert!(load_local_config(&kando_dir).is_err());
     }
 
@@ -1417,8 +1402,16 @@ mod tests {
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         fs::write(kando_dir.join("local.toml"), "").unwrap();
-        let cfg = load_local_config(&kando_dir).unwrap();
-        assert!(!cfg.focus_mode);
+        let _cfg = load_local_config(&kando_dir).unwrap();
+    }
+
+    #[test]
+    fn load_local_config_legacy_focus_mode_field_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::write(kando_dir.join("local.toml"), "focus_mode = true\n").unwrap();
+        let _cfg = load_local_config(&kando_dir).unwrap();
     }
 
     #[test]
@@ -1426,17 +1419,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        fs::write(kando_dir.join("local.toml"), "focus_mode = true\nunknown_future_key = 42\n").unwrap();
-        let cfg = load_local_config(&kando_dir).unwrap();
-        assert!(cfg.focus_mode);
+        fs::write(kando_dir.join("local.toml"), "unknown_future_key = 42\n").unwrap();
+        let _cfg = load_local_config(&kando_dir).unwrap();
     }
 
     #[test]
     fn load_local_config_nonexistent_kando_dir_returns_default() {
         let dir = tempfile::tempdir().unwrap();
         let kando_dir = dir.path().join(".kando"); // never created
-        let cfg = load_local_config(&kando_dir).unwrap();
-        assert!(!cfg.focus_mode);
+        let _cfg = load_local_config(&kando_dir).unwrap();
     }
 
     #[test]
@@ -1444,21 +1435,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        let cfg = crate::config::LocalConfig { focus_mode: true };
+        let cfg = crate::config::LocalConfig {};
         save_local_config(&kando_dir, &cfg).unwrap();
         assert!(kando_dir.join("local.toml").exists());
-        let loaded = load_local_config(&kando_dir).unwrap();
-        assert!(loaded.focus_mode);
-    }
-
-    #[test]
-    fn save_local_config_overwrites_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        init_board(dir.path(), "Test", None).unwrap();
-        let kando_dir = dir.path().join(".kando");
-        fs::write(kando_dir.join("local.toml"), "focus_mode = false\n").unwrap();
-        save_local_config(&kando_dir, &crate::config::LocalConfig { focus_mode: true }).unwrap();
-        assert!(load_local_config(&kando_dir).unwrap().focus_mode);
     }
 
     #[test]
@@ -1466,10 +1445,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        let original = crate::config::LocalConfig { focus_mode: true };
+        let original = crate::config::LocalConfig {};
         save_local_config(&kando_dir, &original).unwrap();
-        let loaded = load_local_config(&kando_dir).unwrap();
-        assert_eq!(loaded.focus_mode, original.focus_mode);
+        let _loaded = load_local_config(&kando_dir).unwrap();
     }
 
     #[test]

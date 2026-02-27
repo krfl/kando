@@ -189,8 +189,6 @@ pub struct AppState {
     pub cached_trash_ids: Vec<(String, String)>, // (id, title)
     /// Use Nerd Font glyphs instead of ASCII icons.
     pub nerd_font: bool,
-    /// Dim unfocused columns and their cards. Persisted in .kando/local.toml.
-    pub focus_mode: bool,
 }
 
 impl AppState {
@@ -212,7 +210,6 @@ impl AppState {
             deleted_this_session: false,
             cached_trash_ids: Vec::new(),
             nerd_font: false,
-            focus_mode: false,
         }
     }
 
@@ -492,10 +489,9 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
     // CLI --nerd-font flag overrides config; otherwise use board config value
     state.nerd_font = nerd_font_flag || board.nerd_font;
 
-    // Load per-user local preferences (focus mode, etc.)
-    match load_local_config(&kando_dir) {
-        Ok(cfg) => state.focus_mode = cfg.focus_mode,
-        Err(e) => state.notify_error(format!("local.toml: {e}")),
+    // Load per-user local preferences (currently empty, kept for extensibility).
+    if let Err(e) = load_local_config(&kando_dir) {
+        state.notify_error(format!("local.toml: {e}"));
     }
 
     // Initialize git sync if configured

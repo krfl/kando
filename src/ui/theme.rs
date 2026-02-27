@@ -99,6 +99,9 @@ impl Theme {
     pub const WIP_NEAR: Color = Color::Yellow;
     pub const WIP_OVER: Color = Color::Red;
 
+    // Card title — cards created today
+    pub const NEW_CARD_TITLE: Color = Color::Green;
+
     // Assignee
     pub const ASSIGNEE: Color = Color::Cyan;
 
@@ -307,5 +310,31 @@ mod tests {
     #[test]
     fn bubble_up_levels_are_distinct_colors() {
         assert_ne!(Theme::STALE, Theme::VERY_STALE);
+    }
+
+    #[test]
+    fn new_card_title_is_green() {
+        assert_eq!(Theme::NEW_CARD_TITLE, Color::Green);
+    }
+
+    #[test]
+    fn semantic_content_colors_are_never_dim() {
+        // Anti-regression: titles, assignees, and tags must never be dimmed.
+        assert_ne!(Theme::CARD_TITLE, Theme::DIM);
+        assert_ne!(Theme::NEW_CARD_TITLE, Theme::DIM);
+        assert_ne!(Theme::ASSIGNEE, Theme::DIM);
+    }
+
+    #[test]
+    fn tag_color_never_returns_dim() {
+        // Use enough distinct tags to cover all 12 palette slots.
+        let tags = [
+            "bug", "feature", "docs", "refactor", "test", "urgent",
+            "chore", "perf", "ci", "style", "security", "infra",
+            "deploy", "ui", "api", "backend",
+        ];
+        for tag in &tags {
+            assert_ne!(Theme::tag_color(tag), Theme::DIM, "tag '{tag}' should never be DIM");
+        }
     }
 }

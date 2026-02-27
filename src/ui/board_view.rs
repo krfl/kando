@@ -44,19 +44,31 @@ pub(crate) fn fit_icons<'a>(candidates: &[(&'a str, Style)], avail_width: usize)
 
 /// Border color for a card based on blocked state, column focus, and staleness.
 ///
+/// Semantic border colors (blocker, stale, very-stale) are always visible
+/// regardless of column focus — these are information-carrying signals.
+/// Only fresh cards in unfocused columns are dimmed.
+///
 /// Selection is expressed via `BorderType::Thick + Modifier::BOLD`, not via
 /// color — so `is_selected` is intentionally absent from this function.
 pub(crate) fn card_border_color(blocked: bool, is_col_focused: bool, stale: Staleness) -> Color {
     if blocked {
         Theme::BLOCKER
-    } else if !is_col_focused {
-        Theme::DIM
     } else {
         match stale {
             Staleness::VeryStale => Theme::VERY_STALE,
             Staleness::Stale => Theme::STALE,
-            Staleness::Fresh => Theme::CARD_BORDER,
+            Staleness::Fresh if is_col_focused => Theme::CARD_BORDER,
+            Staleness::Fresh => Theme::DIM,
         }
+    }
+}
+
+/// Title color: green for cards created on the same UTC day as `now`.
+pub(crate) fn title_color(created: DateTime<Utc>, now: DateTime<Utc>) -> Color {
+    if created.date_naive() == now.date_naive() {
+        Theme::NEW_CARD_TITLE
+    } else {
+        Theme::CARD_TITLE
     }
 }
 
@@ -168,10 +180,7 @@ fn render_column(
         wip_text,
     ]);
 
-    // True when this column should render at full brightness:
-    // either it is the focused column, or focus mode is off.
-    let highlight = is_focused || !state.focus_mode;
-    let border_color = if highlight {
+    let border_color = if is_focused {
         Theme::COLUMN_FOCUSED_BORDER
     } else {
         Theme::COLUMN_BORDER
@@ -236,7 +245,7 @@ fn render_column(
         let card_area = Rect::new(inner.x, y, inner.width, card_height);
 
         let is_selected = is_focused && state.selected_card == real_idx;
-        render_card(f, card_area, card, is_selected, highlight, policies, now, icons);
+        render_card(f, card_area, card, is_selected, is_focused, policies, now, icons);
     }
 
     // Scroll indicator
@@ -286,10 +295,7 @@ fn render_card(
         return;
     }
 
-    // Text content (title, assignees, tags) dims when the column is unfocused.
-    let focused_color = |semantic: Color| -> Color {
-        if is_col_focused { semantic } else { Theme::DIM }
-    };
+    let title_color = title_color(card.created, now);
 
     // Compute left-side width up front so glyph truncation can use it.
     let marker = format!("{} ", icons.chevron);
@@ -377,7 +383,7 @@ fn render_card(
     let title_line = Line::from(Span::styled(
         title,
         Style::default()
-            .fg(focused_color(Theme::CARD_TITLE))
+            .fg(title_color)
             .add_modifier(selected_mod),
     ));
 
@@ -406,7 +412,7 @@ fn render_card(
             spans.push(Span::styled(
                 format!("@{assignee}"),
                 Style::default()
-                    .fg(focused_color(Theme::ASSIGNEE))
+                    .fg(Theme::ASSIGNEE)
                     .add_modifier(selected_mod),
             ));
             need_sep = true;
@@ -418,7 +424,7 @@ fn render_card(
             spans.push(Span::styled(
                 tag.as_str(),
                 Style::default()
-                    .fg(focused_color(Theme::tag_color(tag)))
+                    .fg(Theme::tag_color(tag))
                     .add_modifier(selected_mod),
             ));
             need_sep = true;
@@ -557,15 +563,24 @@ mod tests {
     #[test]
     fn border_color_blocked_wins_over_all() {
         assert_eq!(card_border_color(true, true,  Staleness::Fresh),     Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, Staleness::Fresh),     Theme::BLOCKER);
         assert_eq!(card_border_color(true, false, Staleness::VeryStale), Theme::BLOCKER);
         assert_eq!(card_border_color(true, true,  Staleness::Stale),     Theme::BLOCKER);
     }
 
     #[test]
-    fn border_color_unfocused_returns_dim() {
-        assert_eq!(card_border_color(false, false, Staleness::Fresh),     Theme::DIM);
-        assert_eq!(card_border_color(false, false, Staleness::Stale),     Theme::DIM);
-        assert_eq!(card_border_color(false, false, Staleness::VeryStale), Theme::DIM);
+    fn border_color_unfocused_fresh_returns_dim() {
+        assert_eq!(card_border_color(false, false, Staleness::Fresh), Theme::DIM);
+    }
+
+    #[test]
+    fn border_color_unfocused_stale_returns_stale_color() {
+        assert_eq!(card_border_color(false, false, Staleness::Stale), Theme::STALE);
+    }
+
+    #[test]
+    fn border_color_unfocused_very_stale_returns_very_stale_color() {
+        assert_eq!(card_border_color(false, false, Staleness::VeryStale), Theme::VERY_STALE);
     }
 
     #[test]
@@ -583,20 +598,54 @@ mod tests {
         assert_eq!(card_border_color(false, true, Staleness::VeryStale), Theme::VERY_STALE);
     }
 
-    /// Regression: before this change, stale+selected returned CARD_BORDER (Reset).
-    /// Now the semantic color must show through regardless of selection.
     #[test]
-    fn border_color_stale_selected_returns_stale_not_card_border() {
-        let color = card_border_color(false, true, Staleness::Stale);
-        assert_eq!(color, Theme::STALE);
-        assert_ne!(color, Theme::CARD_BORDER);
+    fn border_color_stale_always_shows_semantic_color() {
+        // Stale border color must be visible regardless of column focus.
+        assert_eq!(card_border_color(false, true, Staleness::Stale), Theme::STALE);
+        assert_eq!(card_border_color(false, false, Staleness::Stale), Theme::STALE);
     }
 
-    /// Regression: very_stale+selected must return VERY_STALE, not Reset.
     #[test]
-    fn border_color_very_stale_selected_returns_very_stale_not_card_border() {
-        let color = card_border_color(false, true, Staleness::VeryStale);
-        assert_eq!(color, Theme::VERY_STALE);
-        assert_ne!(color, Theme::CARD_BORDER);
+    fn border_color_very_stale_always_shows_semantic_color() {
+        assert_eq!(card_border_color(false, true, Staleness::VeryStale), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, Staleness::VeryStale), Theme::VERY_STALE);
+    }
+
+    // ── title_color ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn title_color_created_today_is_green() {
+        use chrono::NaiveDate;
+        let day = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let now = day.and_hms_opt(12, 0, 0).unwrap().and_utc();
+        assert_eq!(title_color(now, now), Theme::NEW_CARD_TITLE);
+    }
+
+    #[test]
+    fn title_color_created_yesterday_is_default() {
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let created = yesterday.and_hms_opt(18, 0, 0).unwrap().and_utc();
+        let now = today.and_hms_opt(9, 0, 0).unwrap().and_utc();
+        assert_eq!(title_color(created, now), Theme::CARD_TITLE);
+    }
+
+    #[test]
+    fn title_color_same_day_start_and_end() {
+        use chrono::NaiveDate;
+        let day = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let start = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let end = day.and_hms_opt(23, 59, 59).unwrap().and_utc();
+        assert_eq!(title_color(start, end), Theme::NEW_CARD_TITLE);
+    }
+
+    #[test]
+    fn title_color_one_second_across_midnight_is_not_green() {
+        use chrono::NaiveDate;
+        let day = NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let before_midnight = day.and_hms_opt(23, 59, 59).unwrap().and_utc();
+        let after_midnight = day.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
+        assert_eq!(title_color(before_midnight, after_midnight), Theme::CARD_TITLE);
     }
 }

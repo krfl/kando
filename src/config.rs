@@ -13,8 +13,9 @@ pub struct BoardConfig {
 /// Defaults to all-off so missing fields are handled gracefully.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LocalConfig {
-    #[serde(default)]
-    pub focus_mode: bool,
+    // Currently empty — kept as the extension point for future local prefs.
+    // serde(deny_unknown_fields) is intentionally absent so that old
+    // local.toml files with `focus_mode` (removed) don't cause errors.
 }
 
 #[cfg(test)]
@@ -22,31 +23,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_config_default_is_false() {
-        assert!(!LocalConfig::default().focus_mode);
+    fn local_config_default_creates_empty_struct() {
+        let _cfg = LocalConfig::default();
     }
 
     #[test]
-    fn local_config_toml_roundtrip_focus_true() {
-        let original = LocalConfig { focus_mode: true };
+    fn local_config_toml_roundtrip() {
+        let original = LocalConfig {};
         let serialized = toml::to_string_pretty(&original).unwrap();
-        let loaded: LocalConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(loaded.focus_mode, original.focus_mode);
+        let _loaded: LocalConfig = toml::from_str(&serialized).unwrap();
     }
 
     #[test]
-    fn local_config_toml_roundtrip_focus_false() {
-        let original = LocalConfig { focus_mode: false };
-        let serialized = toml::to_string_pretty(&original).unwrap();
-        // Confirm false is written explicitly, not omitted
-        assert!(serialized.contains("focus_mode"));
-        let loaded: LocalConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(loaded.focus_mode, original.focus_mode);
+    fn local_config_empty_string_deserializes() {
+        let _loaded: LocalConfig = toml::from_str("").unwrap();
     }
 
     #[test]
-    fn local_config_missing_field_deserializes_as_false() {
-        let loaded: LocalConfig = toml::from_str("").unwrap();
-        assert!(!loaded.focus_mode);
+    fn local_config_ignores_unknown_fields() {
+        // Old local.toml files may still contain `focus_mode` from before it was removed.
+        let _loaded: LocalConfig = toml::from_str("focus_mode = true\n").unwrap();
     }
 }
