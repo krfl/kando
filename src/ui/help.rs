@@ -7,8 +7,8 @@ use ratatui::Frame;
 use super::theme::Theme;
 use crate::input::keymap;
 
-pub fn render_help(f: &mut Frame, area: Rect, scroll: u16) {
-    let panel_area = super::centered_rect(area, 70, 85, 60, 24);
+pub fn render_help(f: &mut Frame, area: Rect, scroll: &mut u16) {
+    let panel_area = super::overlay_rect(area);
 
     f.render_widget(Clear, panel_area);
 
@@ -37,7 +37,13 @@ pub fn render_help(f: &mut Frame, area: Rect, scroll: u16) {
         .fg(Theme::FG)
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
-    let mut lines = Vec::new();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "j/k scroll  |  Esc close",
+            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
     for group in keymap::HELP_GROUPS {
         lines.push(Line::from(Span::styled(group.name, heading)));
         for b in group.bindings {
@@ -48,13 +54,12 @@ pub fn render_help(f: &mut Frame, area: Rect, scroll: u16) {
         }
         lines.push(Line::from(""));
     }
-    lines.push(Line::from(Span::styled(
-        "J/K scroll  |  Esc close",
-        Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
-    )));
+
+    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
+    *scroll = (*scroll).min(max_scroll);
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((*scroll, 0));
     f.render_widget(paragraph, inner);
 }

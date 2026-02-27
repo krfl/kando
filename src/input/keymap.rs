@@ -16,30 +16,31 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Confirm { .. } => map_confirm(key),
         Mode::Filter { .. } => map_input(key),
         Mode::Picker { .. } => map_picker(key),
-        Mode::Tutorial => Action::DismissTutorial,
+        Mode::Tutorial { .. } => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::DismissTutorial,
+            KeyCode::Char('j') | KeyCode::Down => Action::DetailScrollDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::DetailScrollUp,
+            _ => Action::None,
+        },
         Mode::Help { .. } => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::ClosePanel,
-            KeyCode::Char('J') | KeyCode::Down => Action::DetailScrollDown,
-            KeyCode::Char('K') | KeyCode::Up => Action::DetailScrollUp,
+            KeyCode::Char('j') | KeyCode::Down => Action::DetailScrollDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::DetailScrollUp,
             _ => Action::None,
         },
         Mode::Metrics { .. } => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::ClosePanel,
-            KeyCode::Char('J') | KeyCode::Down => Action::DetailScrollDown,
-            KeyCode::Char('K') | KeyCode::Up => Action::DetailScrollUp,
+            KeyCode::Char('j') | KeyCode::Down => Action::DetailScrollDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::DetailScrollUp,
             _ => Action::None,
         },
         Mode::CardDetail { .. } => match key.code {
-            KeyCode::Esc => Action::ClosePanel,
-            KeyCode::Char('q') => Action::ClosePanel,
+            KeyCode::Esc | KeyCode::Char('q') => Action::ClosePanel,
             KeyCode::Char('e') => Action::EditCardExternal,
-            KeyCode::Char('t') => Action::EditTags,
-            KeyCode::Char('p') => Action::CyclePriority,
-            KeyCode::Char('b') => Action::ToggleBlocker,
-            KeyCode::Char('j') | KeyCode::Down => Action::DetailNextCard,
-            KeyCode::Char('k') | KeyCode::Up => Action::DetailPrevCard,
-            KeyCode::Char('J') => Action::DetailScrollDown,
-            KeyCode::Char('K') => Action::DetailScrollUp,
+            KeyCode::Char('j') | KeyCode::Down => Action::DetailScrollDown,
+            KeyCode::Char('k') | KeyCode::Up => Action::DetailScrollUp,
+            KeyCode::Tab => Action::DetailNextCard,
+            KeyCode::BackTab => Action::DetailPrevCard,
             _ => Action::None,
         },
     }
@@ -99,8 +100,6 @@ fn map_space(key: KeyEvent) -> Action {
         KeyCode::Char('b') => Action::ToggleBlocker,
         KeyCode::Char('x') => Action::ArchiveCard,
         KeyCode::Char('u') => Action::Undo,
-        KeyCode::Char('/') => Action::StartFilter,
-        KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Esc => Action::None,
         _ => Action::None,
     }
@@ -230,8 +229,6 @@ pub const SPACE_BINDINGS: &[Binding] = &[
     Binding { key: "b", description: "Toggle blocker", tutorial: false },
     Binding { key: "x", description: "Archive card", tutorial: false },
     Binding { key: "u", description: "Undo last delete", tutorial: false },
-    Binding { key: "/", description: "Search all", tutorial: false },
-    Binding { key: "?", description: "Help", tutorial: false },
 ];
 
 pub const FILTER_BINDINGS: &[Binding] = &[
@@ -268,12 +265,9 @@ pub const COL_MOVE_BINDINGS: &[Binding] = &[
 ];
 
 pub const DETAIL_BINDINGS: &[Binding] = &[
-    Binding { key: "j / k", description: "Next/prev card", tutorial: false },
-    Binding { key: "J / K", description: "Scroll content", tutorial: false },
+    Binding { key: "j / k", description: "Scroll", tutorial: false },
+    Binding { key: "Tab/S-Tab", description: "Next/prev card", tutorial: false },
     Binding { key: "e", description: "Edit in $EDITOR", tutorial: false },
-    Binding { key: "t", description: "Edit tags", tutorial: false },
-    Binding { key: "p", description: "Cycle priority", tutorial: false },
-    Binding { key: "b", description: "Toggle blocker", tutorial: false },
     Binding { key: "Esc", description: "Close", tutorial: false },
 ];
 
@@ -350,14 +344,26 @@ mod tests {
     }
 
     #[test]
-    fn metrics_mode_shift_j_scrolls_down() {
-        let action = map_key(key(KeyCode::Char('J')), &Mode::Metrics { scroll: 0 });
+    fn metrics_mode_j_scrolls_down() {
+        let action = map_key(key(KeyCode::Char('j')), &Mode::Metrics { scroll: 0 });
         assert_eq!(action, Action::DetailScrollDown);
     }
 
     #[test]
-    fn metrics_mode_shift_k_scrolls_up() {
-        let action = map_key(key(KeyCode::Char('K')), &Mode::Metrics { scroll: 3 });
+    fn metrics_mode_k_scrolls_up() {
+        let action = map_key(key(KeyCode::Char('k')), &Mode::Metrics { scroll: 3 });
+        assert_eq!(action, Action::DetailScrollUp);
+    }
+
+    #[test]
+    fn metrics_mode_down_arrow_scrolls_down() {
+        let action = map_key(key(KeyCode::Down), &Mode::Metrics { scroll: 0 });
+        assert_eq!(action, Action::DetailScrollDown);
+    }
+
+    #[test]
+    fn metrics_mode_up_arrow_scrolls_up() {
+        let action = map_key(key(KeyCode::Up), &Mode::Metrics { scroll: 3 });
         assert_eq!(action, Action::DetailScrollUp);
     }
 
@@ -382,14 +388,14 @@ mod tests {
     }
 
     #[test]
-    fn help_mode_shift_j_scrolls_down() {
-        let action = map_key(key(KeyCode::Char('J')), &Mode::Help { scroll: 0 });
+    fn help_mode_j_scrolls_down() {
+        let action = map_key(key(KeyCode::Char('j')), &Mode::Help { scroll: 0 });
         assert_eq!(action, Action::DetailScrollDown);
     }
 
     #[test]
-    fn help_mode_shift_k_scrolls_up() {
-        let action = map_key(key(KeyCode::Char('K')), &Mode::Help { scroll: 3 });
+    fn help_mode_k_scrolls_up() {
+        let action = map_key(key(KeyCode::Char('k')), &Mode::Help { scroll: 3 });
         assert_eq!(action, Action::DetailScrollUp);
     }
 
@@ -408,18 +414,6 @@ mod tests {
     #[test]
     fn help_mode_other_key_is_noop() {
         let action = map_key(key(KeyCode::Char('x')), &Mode::Help { scroll: 0 });
-        assert_eq!(action, Action::None);
-    }
-
-    #[test]
-    fn help_mode_lowercase_j_is_noop() {
-        let action = map_key(key(KeyCode::Char('j')), &Mode::Help { scroll: 0 });
-        assert_eq!(action, Action::None);
-    }
-
-    #[test]
-    fn help_mode_lowercase_k_is_noop() {
-        let action = map_key(key(KeyCode::Char('k')), &Mode::Help { scroll: 0 });
         assert_eq!(action, Action::None);
     }
 
@@ -653,11 +647,6 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('b')), &Mode::Space), Action::ToggleBlocker);
     }
 
-    #[test]
-    fn space_question_mark_shows_help() {
-        assert_eq!(map_key(key(KeyCode::Char('?')), &Mode::Space), Action::ShowHelp);
-    }
-
     // ── Column mode bindings ──
 
     #[test]
@@ -763,28 +752,103 @@ mod tests {
     }
 
     #[test]
-    fn detail_t_edits_tags() {
+    fn detail_j_k_scrolls() {
         let mode = Mode::CardDetail { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Char('t')), &mode), Action::EditTags);
+        assert_eq!(map_key(key(KeyCode::Char('j')), &mode), Action::DetailScrollDown);
+        assert_eq!(map_key(key(KeyCode::Char('k')), &mode), Action::DetailScrollUp);
     }
 
     #[test]
-    fn detail_p_cycles_priority() {
+    fn detail_tab_navigates_cards() {
         let mode = Mode::CardDetail { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Char('p')), &mode), Action::CyclePriority);
-    }
-
-    #[test]
-    fn detail_j_k_navigates_cards() {
-        let mode = Mode::CardDetail { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Char('j')), &mode), Action::DetailNextCard);
-        assert_eq!(map_key(key(KeyCode::Char('k')), &mode), Action::DetailPrevCard);
+        assert_eq!(map_key(key(KeyCode::Tab), &mode), Action::DetailNextCard);
+        assert_eq!(map_key(key(KeyCode::BackTab), &mode), Action::DetailPrevCard);
     }
 
     #[test]
     fn detail_esc_closes() {
         let mode = Mode::CardDetail { scroll: 0 };
         assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::ClosePanel);
+    }
+
+    #[test]
+    fn detail_q_closes() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('q')), &mode), Action::ClosePanel);
+    }
+
+    #[test]
+    fn detail_down_arrow_scrolls_down() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Down), &mode), Action::DetailScrollDown);
+    }
+
+    #[test]
+    fn detail_up_arrow_scrolls_up() {
+        let mode = Mode::CardDetail { scroll: 3 };
+        assert_eq!(map_key(key(KeyCode::Up), &mode), Action::DetailScrollUp);
+    }
+
+    #[test]
+    fn detail_t_is_noop() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('t')), &mode), Action::None);
+    }
+
+    #[test]
+    fn detail_p_is_noop() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('p')), &mode), Action::None);
+    }
+
+    #[test]
+    fn detail_b_is_noop() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('b')), &mode), Action::None);
+    }
+
+    // ── Tutorial mode bindings ──
+
+    #[test]
+    fn tutorial_j_scrolls_down() {
+        let mode = Mode::Tutorial { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('j')), &mode), Action::DetailScrollDown);
+    }
+
+    #[test]
+    fn tutorial_k_scrolls_up() {
+        let mode = Mode::Tutorial { scroll: 3 };
+        assert_eq!(map_key(key(KeyCode::Char('k')), &mode), Action::DetailScrollUp);
+    }
+
+    #[test]
+    fn tutorial_esc_dismisses() {
+        let mode = Mode::Tutorial { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::DismissTutorial);
+    }
+
+    #[test]
+    fn tutorial_q_dismisses() {
+        let mode = Mode::Tutorial { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('q')), &mode), Action::DismissTutorial);
+    }
+
+    #[test]
+    fn tutorial_down_arrow_scrolls_down() {
+        let mode = Mode::Tutorial { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Down), &mode), Action::DetailScrollDown);
+    }
+
+    #[test]
+    fn tutorial_up_arrow_scrolls_up() {
+        let mode = Mode::Tutorial { scroll: 3 };
+        assert_eq!(map_key(key(KeyCode::Up), &mode), Action::DetailScrollUp);
+    }
+
+    #[test]
+    fn tutorial_other_key_is_noop() {
+        let mode = Mode::Tutorial { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('x')), &mode), Action::None);
     }
 
     // ── Binding registry tests ──
@@ -808,13 +872,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn space_bindings_question_mark_not_tutorial() {
-        // ? in SPACE_BINDINGS should never be tutorial: true — that would duplicate
-        // the ? entry already in NORMAL_BINDINGS in the tutorial overlay.
-        let entry = SPACE_BINDINGS.iter().find(|b| b.key == "?").unwrap();
-        assert!(!entry.tutorial, "? in SPACE_BINDINGS should be tutorial: false");
-    }
 
     // ── mode_bindings tests ──
 

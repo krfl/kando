@@ -92,15 +92,6 @@ pub enum Priority {
 impl Priority {
     pub const ALL: [Priority; 4] = [Self::Low, Self::Normal, Self::High, Self::Urgent];
 
-    pub fn next(self) -> Self {
-        match self {
-            Self::Low => Self::Normal,
-            Self::Normal => Self::High,
-            Self::High => Self::Urgent,
-            Self::Urgent => Self::Low,
-        }
-    }
-
     /// Sort key: lower = higher priority (sorts first).
     pub fn sort_key(self) -> u8 {
         match self {
@@ -960,14 +951,6 @@ mod tests {
     fn priority_from_str_unknown_returns_err() {
         assert!("unknown".parse::<Priority>().is_err());
         assert!("".parse::<Priority>().is_err());
-    }
-
-    #[test]
-    fn priority_next_cycles() {
-        assert_eq!(Priority::Low.next(), Priority::Normal);
-        assert_eq!(Priority::Normal.next(), Priority::High);
-        assert_eq!(Priority::High.next(), Priority::Urgent);
-        assert_eq!(Priority::Urgent.next(), Priority::Low);
     }
 
     #[test]

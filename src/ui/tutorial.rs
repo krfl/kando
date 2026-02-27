@@ -7,8 +7,8 @@ use ratatui::Frame;
 use super::theme::Theme;
 use crate::input::keymap;
 
-pub fn render_tutorial(f: &mut Frame, area: Rect) {
-    let panel_area = super::centered_rect(area, 50, 80, 44, 20);
+pub fn render_tutorial(f: &mut Frame, area: Rect, scroll: &mut u16) {
+    let panel_area = super::overlay_rect(area);
 
     f.render_widget(Clear, panel_area);
 
@@ -35,7 +35,13 @@ pub fn render_tutorial(f: &mut Frame, area: Rect) {
     let dim = Theme::dim_style();
     let heading = Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD);
 
-    let mut lines = Vec::new();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "j/k scroll  |  Esc close",
+            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
     for group in keymap::TUTORIAL_GROUPS {
         lines.push(Line::from(Span::styled(group.name, heading)));
         for b in group.bindings.iter().filter(|b| b.tutorial) {
@@ -46,11 +52,12 @@ pub fn render_tutorial(f: &mut Frame, area: Rect) {
         }
         lines.push(Line::from(""));
     }
-    lines.push(Line::from(Span::styled(
-        "Press any key to start",
-        Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
-    )));
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
+    *scroll = (*scroll).min(max_scroll);
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((*scroll, 0));
     f.render_widget(paragraph, inner);
 }

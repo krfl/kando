@@ -9,9 +9,9 @@ use crate::board::age::{format_age, staleness, Staleness};
 use crate::board::{Card, Policies};
 use chrono::{DateTime, Utc};
 
-pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: u16, now: DateTime<Utc>, icons: &Icons) {
+pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: &mut u16, now: DateTime<Utc>, icons: &Icons) {
 
-    let panel_area = super::centered_rect(area, 60, 80, 40, 10);
+    let panel_area = super::overlay_rect(area);
 
     // Clear background
     f.render_widget(Clear, panel_area);
@@ -166,8 +166,11 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
         }
     }
 
+    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
+    *scroll = (*scroll).min(max_scroll);
+
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((*scroll, 0));
     f.render_widget(paragraph, inner);
 }

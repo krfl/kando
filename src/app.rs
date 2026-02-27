@@ -125,7 +125,9 @@ pub enum Mode {
     Metrics {
         scroll: u16,
     },
-    Tutorial,
+    Tutorial {
+        scroll: u16,
+    },
     Help {
         scroll: u16,
     },
@@ -581,7 +583,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
     // Show tutorial on first launch
     if !board.tutorial_shown {
-        state.mode = Mode::Tutorial;
+        state.mode = Mode::Tutorial { scroll: 0 };
     }
 
     let mut last_auto_close = Instant::now();
@@ -616,7 +618,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
         // Render
         let now = Utc::now();
-        terminal.draw(|f| crate::ui::render(f, &board, &state, now))?;
+        terminal.draw(|f| crate::ui::render(f, &board, &mut state, now))?;
 
         // Handle input
         if event::poll(Duration::from_millis(100))? {
@@ -677,7 +679,6 @@ fn process_action(
         | Action::DeleteCard
         | Action::ArchiveCard
         | Action::EditCardExternal
-        | Action::CyclePriority
         | Action::PickPriority
         | Action::MoveToColumn
         | Action::ToggleBlocker
@@ -1250,27 +1251,6 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 }
             }
         }
-        Action::CyclePriority => {
-            if was_minor_mode { state.mode = Mode::Normal; }
-            let col_idx = state.focused_column;
-            let card_idx = state.selected_card;
-            if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
-                let card_id = card.id.clone();
-                let card_title = card.title.clone();
-                card.priority = card.priority.next();
-                card.touch();
-                let new_priority = card.priority.as_str().to_string();
-                let priority_str = format!("Priority: {new_priority}");
-                board.columns[col_idx].sort_cards();
-                let col_name = board.columns[col_idx].name.clone();
-                save_board(kando_dir, board)?;
-                append_activity(kando_dir, "priority", &card_id, &card_title,
-                    &[("column", &col_name), ("priority", &new_priority)]);
-                sync_message = Some(format!("Update priority of #{card_id} \"{card_title}\" to {new_priority}"));
-                state.clamp_selection_filtered(board);
-                state.notify(priority_str);
-            }
-        }
         Action::PickPriority => {
             use crate::board::Priority;
             state.mode = Mode::Normal;
@@ -1368,7 +1348,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailScrollDown => {
             match &mut state.mode {
-                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } => {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } | Mode::Tutorial { scroll } => {
                     *scroll = scroll.saturating_add(1);
                 }
                 _ => {}
@@ -1376,7 +1356,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailScrollUp => {
             match &mut state.mode {
-                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } => {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } | Mode::Tutorial { scroll } => {
                     *scroll = scroll.saturating_sub(1);
                 }
                 _ => {}
@@ -2188,7 +2168,7 @@ fn handle_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{Board, Card, Column, Policies, Priority};
+    use crate::board::{Board, Card, Column, Policies};
 
     /// Create a test board with the given column names, each with the given card titles.
     fn test_board(columns: &[(&str, &[&str])]) -> Board {
@@ -2763,23 +2743,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_priority() {
-        let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
-        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
-        let mut state = AppState::new();
-        let backend = ratatui::backend::TestBackend::new(80, 24);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let sync = handle_card_action(
-            &mut board, &mut state, Action::CyclePriority,
-            &mut terminal, &kando_dir, false,
-        ).unwrap();
-        assert_eq!(sync.as_deref(), Some("Update priority of #001 \"Test\" to high"));
-        assert_eq!(board.columns[0].cards[0].priority, Priority::High);
-    }
-
-    #[test]
     fn test_toggle_blocker() {
         let (_dir, kando_dir) = setup_kando_dir();
         let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
@@ -2977,6 +2940,22 @@ mod tests {
         if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
         handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
         if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
+    }
+
+    #[test]
+    fn test_tutorial_scroll() {
+        let mut board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Tutorial { scroll: 0 };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_card_action(&mut board, &mut state, Action::DetailScrollDown, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Tutorial { scroll } = state.mode { assert_eq!(scroll, 1); } else { panic!("expected Mode::Tutorial"); }
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Tutorial { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Tutorial"); }
+        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
+        if let Mode::Tutorial { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Tutorial"); }
     }
 
     #[test]
@@ -3494,7 +3473,7 @@ mod tests {
         state.active_tag_filters = vec!["missing-tag".into()];
         state.selected_card = 0;
         let mut terminal = test_terminal();
-        handle_card_action(&mut board, &mut state, Action::CyclePriority, &mut terminal, fake_dir(), false).unwrap();
+        handle_card_action(&mut board, &mut state, Action::ToggleBlocker, &mut terminal, fake_dir(), false).unwrap();
         assert_eq!(state.notification.as_deref(), Some("No visible card selected"));
     }
 

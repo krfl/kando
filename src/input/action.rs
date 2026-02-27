@@ -24,7 +24,6 @@ pub enum Action {
     EditCardExternal,
     EditTags,
     EditAssignees,
-    CyclePriority,
     PickPriority,
     MoveToColumn,
     ToggleBlocker,
