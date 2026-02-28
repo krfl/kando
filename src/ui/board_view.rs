@@ -250,8 +250,10 @@ fn render_column(
 
     // Scroll indicator
     if cards.len() > max_visible {
+        let track = if col.hidden { "╎" } else { " " };
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .track_symbol(Some(" "))
+            .track_symbol(Some(track))
+            .track_style(Style::default().fg(border_color))
             .thumb_symbol("▐")
             .thumb_style(Style::default().fg(border_color))
             .begin_symbol(None)

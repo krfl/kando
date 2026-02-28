@@ -1,7 +1,10 @@
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
+};
 use ratatui::Frame;
 
 use super::theme::{Icons, Theme};
@@ -166,11 +169,30 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
         }
     }
 
-    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
+    let line_count = lines.len();
+    let max_scroll = (line_count as u16).saturating_sub(inner.height);
     *scroll = (*scroll).min(max_scroll);
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((*scroll, 0));
     f.render_widget(paragraph, inner);
+
+    // Scrollbar
+    if max_scroll > 0 {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .track_symbol(Some("│"))
+            .track_style(Style::default().fg(border_color))
+            .thumb_symbol("▐")
+            .thumb_style(Style::default().fg(Theme::FG))
+            .begin_symbol(None)
+            .end_symbol(None);
+        let mut scrollbar_state =
+            ScrollbarState::new(max_scroll as usize + 1).position(*scroll as usize);
+        let scrollbar_area = panel_area.inner(Margin {
+            vertical: 2,
+            horizontal: 0,
+        });
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 }
