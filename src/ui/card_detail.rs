@@ -184,7 +184,7 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
             .track_symbol(Some("│"))
             .track_style(Style::default().fg(border_color))
             .thumb_symbol("▐")
-            .thumb_style(Style::default().fg(Theme::FG))
+            .thumb_style(Style::default().fg(border_color))
             .begin_symbol(None)
             .end_symbol(None);
         let mut scrollbar_state =
