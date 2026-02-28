@@ -172,7 +172,7 @@ impl Card {
             blocked: false,
             started: None,
             completed: None,
-            body: String::new(),
+            body: "<!-- add body content here -->".into(),
         }
     }
 
@@ -1070,7 +1070,7 @@ mod tests {
         assert!(!c.blocked);
         assert!(c.started.is_none());
         assert!(c.completed.is_none());
-        assert!(c.body.is_empty());
+        assert_eq!(c.body, "<!-- add body content here -->");
     }
 
     #[test]

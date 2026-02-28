@@ -809,6 +809,10 @@ mod tests {
         assert_eq!(reloaded.columns[0].cards.len(), 1);
         assert_eq!(reloaded.columns[0].cards[0].title, "Test card");
         assert_eq!(reloaded.columns[0].cards[0].tags, vec!["test"]);
+        assert_eq!(
+            reloaded.columns[0].cards[0].body,
+            "<!-- add body content here -->"
+        );
         assert_eq!(reloaded.next_card_id, 2);
     }
 
@@ -1326,7 +1330,8 @@ mod tests {
 
     #[test]
     fn serialize_card_empty_body_no_trailing_content() {
-        let card = Card::new("001".into(), "No body".into());
+        let mut card = Card::new("001".into(), "No body".into());
+        card.body = String::new();
         let text = serialize_card(&card);
         // Should end right after the closing ---
         assert!(text.ends_with("---\n"));
