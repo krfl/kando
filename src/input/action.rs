@@ -28,6 +28,7 @@ pub enum Action {
     MoveToColumn,
     ToggleBlocker,
     ArchiveCard,
+    PipeCard,
     OpenCardDetail,
     ClosePanel,
     DetailScrollUp,

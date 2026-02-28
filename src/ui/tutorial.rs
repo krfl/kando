@@ -167,6 +167,33 @@ pub fn render_tutorial(f: &mut Frame, area: Rect, scroll: &mut u16) {
             Span::styled("Full keybinding reference", dim),
         ]),
         Line::from(""),
+        // ── Pipe to external commands ──
+        Line::from(Span::styled("Pipe to external commands", heading)),
+        Line::from(Span::styled(
+            "Press | to pipe a card's file contents to any shell",
+            dim,
+        )),
+        Line::from(Span::styled(
+            "command. The command receives the full card (frontmatter",
+            dim,
+        )),
+        Line::from(Span::styled(
+            "+ body) on stdin, plus KANDO_CARD_* env vars.",
+            dim,
+        )),
+        Line::from(vec![
+            Span::styled("  | pbcopy      ", key),
+            Span::styled("Copy card to clipboard", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  | wc -l       ", key),
+            Span::styled("Count lines in card", dim),
+        ]),
+        Line::from(vec![
+            Span::styled("  | my-script   ", key),
+            Span::styled("Send to your own tool", dim),
+        ]),
+        Line::from(""),
         // ── Footer ──
         Line::from(Span::styled("Press Esc to start using your board", key)),
     ];

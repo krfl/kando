@@ -37,6 +37,7 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::CardDetail { .. } => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::ClosePanel,
             KeyCode::Char('e') => Action::EditCardExternal,
+            KeyCode::Char('|') => Action::PipeCard,
             KeyCode::Char('j') | KeyCode::Down => Action::DetailScrollDown,
             KeyCode::Char('k') | KeyCode::Up => Action::DetailScrollUp,
             KeyCode::Tab => Action::DetailNextCard,
@@ -71,6 +72,7 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Tab => Action::CycleNextCard,
         KeyCode::BackTab => Action::CyclePrevCard,
+        KeyCode::Char('|') => Action::PipeCard,
         KeyCode::Esc => Action::ClearFilters,
         _ => Action::None,
     }
@@ -214,6 +216,7 @@ pub const NORMAL_BINDINGS: &[Binding] = &[
     Binding { key: "r", description: "Reload board" },
     Binding { key: "u", description: "Undo last delete" },
     Binding { key: "?", description: "Help" },
+    Binding { key: "|", description: "Pipe card to command" },
     Binding { key: "Esc", description: "Clear filters" },
     Binding { key: "q", description: "Quit" },
 ];
@@ -268,6 +271,7 @@ pub const DETAIL_BINDINGS: &[Binding] = &[
     Binding { key: "j / k", description: "Scroll" },
     Binding { key: "Tab/S-Tab", description: "Next/prev card" },
     Binding { key: "e", description: "Edit in $EDITOR" },
+    Binding { key: "|", description: "Pipe card to command" },
     Binding { key: "Esc", description: "Close" },
 ];
 
@@ -876,5 +880,32 @@ mod tests {
     fn mode_bindings_normal_returns_empty() {
         let bindings = mode_bindings(&Mode::Normal);
         assert!(bindings.is_empty());
+    }
+
+    // ── Pipe card bindings ──
+
+    #[test]
+    fn normal_pipe_maps_to_pipe_card() {
+        assert_eq!(map_key(key(KeyCode::Char('|')), &Mode::Normal), Action::PipeCard);
+    }
+
+    #[test]
+    fn detail_pipe_maps_to_pipe_card() {
+        let mode = Mode::CardDetail { scroll: 0 };
+        assert_eq!(map_key(key(KeyCode::Char('|')), &mode), Action::PipeCard);
+    }
+
+    #[test]
+    fn normal_bindings_contains_pipe() {
+        let entry = NORMAL_BINDINGS.iter().find(|b| b.key == "|");
+        assert!(entry.is_some(), "| binding missing from NORMAL_BINDINGS");
+        assert_eq!(entry.unwrap().description, "Pipe card to command");
+    }
+
+    #[test]
+    fn detail_bindings_contains_pipe() {
+        let entry = DETAIL_BINDINGS.iter().find(|b| b.key == "|");
+        assert!(entry.is_some(), "| binding missing from DETAIL_BINDINGS");
+        assert_eq!(entry.unwrap().description, "Pipe card to command");
     }
 }

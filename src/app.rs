@@ -156,6 +156,7 @@ pub enum InputTarget {
     WipLimit,
     ColRename(String), // holds slug of column being renamed
     ColAdd,
+    PipeCommand,
 }
 
 #[derive(Debug, Clone)]
@@ -707,6 +708,7 @@ fn process_action(
         | Action::NewCard
         | Action::DeleteCard
         | Action::ArchiveCard
+        | Action::PipeCard
         | Action::EditCardExternal
         | Action::PickPriority
         | Action::MoveToColumn
@@ -1141,7 +1143,8 @@ fn handle_card_action<B: ratatui::backend::Backend>(
 
     // Clear undo state on any card-mutating action (except delete itself, which sets it).
     if !matches!(action, Action::DeleteCard | Action::OpenCardDetail | Action::ClosePanel
-        | Action::DetailScrollDown | Action::DetailScrollUp | Action::DetailNextCard | Action::DetailPrevCard) {
+        | Action::DetailScrollDown | Action::DetailScrollUp | Action::DetailNextCard | Action::DetailPrevCard
+        | Action::PipeCard) {
         state.last_delete = None;
         state.deleted_this_session = false;
     }
@@ -1224,6 +1227,19 @@ fn handle_card_action<B: ratatui::backend::Backend>(
             state.clamp_selection_filtered(board);
             state.notify(format!("Archived: {title}"));
             sync_message = Some("Archive card".into());
+        }
+        Action::PipeCard => {
+            if was_minor_mode { state.mode = Mode::Normal; }
+            if state.selected_card_ref(board).is_some() {
+                state.mode = Mode::Input {
+                    prompt: "Pipe to command",
+                    buf: TextBuffer::empty(),
+                    on_confirm: InputTarget::PipeCommand,
+                    completion: None,
+                };
+            } else {
+                state.notify_error("No card selected");
+            }
         }
         Action::EditCardExternal => {
             state.mode = Mode::Normal;
@@ -2084,6 +2100,82 @@ fn handle_input_confirm(
             sync_message = Some(format!("Update assignees on #{card_id} \"{card_title}\""));
             state.clamp_selection_filtered(board);
             state.notify("Assignees updated");
+        }
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::PipeCommand,
+            ..
+        } => {
+            let cmd = buf.input.trim().to_string();
+            if !cmd.is_empty() {
+                if let Some(card) = state.selected_card_ref(board) {
+                    let col_slug = board.columns[state.focused_column].slug.clone();
+                    let col_name = board.columns[state.focused_column].name.clone();
+                    let card_id = card.id.clone();
+                    let card_title = card.title.clone();
+                    let card_tags = card.tags.join(",");
+                    let card_assignees = card.assignees.join(",");
+                    let card_priority = card.priority.to_string();
+                    let card_path = kando_dir.join("columns").join(&col_slug)
+                        .join(format!("{card_id}.md"));
+                    let contents = std::fs::read_to_string(&card_path).unwrap_or_default();
+
+                    let mut child = match std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .env("KANDO_CARD_ID", &card_id)
+                        .env("KANDO_CARD_TITLE", &card_title)
+                        .env("KANDO_CARD_TAGS", &card_tags)
+                        .env("KANDO_CARD_ASSIGNEES", &card_assignees)
+                        .env("KANDO_CARD_PRIORITY", &card_priority)
+                        .env("KANDO_CARD_COLUMN", &col_name)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            state.notify_error(format!("Failed to spawn command: {e}"));
+                            return Ok(None);
+                        }
+                    };
+
+                    // Write stdin on a separate thread to avoid deadlocks
+                    let mut stdin = child.stdin.take().expect("stdin was piped");
+                    let write_handle = std::thread::spawn(move || {
+                        let _ = std::io::Write::write_all(&mut stdin, contents.as_bytes());
+                    });
+
+                    match child.wait_with_output() {
+                        Ok(output) => {
+                            let _ = write_handle.join();
+                            if output.status.success() {
+                                let first_line = String::from_utf8_lossy(&output.stdout)
+                                    .lines()
+                                    .find(|l| !l.is_empty())
+                                    .unwrap_or("Pipe complete")
+                                    .to_string();
+                                state.notify(first_line);
+                            } else {
+                                let stderr_line = String::from_utf8_lossy(&output.stderr)
+                                    .lines()
+                                    .next()
+                                    .map(|s| s.to_string());
+                                let msg = stderr_line.unwrap_or_else(|| {
+                                    format!("Command exited with {}", output.status)
+                                });
+                                state.notify_error(msg);
+                            }
+                        }
+                        Err(e) => {
+                            let _ = write_handle.join();
+                            state.notify_error(format!("Command failed: {e}"));
+                        }
+                    }
+                } else {
+                    state.notify_error("No card selected");
+                }
+            }
         }
         Mode::Filter { buf } => {
             if buf.input.trim().is_empty() {
@@ -5227,5 +5319,244 @@ mod tests {
         } else {
             panic!("expected Input mode");
         }
+    }
+
+    // ── Pipe card tests ──
+
+    #[test]
+    fn pipe_card_enters_input_mode() {
+        let board = test_board(&[("Todo", &["task1"])]);
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board.clone(), &mut state, Action::PipeCard, &mut terminal, fake_dir(), false).unwrap();
+        match state.mode {
+            Mode::Input { prompt, on_confirm: InputTarget::PipeCommand, .. } => {
+                assert_eq!(prompt, "Pipe to command");
+            }
+            _ => panic!("Expected Input mode with PipeCommand target"),
+        }
+    }
+
+    #[test]
+    fn pipe_card_no_card_selected() {
+        let board = test_board(&[("Empty", &[])]);
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board.clone(), &mut state, Action::PipeCard, &mut terminal, fake_dir(), false).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("No card selected"));
+        assert_eq!(state.notification_level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn pipe_card_does_not_clear_undo_state() {
+        let board = test_board(&[("Todo", &["task1"])]);
+        let mut state = AppState::new();
+        state.last_delete = Some(TrashEntry {
+            id: "001".into(),
+            title: "deleted".into(),
+            from_column: "todo".into(),
+            deleted: Utc::now().to_rfc3339(),
+        });
+        let mut terminal = test_terminal();
+        handle_card_action(&mut board.clone(), &mut state, Action::PipeCard, &mut terminal, fake_dir(), false).unwrap();
+        assert!(state.last_delete.is_some());
+    }
+
+    #[test]
+    fn pipe_command_success_shows_stdout_first_line() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Create a card so we have a file on disk
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("echo hello".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("hello"));
+        assert_eq!(state.notification_level, NotificationLevel::Info);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn pipe_command_empty_stdout_shows_pipe_complete() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("true".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("Pipe complete"));
+    }
+
+    #[test]
+    fn pipe_command_skips_empty_lines() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("printf '\\n\\nactual output\\n'".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("actual output"));
+    }
+
+    #[test]
+    fn pipe_command_empty_input_does_nothing() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("   ".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(state.notification.is_none());
+    }
+
+    #[test]
+    fn pipe_command_card_not_found() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // No cards in the column
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("echo test".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("No card selected"));
+        assert_eq!(state.notification_level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn pipe_command_nonzero_exit_shows_stderr() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("echo 'error msg' >&2; exit 1".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("error msg"));
+        assert_eq!(state.notification_level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn pipe_command_nonzero_exit_empty_stderr() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("exit 42".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(state.notification.as_deref().unwrap().contains("Command exited with"));
+        assert_eq!(state.notification_level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn pipe_command_receives_card_contents_on_stdin() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        // `head -1` outputs the first line of stdin
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("head -1".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        // Card files start with "---" (TOML frontmatter delimiter)
+        assert_eq!(state.notification.as_deref(), Some("---"));
+    }
+
+    #[test]
+    fn pipe_command_sets_env_vars() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut card = Card::new("1".into(), "Test Card".into());
+        card.tags = vec!["bug".into(), "ui".into()];
+        card.assignees = vec!["alice".into()];
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("printenv KANDO_CARD_TITLE".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.notification.as_deref(), Some("Test Card"));
+    }
+
+    #[test]
+    fn pipe_command_returns_no_sync_message() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let card = Card::new("1".into(), "Test Card".into());
+        board.columns[0].cards.push(card);
+        save_board(&kando_dir, &board).unwrap();
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("echo ok".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
     }
 }
