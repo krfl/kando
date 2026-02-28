@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use crate::app::Mode;
+use crate::app::{CompletionHint, Mode};
 use crate::input::keymap;
 
 /// Render the minor-mode hint popup (shown for g, space, c, cm, f modes).
@@ -136,6 +136,58 @@ pub fn render_picker(
         ));
 
         let line = Line::from(spans);
+        f.render_widget(
+            Paragraph::new(line),
+            Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+        );
+    }
+}
+
+/// Render a completion candidates popup for tag/assignee input.
+pub fn render_completion_popup(f: &mut Frame, area: Rect, hint: &CompletionHint) {
+    let max_label_len = hint.candidates.iter().map(|c| c.len()).max().unwrap_or(0);
+    let popup_width = ((max_label_len + 4) as u16).max(16).min(area.width.saturating_sub(4));
+    let popup_height = (hint.candidates.len() as u16 + 2)
+        .min(area.height.saturating_sub(4))
+        .max(3);
+    let x = area.x + area.width.saturating_sub(popup_width);
+    let y = area.y + area.height.saturating_sub(popup_height);
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Theme::FG))
+        .title(Span::styled(
+            " completions ",
+            Style::default()
+                .fg(Theme::FG)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    for (i, candidate) in hint.candidates.iter().enumerate() {
+        if i >= inner.height as usize {
+            break;
+        }
+        let is_selected = hint.selected == Some(i);
+        let sel_mod = if is_selected {
+            Modifier::BOLD | Modifier::REVERSED
+        } else {
+            Modifier::empty()
+        };
+
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                candidate.clone(),
+                Style::default().fg(Theme::FG).add_modifier(sel_mod),
+            ),
+        ]);
         f.render_widget(
             Paragraph::new(line),
             Rect::new(inner.x, inner.y + i as u16, inner.width, 1),

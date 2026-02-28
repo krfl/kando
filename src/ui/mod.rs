@@ -68,6 +68,11 @@ pub fn render(f: &mut Frame, board: &Board, state: &mut AppState, now: DateTime<
         }
         _ => {}
     }
+
+    // Completion popup (rendered on top of Mode::Input)
+    if let Some(hint) = &state.completion_hint {
+        input_modal::render_completion_popup(f, chunks[0], hint);
+    }
 }
 
 #[cfg(test)]

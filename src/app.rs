@@ -99,6 +99,13 @@ pub struct CompletionState {
     pub index: usize,
 }
 
+/// Visible completion hint shown as a popup while editing tags/assignees.
+#[derive(Debug, Clone)]
+pub struct CompletionHint {
+    pub candidates: Vec<String>,
+    pub selected: Option<usize>,
+}
+
 /// Current interaction mode.
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -203,6 +210,8 @@ pub struct AppState {
     pub deleted_this_session: bool,
     /// Ghost text hint for tab-completion (shown dimmed after cursor).
     pub ghost_text: Option<String>,
+    /// Completion candidates popup for tag/assignee input.
+    pub completion_hint: Option<CompletionHint>,
     /// Use Nerd Font glyphs instead of ASCII icons.
     pub nerd_font: bool,
     /// Whether the first-launch tutorial has been shown (from local.toml).
@@ -228,6 +237,7 @@ impl AppState {
             last_delete: None,
             deleted_this_session: false,
             ghost_text: None,
+            completion_hint: None,
             nerd_font: false,
             tutorial_shown: false,
         }
@@ -1679,6 +1689,44 @@ fn update_ghost_text(state: &mut AppState, board: &Board) {
     state.ghost_text = compute_ghost_text(state, board);
 }
 
+/// Compute and update the completion hint popup for the current input state.
+fn update_completion_hint(state: &mut AppState, board: &Board) {
+    state.completion_hint = compute_completion_hint(state, board);
+}
+
+/// Compute the list of matching completion candidates for the popup.
+fn compute_completion_hint(state: &AppState, board: &Board) -> Option<CompletionHint> {
+    let Mode::Input { buf, on_confirm, completion, .. } = &state.mode else {
+        return None;
+    };
+
+    if !matches!(on_confirm, InputTarget::EditTags | InputTarget::EditAssignees) {
+        return None;
+    }
+
+    let all_candidates = completion_candidates(on_confirm, board);
+    if all_candidates.is_empty() {
+        return None;
+    }
+
+    let (token, _) = current_csv_token(&buf.input);
+    let already = entered_values(&buf.input);
+    let mut candidates = filtered_candidates(&all_candidates, token, &already);
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by_key(|c| c.to_lowercase());
+
+    let selected = completion.as_ref().and_then(|cs| {
+        let current = cs.candidates.get(cs.index)?;
+        candidates.iter().position(|c| c == current)
+    });
+
+    Some(CompletionHint { candidates, selected })
+}
+
 /// Compute ghost text: the suffix of the first matching candidate shown dimmed after cursor.
 fn compute_ghost_text(state: &AppState, board: &Board) -> Option<String> {
     let Mode::Input { buf, on_confirm, completion, .. } = &state.mode else {
@@ -1739,6 +1787,7 @@ fn handle_input(
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
             update_ghost_text(state, board);
+            update_completion_hint(state, board);
         }
         Action::InputBackspace => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
@@ -1752,26 +1801,31 @@ fn handle_input(
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
             update_ghost_text(state, board);
+            update_completion_hint(state, board);
         }
         Action::InputLeft => {
             if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
                 buf.move_left();
             }
+            update_ghost_text(state, board);
         }
         Action::InputRight => {
             if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
                 buf.move_right();
             }
+            update_ghost_text(state, board);
         }
         Action::InputHome => {
             if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
                 buf.home();
             }
+            update_ghost_text(state, board);
         }
         Action::InputEnd => {
             if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
                 buf.end();
             }
+            update_ghost_text(state, board);
         }
         Action::InputDeleteWord => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
@@ -1785,17 +1839,21 @@ fn handle_input(
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
             update_ghost_text(state, board);
+            update_completion_hint(state, board);
         }
         Action::InputCompleteForward | Action::InputCompleteBackward => {
             let forward = matches!(action, Action::InputCompleteForward);
             cycle_input_completion(state, board, forward);
+            update_completion_hint(state, board);
         }
         Action::InputConfirm => {
             state.ghost_text = None;
+            state.completion_hint = None;
             sync_message = handle_input_confirm(board, state, kando_dir)?;
         }
         Action::InputCancel => {
             state.ghost_text = None;
+            state.completion_hint = None;
             match &state.mode {
                 Mode::Filter { .. } => {
                     state.active_filter = None;
@@ -4740,5 +4798,232 @@ mod tests {
         };
 
         assert!(compute_ghost_text(&state, &board).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_completion_hint tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn completion_hint_none_in_normal_mode() {
+        let board = test_board(&[("Backlog", &["A"])]);
+        let state = AppState::new(); // Mode::Normal
+        assert!(compute_completion_hint(&state, &board).is_none());
+    }
+
+    #[test]
+    fn completion_hint_none_for_non_tag_target() {
+        let board = test_board(&[("Backlog", &["A"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Title",
+            buf: TextBuffer::new("hello".into()),
+            on_confirm: InputTarget::NewCardTitle,
+            completion: None,
+        };
+        assert!(compute_completion_hint(&state, &board).is_none());
+    }
+
+    #[test]
+    fn completion_hint_none_when_no_tags_on_board() {
+        let board = test_board(&[("Backlog", &["A"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+        assert!(compute_completion_hint(&state, &board).is_none());
+    }
+
+    #[test]
+    fn completion_hint_none_when_no_prefix_match() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("z".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+        assert!(compute_completion_hint(&state, &board).is_none());
+    }
+
+    #[test]
+    fn completion_hint_returns_matching_candidates() {
+        let mut board = test_board(&[("Backlog", &["A", "B"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into()];
+        board.columns[0].cards[1].tags = vec!["feature".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.candidates, vec!["bug", "build"]);
+        assert_eq!(hint.selected, None);
+    }
+
+    #[test]
+    fn completion_hint_selected_tracks_cycling_candidate() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into(), "batch".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("build".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: Some(CompletionState {
+                candidates: vec!["bug".into(), "build".into(), "batch".into()],
+                index: 1, // cycling on "build"
+            }),
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        // "build" should be found in the fresh candidate list
+        assert!(hint.candidates.contains(&"build".to_string()), "expected 'build' in candidates");
+        let pos = hint.candidates.iter().position(|c| c == "build").unwrap();
+        assert_eq!(hint.selected, Some(pos));
+    }
+
+    #[test]
+    fn completion_hint_selected_none_when_cycled_candidate_no_longer_matches() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("bui".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: Some(CompletionState {
+                candidates: vec!["bug".into(), "build".into()],
+                index: 0, // cycling on "bug"
+            }),
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        // "bug" doesn't match prefix "bui", so fresh list is ["build"]
+        assert_eq!(hint.candidates, vec!["build"]);
+        assert_eq!(hint.selected, None); // "bug" not found in fresh list
+    }
+
+    #[test]
+    fn completion_hint_excludes_already_entered() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("bug, b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.candidates, vec!["build"]);
+    }
+
+    #[test]
+    fn completion_hint_all_values_entered_returns_none() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("bug, b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        // "bug" is already entered, and there are no other tags starting with "b"
+        assert!(compute_completion_hint(&state, &board).is_none());
+    }
+
+    #[test]
+    fn completion_hint_works_for_assignees() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].assignees = vec!["alice".into(), "bob".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Assignees",
+            buf: TextBuffer::new("a".into()),
+            on_confirm: InputTarget::EditAssignees,
+            completion: None,
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.candidates, vec!["alice"]);
+    }
+
+    #[test]
+    fn completion_hint_empty_token_shows_all_remaining() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "feature".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.candidates.len(), 2);
+    }
+
+    #[test]
+    fn completion_hint_stale_index_oob_gives_none_selected() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: Some(CompletionState {
+                // Index 5 is out of bounds for the stale candidates list,
+                // so get() returns None and selected becomes None.
+                candidates: vec!["bug".into()],
+                index: 5,
+            }),
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.selected, None);
+    }
+
+    #[test]
+    fn completion_hint_empty_stale_candidates_gives_none_selected() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: Some(CompletionState {
+                candidates: vec![],
+                index: 0,
+            }),
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.candidates, vec!["bug"]);
+        assert_eq!(hint.selected, None);
     }
 }
