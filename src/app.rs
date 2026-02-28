@@ -5026,4 +5026,206 @@ mod tests {
         assert_eq!(hint.candidates, vec!["bug"]);
         assert_eq!(hint.selected, None);
     }
+
+    #[test]
+    fn cycle_completion_works_for_assignees() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].assignees = vec!["alice".into(), "adam".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Assignees",
+            buf: TextBuffer::new("a".into()),
+            on_confirm: InputTarget::EditAssignees,
+            completion: None,
+        };
+
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, completion, .. } = &state.mode {
+            assert!(completion.is_some());
+            assert_eq!(buf.input, "adam");
+        } else {
+            panic!("expected Input mode");
+        }
+    }
+
+    #[test]
+    fn cycle_completion_noop_when_board_has_no_tags() {
+        let board = test_board(&[("Backlog", &["A"])]);
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, completion, .. } = &state.mode {
+            assert_eq!(buf.input, "b");
+            assert!(completion.is_none());
+        } else {
+            panic!("expected Input mode");
+        }
+    }
+
+    #[test]
+    fn cycle_completion_noop_when_all_candidates_entered() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("bug, b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, completion, .. } = &state.mode {
+            assert_eq!(buf.input, "bug, b");
+            assert!(completion.is_none());
+        } else {
+            panic!("expected Input mode");
+        }
+    }
+
+    #[test]
+    fn ghost_text_works_for_assignees() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].assignees = vec!["alice".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Assignees",
+            buf: TextBuffer::new("al".into()),
+            on_confirm: InputTarget::EditAssignees,
+            completion: None,
+        };
+
+        let ghost = compute_ghost_text(&state, &board);
+        assert_eq!(ghost.as_deref(), Some("ice"));
+    }
+
+    #[test]
+    fn ghost_text_none_when_board_has_no_tags() {
+        let board = test_board(&[("Backlog", &["A"])]);
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        assert!(compute_ghost_text(&state, &board).is_none());
+    }
+
+    #[test]
+    fn ghost_text_none_for_non_tag_target() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Title",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::NewCardTitle,
+            completion: None,
+        };
+
+        assert!(compute_ghost_text(&state, &board).is_none());
+    }
+
+    #[test]
+    fn typing_after_tab_cycle_resets_completion() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        // Tab-cycle to first candidate
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { completion, .. } = &state.mode {
+            assert!(completion.is_some());
+        } else {
+            panic!("expected Input mode");
+        }
+
+        // Type a character — completion should be reset
+        let kando_dir = std::path::Path::new("/tmp/fake");
+        handle_input(&mut board, &mut state, Action::InputChar('x'), kando_dir).unwrap();
+        if let Mode::Input { buf, completion, .. } = &state.mode {
+            assert!(completion.is_none());
+            assert!(buf.input.ends_with('x'));
+        } else {
+            panic!("expected Input mode");
+        }
+    }
+
+    #[test]
+    fn current_csv_token_multiple_commas() {
+        let (token, start) = current_csv_token("a, b, c");
+        assert_eq!(token, "c");
+        assert_eq!(start, 6);
+    }
+
+    #[test]
+    fn completion_hint_candidates_sorted_alphabetically() {
+        let mut board = test_board(&[("Backlog", &["A", "B", "C"])]);
+        // "zebra" appears 3 times, "alpha" once — by-count would put zebra first
+        board.columns[0].cards[0].tags = vec!["zebra".into()];
+        board.columns[0].cards[1].tags = vec!["zebra".into()];
+        board.columns[0].cards[2].tags = vec!["zebra".into(), "alpha".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.candidates, vec!["alpha", "zebra"]);
+    }
+
+    #[test]
+    fn cycle_completion_multi_token_replaces_only_last_segment() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into(), "feature".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("feature, b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        // First Tab: replaces "b" with first candidate ("bug", alphabetical)
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, .. } = &state.mode {
+            assert_eq!(buf.input, "feature, bug");
+        } else {
+            panic!("expected Input mode");
+        }
+
+        // Second Tab: replaces entire last segment with next candidate
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, .. } = &state.mode {
+            assert_eq!(buf.input, "feature, build");
+        } else {
+            panic!("expected Input mode");
+        }
+    }
 }
