@@ -211,6 +211,9 @@ fn render_full_line_mode<'a>(state: &'a AppState) -> Option<Line<'a>> {
                 ),
             ];
             spans.extend(cursor_spans(buf));
+            if let Some(ref ghost) = state.ghost_text {
+                spans.push(Span::styled(ghost.as_str(), Theme::dim_style()));
+            }
             Some(Line::from(spans))
         }
         Mode::Confirm { prompt, .. } => {

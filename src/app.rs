@@ -92,6 +92,13 @@ impl TextBuffer {
     }
 }
 
+/// Tab-completion state for comma-separated input fields.
+#[derive(Debug, Clone)]
+pub struct CompletionState {
+    pub candidates: Vec<String>,
+    pub index: usize,
+}
+
 /// Current interaction mode.
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -105,6 +112,7 @@ pub enum Mode {
         prompt: &'static str,
         buf: TextBuffer,
         on_confirm: InputTarget,
+        completion: Option<CompletionState>,
     },
     Confirm {
         prompt: &'static str,
@@ -193,6 +201,8 @@ pub struct AppState {
     /// that `u` doesn't silently restore an unrelated card from a previous
     /// session when the user simply hasn't deleted anything this session.
     pub deleted_this_session: bool,
+    /// Ghost text hint for tab-completion (shown dimmed after cursor).
+    pub ghost_text: Option<String>,
     /// Use Nerd Font glyphs instead of ASCII icons.
     pub nerd_font: bool,
     /// Whether the first-launch tutorial has been shown (from local.toml).
@@ -217,6 +227,7 @@ impl AppState {
             sync_state: None,
             last_delete: None,
             deleted_this_session: false,
+            ghost_text: None,
             nerd_font: false,
             tutorial_shown: false,
         }
@@ -718,6 +729,7 @@ fn process_action(
                     prompt: "Rename column",
                     buf: TextBuffer::new(current_name),
                     on_confirm: InputTarget::ColRename(slug),
+                    completion: None,
                 };
             }
         }
@@ -726,6 +738,7 @@ fn process_action(
                 prompt: "New column name",
                 buf: TextBuffer::empty(),
                 on_confirm: InputTarget::ColAdd,
+                completion: None,
             };
         }
         Action::ColRemoveSelected => {
@@ -752,6 +765,7 @@ fn process_action(
                     prompt: "WIP limit (0=off)",
                     buf: TextBuffer::new(current),
                     on_confirm: InputTarget::WipLimit,
+                    completion: None,
                 };
             }
         }
@@ -855,6 +869,8 @@ fn process_action(
         | Action::InputHome
         | Action::InputEnd
         | Action::InputDeleteWord
+        | Action::InputCompleteForward
+        | Action::InputCompleteBackward
         | Action::InputConfirm
         | Action::InputCancel => {
             sync_message = handle_input(board, state, action, kando_dir)?;
@@ -1154,6 +1170,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 prompt: "New card",
                 buf: TextBuffer::empty(),
                 on_confirm: InputTarget::NewCardTitle,
+                completion: None,
             };
         }
         Action::DeleteCard => {
@@ -1331,6 +1348,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     prompt: "Tags (comma-separated)",
                     buf: TextBuffer::new(current),
                     on_confirm: InputTarget::EditTags,
+                    completion: None,
                 };
             } else {
                 state.mode = Mode::Normal;
@@ -1343,6 +1361,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     prompt: "Assignees (comma-separated)",
                     buf: TextBuffer::new(current),
                     on_confirm: InputTarget::EditAssignees,
+                    completion: None,
                 };
             } else {
                 state.mode = Mode::Normal;
@@ -1556,6 +1575,146 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
 }
 
 // ---------------------------------------------------------------------------
+// Tab-completion helpers for comma-separated input (tags / assignees)
+// ---------------------------------------------------------------------------
+
+/// Extract the current token from a comma-separated input string.
+/// Returns (token_text_trimmed, byte_offset_of_token_start_including_leading_space).
+fn current_csv_token(input: &str) -> (&str, usize) {
+    let start = input.rfind(',').map(|i| i + 1).unwrap_or(0);
+    let token = &input[start..];
+    let trimmed = token.trim_start();
+    let trim_offset = token.len() - trimmed.len();
+    (trimmed, start + trim_offset)
+}
+
+/// Collect the already-entered values (segments before the current token).
+fn entered_values(input: &str) -> Vec<String> {
+    match input.rfind(',') {
+        Some(pos) => input[..pos]
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Get completion candidates for the given input target.
+fn completion_candidates(target: &InputTarget, board: &Board) -> Vec<String> {
+    match target {
+        InputTarget::EditTags => board.all_tags().into_iter().map(|(s, _)| s).collect(),
+        InputTarget::EditAssignees => board.all_assignees().into_iter().map(|(s, _)| s).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Filter candidates by prefix and exclude already-entered values.
+fn filtered_candidates(all: &[String], prefix: &str, already: &[String]) -> Vec<String> {
+    let prefix_lower = prefix.to_lowercase();
+    all.iter()
+        .filter(|c| c.to_lowercase().starts_with(&prefix_lower))
+        .filter(|c| !already.contains(&c.to_lowercase()))
+        .cloned()
+        .collect()
+}
+
+/// Cycle tab-completion in the current input buffer.
+fn cycle_input_completion(state: &mut AppState, board: &Board, forward: bool) {
+    let Mode::Input { buf, on_confirm, completion, .. } = &mut state.mode else {
+        return;
+    };
+
+    // Only complete for tags and assignees
+    if !matches!(on_confirm, InputTarget::EditTags | InputTarget::EditAssignees) {
+        return;
+    }
+
+    let all_candidates = completion_candidates(on_confirm, board);
+    if all_candidates.is_empty() {
+        return;
+    }
+
+    // On first Tab: compute candidates from current token. On subsequent
+    // Tabs: reuse the stored candidate list so the index stays consistent.
+    let (candidates, replace_start) = if let Some(cs) = completion.as_ref() {
+        (cs.candidates.clone(), current_csv_token(&buf.input).1)
+    } else {
+        let (token, start) = current_csv_token(&buf.input);
+        let already = entered_values(&buf.input);
+        (filtered_candidates(&all_candidates, token, &already), start)
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let index = if let Some(cs) = completion.as_ref() {
+        if forward {
+            (cs.index + 1) % candidates.len()
+        } else {
+            (cs.index + candidates.len() - 1) % candidates.len()
+        }
+    } else {
+        0
+    };
+
+    // Replace current token with the selected candidate
+    let candidate = &candidates[index];
+    buf.input.truncate(replace_start);
+    buf.input.push_str(candidate);
+    buf.cursor = buf.input.chars().count();
+
+    *completion = Some(CompletionState {
+        candidates,
+        index,
+    });
+
+    // Ghost text is hidden while actively cycling completions
+    state.ghost_text = None;
+}
+
+/// Compute and update ghost text for the current input state.
+fn update_ghost_text(state: &mut AppState, board: &Board) {
+    state.ghost_text = compute_ghost_text(state, board);
+}
+
+/// Compute ghost text: the suffix of the first matching candidate shown dimmed after cursor.
+fn compute_ghost_text(state: &AppState, board: &Board) -> Option<String> {
+    let Mode::Input { buf, on_confirm, completion, .. } = &state.mode else {
+        return None;
+    };
+
+    if !matches!(on_confirm, InputTarget::EditTags | InputTarget::EditAssignees) {
+        return None;
+    }
+
+    // Don't show ghost text while actively cycling completions
+    if completion.is_some() {
+        return None;
+    }
+
+    // Only show ghost text when cursor is at the end
+    if buf.cursor < buf.input.chars().count() {
+        return None;
+    }
+
+    let all_candidates = completion_candidates(on_confirm, board);
+    let (token, _) = current_csv_token(&buf.input);
+
+    if token.is_empty() {
+        return None;
+    }
+
+    let already = entered_values(&buf.input);
+    let candidates = filtered_candidates(&all_candidates, token, &already);
+    let first = candidates.first()?;
+
+    // Return the suffix after what the user typed
+    Some(first.get(token.len()..)?.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Handler: Text input (char entry, cursor movement, confirm, cancel)
 // ---------------------------------------------------------------------------
 
@@ -1571,18 +1730,28 @@ fn handle_input(
         Action::InputChar(c) => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
-                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.insert(c),
+                Mode::Input { buf, completion, .. } => {
+                    buf.insert(c);
+                    *completion = None;
+                }
+                Mode::Filter { buf } => buf.insert(c),
                 _ => {}
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
+            update_ghost_text(state, board);
         }
         Action::InputBackspace => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
-                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.backspace(),
+                Mode::Input { buf, completion, .. } => {
+                    buf.backspace();
+                    *completion = None;
+                }
+                Mode::Filter { buf } => buf.backspace(),
                 _ => {}
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
+            update_ghost_text(state, board);
         }
         Action::InputLeft => {
             if let Mode::Input { buf, .. } | Mode::Filter { buf } = &mut state.mode {
@@ -1607,15 +1776,26 @@ fn handle_input(
         Action::InputDeleteWord => {
             let is_filter = matches!(state.mode, Mode::Filter { .. });
             match &mut state.mode {
-                Mode::Input { buf, .. } | Mode::Filter { buf } => buf.delete_word(),
+                Mode::Input { buf, completion, .. } => {
+                    buf.delete_word();
+                    *completion = None;
+                }
+                Mode::Filter { buf } => buf.delete_word(),
                 _ => {}
             }
             if is_filter { sync_filter(state); state.clamp_selection_filtered(board); }
+            update_ghost_text(state, board);
+        }
+        Action::InputCompleteForward | Action::InputCompleteBackward => {
+            let forward = matches!(action, Action::InputCompleteForward);
+            cycle_input_completion(state, board, forward);
         }
         Action::InputConfirm => {
+            state.ghost_text = None;
             sync_message = handle_input_confirm(board, state, kando_dir)?;
         }
         Action::InputCancel => {
+            state.ghost_text = None;
             match &state.mode {
                 Mode::Filter { .. } => {
                     state.active_filter = None;
@@ -2439,6 +2619,7 @@ mod tests {
             prompt: "test",
             buf: TextBuffer::empty(),
             on_confirm: InputTarget::NewCardTitle,
+            completion: None,
         };
         let kando_dir = std::path::Path::new("/tmp/fake");
         handle_input(&mut board, &mut state, Action::InputChar('h'), kando_dir).unwrap();
@@ -2469,6 +2650,7 @@ mod tests {
             prompt: "test",
             buf: TextBuffer::new("abc".into()),
             on_confirm: InputTarget::NewCardTitle,
+            completion: None,
         };
         let kando_dir = std::path::Path::new("/tmp/fake");
         handle_input(&mut board, &mut state, Action::InputBackspace, kando_dir).unwrap();
@@ -2487,6 +2669,7 @@ mod tests {
             prompt: "test",
             buf: TextBuffer::new("hello".into()),
             on_confirm: InputTarget::NewCardTitle,
+            completion: None,
         };
         let kando_dir = std::path::Path::new("/tmp/fake");
         handle_input(&mut board, &mut state, Action::InputLeft, kando_dir).unwrap();
@@ -2595,6 +2778,7 @@ mod tests {
             prompt: "New card",
             buf: TextBuffer::new("My task".into()),
             on_confirm: InputTarget::NewCardTitle,
+            completion: None,
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert_eq!(sync.as_deref(), Some("Create card #1 \"My task\" in Backlog"));
@@ -2612,6 +2796,7 @@ mod tests {
             prompt: "New card",
             buf: TextBuffer::new("  ".into()),
             on_confirm: InputTarget::NewCardTitle,
+            completion: None,
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert!(sync.is_none());
@@ -2629,6 +2814,7 @@ mod tests {
             prompt: "Tags",
             buf: TextBuffer::new("Bug, UI, feature".into()),
             on_confirm: InputTarget::EditTags,
+            completion: None,
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert_eq!(sync.as_deref(), Some("Update tags on #001 \"Test\""));
@@ -3951,6 +4137,7 @@ mod tests {
                 prompt: "WIP limit (0=off)",
                 buf: TextBuffer::new(current),
                 on_confirm: InputTarget::WipLimit,
+                completion: None,
             };
         }
         assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::WipLimit, .. }));
@@ -3968,6 +4155,7 @@ mod tests {
             prompt: "WIP limit (0=off)",
             buf: TextBuffer::new("3".into()),
             on_confirm: InputTarget::WipLimit,
+            completion: None,
         };
         handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert_eq!(board.columns[0].wip_limit, Some(3));
@@ -3986,6 +4174,7 @@ mod tests {
             prompt: "WIP limit (0=off)",
             buf: TextBuffer::new("0".into()),
             on_confirm: InputTarget::WipLimit,
+            completion: None,
         };
         handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert_eq!(board.columns[0].wip_limit, None);
@@ -4001,6 +4190,7 @@ mod tests {
             prompt: "WIP limit (0=off)",
             buf: TextBuffer::new("abc".into()),
             on_confirm: InputTarget::WipLimit,
+            completion: None,
         };
         handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert!(state.notification.as_deref().unwrap().contains("must be a number"));
@@ -4084,6 +4274,7 @@ mod tests {
                 prompt: "Rename column",
                 buf: TextBuffer::new(current_name),
                 on_confirm: InputTarget::ColRename(slug),
+                completion: None,
             };
         }
         assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::ColRename(_), .. }));
@@ -4102,6 +4293,7 @@ mod tests {
             prompt: "Rename column",
             buf: TextBuffer::new("Todo Items".into()),
             on_confirm: InputTarget::ColRename(old_slug),
+            completion: None,
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert!(sync.is_some());
@@ -4119,6 +4311,7 @@ mod tests {
             prompt: "Rename column",
             buf: TextBuffer::new("  ".into()),
             on_confirm: InputTarget::ColRename(old_slug),
+            completion: None,
         };
         handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert!(state.notification.as_deref().unwrap().contains("cannot be empty"));
@@ -4131,6 +4324,7 @@ mod tests {
             prompt: "New column name",
             buf: TextBuffer::empty(),
             on_confirm: InputTarget::ColAdd,
+            completion: None,
         };
         assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::ColAdd, .. }));
     }
@@ -4145,6 +4339,7 @@ mod tests {
             prompt: "New column name",
             buf: TextBuffer::new("Review".into()),
             on_confirm: InputTarget::ColAdd,
+            completion: None,
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert!(sync.is_some());
@@ -4298,5 +4493,252 @@ mod tests {
         handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
         assert!(board.columns[0].hidden);
         assert_eq!(state.focused_column, 0, "focus should remain when hidden cols are shown");
+    }
+
+    // ── Tab-completion tests ──
+
+    #[test]
+    fn current_csv_token_empty() {
+        let (token, start) = current_csv_token("");
+        assert_eq!(token, "");
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn current_csv_token_single_word() {
+        let (token, start) = current_csv_token("bug");
+        assert_eq!(token, "bug");
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn current_csv_token_after_comma_with_space() {
+        let (token, start) = current_csv_token("bug, ui");
+        assert_eq!(token, "ui");
+        assert_eq!(start, 5);
+    }
+
+    #[test]
+    fn current_csv_token_trailing_comma() {
+        let (token, start) = current_csv_token("bug,");
+        assert_eq!(token, "");
+        assert_eq!(start, 4);
+    }
+
+    #[test]
+    fn entered_values_empty() {
+        assert!(entered_values("").is_empty());
+    }
+
+    #[test]
+    fn entered_values_single_token_returns_empty() {
+        // Single token = the current one being typed, nothing "entered" yet
+        assert!(entered_values("bug").is_empty());
+    }
+
+    #[test]
+    fn entered_values_multiple_lowercased() {
+        let vals = entered_values("Bug, UI, feature");
+        assert_eq!(vals, vec!["bug", "ui"]);
+    }
+
+    #[test]
+    fn entered_values_trailing_comma() {
+        let vals = entered_values("bug,");
+        assert_eq!(vals, vec!["bug"]);
+    }
+
+    #[test]
+    fn filtered_candidates_prefix_match_case_insensitive() {
+        let all = vec!["Bug".into(), "build".into(), "ui".into()];
+        let result = filtered_candidates(&all, "bu", &[]);
+        assert_eq!(result, vec!["Bug", "build"]);
+    }
+
+    #[test]
+    fn filtered_candidates_excludes_already_entered() {
+        let all = vec!["Bug".into(), "ui".into()];
+        let already = vec!["bug".into()];
+        let result = filtered_candidates(&all, "bu", &already);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filtered_candidates_no_match() {
+        let all = vec!["x".into()];
+        let result = filtered_candidates(&all, "z", &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn cycle_completion_forward_and_wrap() {
+        let mut board = test_board(&[("Backlog", &["A", "B"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into()];
+        board.columns[0].cards[1].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags (comma-separated)",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        // First Tab: picks first candidate
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, completion, .. } = &state.mode {
+            assert_eq!(buf.input, "bug");
+            assert_eq!(completion.as_ref().unwrap().index, 0);
+        } else {
+            panic!("expected Input mode");
+        }
+
+        // Second Tab: cycles to next
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, completion, .. } = &state.mode {
+            assert_eq!(buf.input, "build");
+            assert_eq!(completion.as_ref().unwrap().index, 1);
+        } else {
+            panic!("expected Input mode");
+        }
+
+        // Third Tab: wraps to first
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, .. } = &state.mode {
+            assert_eq!(buf.input, "bug");
+        } else {
+            panic!("expected Input mode");
+        }
+    }
+
+    #[test]
+    fn cycle_completion_backward_wraps() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        // First Tab forward
+        cycle_input_completion(&mut state, &board, true);
+        // Then backward wraps to last
+        cycle_input_completion(&mut state, &board, false);
+        if let Mode::Input { buf, completion, .. } = &state.mode {
+            assert_eq!(buf.input, "build");
+            assert_eq!(completion.as_ref().unwrap().index, 1);
+        } else {
+            panic!("expected Input mode");
+        }
+    }
+
+    #[test]
+    fn cycle_completion_noop_for_non_tag_target() {
+        let board = test_board(&[("Backlog", &["A"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "New card",
+            buf: TextBuffer::new("test".into()),
+            on_confirm: InputTarget::NewCardTitle,
+            completion: None,
+        };
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { completion, .. } = &state.mode {
+            assert!(completion.is_none());
+        }
+    }
+
+    #[test]
+    fn cycle_completion_excludes_already_entered() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into(), "build".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("bug, b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        cycle_input_completion(&mut state, &board, true);
+        if let Mode::Input { buf, .. } = &state.mode {
+            // "bug" is already entered, so only "build" should be offered
+            assert_eq!(buf.input, "bug, build");
+        } else {
+            panic!("expected Input mode");
+        }
+    }
+
+    #[test]
+    fn ghost_text_shows_suffix() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["feature".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("fea".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        let ghost = compute_ghost_text(&state, &board);
+        assert_eq!(ghost.as_deref(), Some("ture"));
+    }
+
+    #[test]
+    fn ghost_text_none_when_cursor_not_at_end() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["feature".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer { input: "fea".into(), cursor: 1 },
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        assert!(compute_ghost_text(&state, &board).is_none());
+    }
+
+    #[test]
+    fn ghost_text_none_during_active_completion() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("b".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: Some(CompletionState {
+                candidates: vec!["bug".into()],
+                index: 0,
+            }),
+        };
+
+        assert!(compute_ghost_text(&state, &board).is_none());
+    }
+
+    #[test]
+    fn ghost_text_none_for_empty_token() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("bug, ".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        assert!(compute_ghost_text(&state, &board).is_none());
     }
 }

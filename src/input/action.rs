@@ -85,6 +85,8 @@ pub enum Action {
     InputHome,
     InputEnd,
     InputDeleteWord,
+    InputCompleteForward,
+    InputCompleteBackward,
 
     // Confirmation
     Confirm,

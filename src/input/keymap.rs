@@ -155,6 +155,8 @@ fn map_input(key: KeyEvent) -> Action {
         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Action::InputDeleteWord
         }
+        KeyCode::Tab => Action::InputCompleteForward,
+        KeyCode::BackTab => Action::InputCompleteBackward,
         KeyCode::Char(c) => Action::InputChar(c),
         KeyCode::Backspace => Action::InputBackspace,
         KeyCode::Left => Action::InputLeft,
@@ -494,6 +496,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key(KeyCode::Enter), &mode), Action::InputConfirm);
     }
@@ -504,6 +507,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::InputCancel);
     }
@@ -514,6 +518,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key_ctrl(KeyCode::Char('a')), &mode), Action::InputHome);
     }
@@ -524,6 +529,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key_ctrl(KeyCode::Char('e')), &mode), Action::InputEnd);
     }
@@ -534,6 +540,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key_ctrl(KeyCode::Char('w')), &mode), Action::InputDeleteWord);
     }
@@ -544,6 +551,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key(KeyCode::Char('a')), &mode), Action::InputChar('a'));
     }
@@ -554,6 +562,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key(KeyCode::Backspace), &mode), Action::InputBackspace);
     }
@@ -564,6 +573,7 @@ mod tests {
             prompt: "Title".into(),
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
+            completion: None,
         };
         assert_eq!(map_key(key(KeyCode::Left), &mode), Action::InputLeft);
         assert_eq!(map_key(key(KeyCode::Right), &mode), Action::InputRight);
