@@ -4,18 +4,6 @@ A keyboard-first Kanban board that runs right in your terminal.
 
 ![A screenshot of Kando](screenshot.png)
 
-## Table of Contents
-
-- [Why Kando?](#why-kando)
-- [Requirements](#requirements)
-- [Getting Started](#getting-started)
-- [The Board](#the-board)
-- [Piping](#piping)
-- [Team Collaboration](#team-collaboration)
-- [Board Policies](#board-policies)
-- [Command Line Interface](#command-line-interface)
-- [Card Format](#card-format)
-
 ## Why Kando?
 
 Your board is plain text. Cards are Markdown files with TOML frontmatter, columns are directories, and the whole thing lives in a `.kando/` folder you can commit alongside your code. No server, no browser, no account — just files you can grep, diff, and pipe to whatever you want. Kando adds vim-style navigation, real kanban mechanics (WIP limits, cycle-time metrics, staleness policies), and a scriptable CLI on top.
