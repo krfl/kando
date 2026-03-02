@@ -577,6 +577,7 @@ dependencies = [
  "fuzzy-matcher",
  "ratatui",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "toml",

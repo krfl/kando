@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Datelike, IsoWeek, NaiveDate, Utc};
+use serde::Serialize;
 
 use super::{Board, Priority};
 
 /// Aggregate board metrics for a given time window.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BoardMetrics {
     /// Per-column WIP info including limits and active status.
     pub wip_per_column: Vec<WipEntry>,
@@ -34,7 +35,7 @@ pub struct BoardMetrics {
 }
 
 /// Per-column WIP entry with limit and active status.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WipEntry {
     pub name: String,
     pub count: usize,
@@ -44,7 +45,7 @@ pub struct WipEntry {
 }
 
 /// Descriptive statistics for lead time and cycle time in days.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct TimeStats {
     // Lead time: completed - created (total time in system)
     pub lead_avg_days: f64,
@@ -61,7 +62,7 @@ pub struct TimeStats {
 }
 
 /// Work item age statistics for in-progress cards.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct WorkItemAgeStats {
     pub count: usize,
     pub avg_age_days: f64,
@@ -69,7 +70,7 @@ pub struct WorkItemAgeStats {
 }
 
 /// A card that exceeds the P85 cycle time threshold.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct AgingCard {
     pub id: String,
     pub title: String,

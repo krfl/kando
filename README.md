@@ -244,8 +244,10 @@ kando trash purge            # permanently delete trash
 ### Metrics and activity
 ```sh
 kando metrics                # cycle time, throughput, WIP
-kando metrics --weeks 8 --csv
-kando log                    # stream activity log (JSONL)
+kando metrics --weeks 8
+kando log                    # human-readable activity feed
+kando log -f                 # live-tail new activity (like tail -f)
+kando log --stream           # raw JSONL stream (for scripts)
 kando tags                   # list all tags with counts
 ```
 
@@ -270,6 +272,47 @@ kando doctor
 ```
 
 This makes it easy to integrate Kando with git hooks, CI pipelines, or shell scripts.
+
+### JSON Output
+
+All commands produce human-readable output by default. Pass the global `--json` flag to get structured JSON instead — useful for scripting and automation:
+
+```sh
+kando --json list
+kando --json tags
+kando --json col list
+kando --json show 001
+kando --json metrics
+kando --json config show
+kando --json doctor
+kando --json log
+kando --json add "New card" -t bug
+kando --json move 001 done
+```
+
+Mutation commands return result objects (e.g. `{"id", "title", "column"}`). Read commands return arrays or objects. `--json` is ignored by commands that don't produce data output (`init`, `sync`).
+
+### CSV Output
+
+All tabular commands support `--csv` for spreadsheet-friendly output. Fields containing commas or quotes are automatically escaped per RFC 4180. `--csv` conflicts with `--json` — use one or the other.
+
+```sh
+kando list --csv
+kando tags --csv
+kando col list --csv
+kando trash --csv
+kando archive list --csv
+kando archive search "login" --csv
+kando metrics --csv
+```
+
+This makes it easy to pipe board data into other tools:
+
+```sh
+kando list --csv | cut -d, -f1,5    # just IDs and titles
+kando metrics --csv > report.csv     # export to spreadsheet
+kando tags --csv | sort -t, -k2 -rn # tags sorted by count
+```
 
 ## Card format
 
