@@ -53,6 +53,9 @@ enum Command {
         /// Priority (low, normal, high, urgent)
         #[arg(short, long, default_value = "normal")]
         priority: Priority,
+        /// Due date (YYYY-MM-DD)
+        #[arg(short = 'D', long)]
+        due: Option<String>,
     },
     /// List all cards
     List {
@@ -62,6 +65,9 @@ enum Command {
         /// Filter by column
         #[arg(short, long)]
         column: Option<String>,
+        /// Show only overdue cards
+        #[arg(long)]
+        overdue: bool,
         /// Output in CSV format for piping to other tools
         #[arg(long, conflicts_with = "json")]
         csv: bool,
@@ -99,6 +105,9 @@ enum Command {
         /// Clear blocked status
         #[arg(long)]
         unblocked: bool,
+        /// Due date (YYYY-MM-DD), or "clear" to remove
+        #[arg(long)]
+        due: Option<String>,
     },
     /// Move a card to a different column
     Move {
@@ -384,6 +393,8 @@ struct CardEntry {
     started: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     completed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    due: Option<String>,
 }
 
 impl CardEntry {
@@ -401,6 +412,7 @@ impl CardEntry {
             updated: card.updated.to_rfc3339(),
             started: card.started.map(|d| d.to_rfc3339()),
             completed: card.completed.map(|d| d.to_rfc3339()),
+            due: card.due.map(|d| d.format("%Y-%m-%d").to_string()),
         }
     }
 }
@@ -502,8 +514,9 @@ fn main() {
             tags,
             assignee,
             priority,
-        }) => cmd_add(&cwd, &title, tags, assignee, priority, json),
-        Some(Command::List { tag, column, csv }) => cmd_list(&cwd, tag.as_deref(), column.as_deref(), json, csv),
+            due,
+        }) => cmd_add(&cwd, &title, tags, assignee, priority, due.as_deref(), json),
+        Some(Command::List { tag, column, overdue, csv }) => cmd_list(&cwd, tag.as_deref(), column.as_deref(), overdue, json, csv),
         Some(Command::Delete { card_id }) => cmd_delete(&cwd, &card_id, json),
         Some(Command::Edit {
             card_id,
@@ -515,6 +528,7 @@ fn main() {
             assignee_remove,
             blocked,
             unblocked,
+            due,
         }) => cmd_edit(
             &cwd,
             &card_id,
@@ -526,6 +540,7 @@ fn main() {
             assignee_remove,
             blocked,
             unblocked,
+            due.as_deref(),
             json,
         ),
         Some(Command::Move { card_id, column }) => cmd_move(&cwd, &card_id, &column, json),
@@ -710,6 +725,7 @@ fn cmd_add(
     tags: Vec<String>,
     assignees: Vec<String>,
     priority: Priority,
+    due: Option<&str>,
     json: bool,
 ) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
@@ -728,6 +744,12 @@ fn cmd_add(
         .map(|a| a.trim().to_lowercase())
         .filter(|a| !a.is_empty())
         .collect();
+    if let Some(due_str) = due {
+        card.due = Some(
+            chrono::NaiveDate::parse_from_str(due_str, "%Y-%m-%d")
+                .wrap_err("Invalid due date format. Use YYYY-MM-DD")?,
+        );
+    }
 
     // Add to first column (backlog)
     let col_name = board.columns.first().map(|c| c.name.clone()).unwrap_or_default();
@@ -748,9 +770,10 @@ fn cmd_add(
     Ok(())
 }
 
-fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, json: bool, csv: bool) -> color_eyre::Result<()> {
+fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, overdue: bool, json: bool, csv: bool) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
     let board = load_board(&kando_dir)?;
+    let today = chrono::Utc::now().date_naive();
 
     // Collect filtered cards per column (shared by JSON, CSV, and human output).
     let filtered: Vec<(&board::Column, Vec<&Card>)> = board.columns.iter()
@@ -758,6 +781,7 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, json: bool, csv
         .map(|col| {
             let cards: Vec<&Card> = col.cards.iter()
                 .filter(|card| tag.is_none_or(|t| card.tags.iter().any(|ct| ct == t)))
+                .filter(|card| !overdue || card.is_overdue(today))
                 .collect();
             (col, cards)
         })
@@ -784,12 +808,13 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, json: bool, csv
                         card.title.clone(), card.tags.join(";"),
                         card.assignees.join(";"),
                         card.blocked.to_string(),
+                        card.due.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
                     ]
                 })
             })
             .collect();
         return print_csv(
-            &["id", "column", "age", "priority", "title", "tags", "assignees", "blocked"],
+            &["id", "column", "age", "priority", "title", "tags", "assignees", "blocked", "due"],
             &rows,
         );
     }
@@ -825,9 +850,16 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, json: bool, csv
             };
             let assignees = card.assignees.join(", ");
             let blocked = if card.blocked { " [blocked]" } else { "" };
+            let due = if card.is_overdue(now.date_naive()) {
+                format!(" [overdue {}]", card.due.unwrap().format("%Y-%m-%d"))
+            } else if let Some(d) = card.due {
+                format!(" [due {}]", d.format("%Y-%m-%d"))
+            } else {
+                String::new()
+            };
             println!(
-                "  {:>id_w$} {:>5}  {:<pr_w$}  {:<t_w$}  {}  {}{}",
-                card.id, age, priority, card.title, tags, assignees, blocked,
+                "  {:>id_w$} {:>5}  {:<pr_w$}  {:<t_w$}  {}  {}{}{}",
+                card.id, age, priority, card.title, tags, assignees, blocked, due,
                 id_w = id_width, pr_w = prio_width, t_w = title_width
             );
         }
@@ -1030,6 +1062,7 @@ fn cmd_edit(
     assignee_remove: Vec<String>,
     blocked: bool,
     unblocked: bool,
+    due: Option<&str>,
     json: bool,
 ) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
@@ -1042,7 +1075,8 @@ fn cmd_edit(
         || !assignee_add.is_empty()
         || !assignee_remove.is_empty()
         || blocked
-        || unblocked;
+        || unblocked
+        || due.is_some();
 
     let (col_idx, card_idx) = board
         .find_card(card_id)
@@ -1082,6 +1116,16 @@ fn cmd_edit(
         }
         if unblocked {
             card.blocked = false;
+        }
+        if let Some(due_str) = due {
+            if due_str == "clear" {
+                card.due = None;
+            } else {
+                card.due = Some(
+                    chrono::NaiveDate::parse_from_str(due_str, "%Y-%m-%d")
+                        .wrap_err("Invalid due date format. Use YYYY-MM-DD or \"clear\"")?,
+                );
+            }
         }
         card.touch();
 
@@ -3511,7 +3555,7 @@ mod tests {
     fn cmd_edit_title_change() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        cmd_edit(dir.path(), &id, Some("New Title"), None, vec![], vec![], vec![], vec![], false, false, false).unwrap();
+        cmd_edit(dir.path(), &id, Some("New Title"), None, vec![], vec![], vec![], vec![], false, false, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert_eq!(board.columns[ci].cards[ki].title, "New Title");
@@ -3521,7 +3565,7 @@ mod tests {
     fn cmd_edit_priority_change() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        cmd_edit(dir.path(), &id, None, Some(Priority::High), vec![], vec![], vec![], vec![], false, false, false).unwrap();
+        cmd_edit(dir.path(), &id, None, Some(Priority::High), vec![], vec![], vec![], vec![], false, false, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert_eq!(board.columns[ci].cards[ki].priority, Priority::High);
@@ -3531,7 +3575,7 @@ mod tests {
     fn cmd_edit_tag_add_normalizes_to_lowercase() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        cmd_edit(dir.path(), &id, None, None, vec!["URGENT".into()], vec![], vec![], vec![], false, false, false).unwrap();
+        cmd_edit(dir.path(), &id, None, None, vec!["URGENT".into()], vec![], vec![], vec![], false, false, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert!(board.columns[ci].cards[ki].tags.contains(&"urgent".to_string()), "tag should be stored as lowercase");
@@ -3541,7 +3585,7 @@ mod tests {
     fn cmd_edit_tag_remove_normalizes_to_lowercase() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path()); // card has "bug" tag
-        cmd_edit(dir.path(), &id, None, None, vec![], vec!["BUG".into()], vec![], vec![], false, false, false).unwrap();
+        cmd_edit(dir.path(), &id, None, None, vec![], vec!["BUG".into()], vec![], vec![], false, false, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert!(!board.columns[ci].cards[ki].tags.contains(&"bug".to_string()), "tag should be removed despite mixed case input");
@@ -3551,7 +3595,7 @@ mod tests {
     fn cmd_edit_add_existing_tag_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path()); // card has "bug" tag
-        cmd_edit(dir.path(), &id, None, None, vec!["bug".into()], vec![], vec![], vec![], false, false, false).unwrap();
+        cmd_edit(dir.path(), &id, None, None, vec!["bug".into()], vec![], vec![], vec![], false, false, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         let count = board.columns[ci].cards[ki].tags.iter().filter(|t| t.as_str() == "bug").count();
@@ -3562,7 +3606,7 @@ mod tests {
     fn cmd_edit_remove_nonexistent_tag_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        let result = cmd_edit(dir.path(), &id, None, None, vec![], vec!["nonexistent".into()], vec![], vec![], false, false, false);
+        let result = cmd_edit(dir.path(), &id, None, None, vec![], vec!["nonexistent".into()], vec![], vec![], false, false, None, false);
         assert!(result.is_ok(), "removing a non-existent tag should not error");
         // Existing tags must not be disturbed
         let board = load_board(&kando_dir).unwrap();
@@ -3575,7 +3619,7 @@ mod tests {
     fn cmd_edit_blocked_sets_flag() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, false, false).unwrap();
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, false, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert!(board.columns[ci].cards[ki].blocked, "blocked flag should be set");
@@ -3592,7 +3636,7 @@ mod tests {
         board.columns[ci].cards[ki].blocked = true;
         save_board(&kando_dir, &board).unwrap();
 
-        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, true, false).unwrap();
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, true, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert!(!board.columns[ci].cards[ki].blocked, "blocked flag should be cleared by --unblocked");
@@ -3604,7 +3648,7 @@ mod tests {
         // At the function level, unblocked runs after blocked so it wins.
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, true, false).unwrap();
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, true, None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert!(!board.columns[ci].cards[ki].blocked, "when both blocked and unblocked are true, unblocked wins");
@@ -3614,8 +3658,85 @@ mod tests {
     fn cmd_edit_card_not_found_returns_err() {
         let dir = tempfile::tempdir().unwrap();
         setup_board_with_card(dir.path());
-        let result = cmd_edit(dir.path(), "nonexistent", Some("Title"), None, vec![], vec![], vec![], vec![], false, false, false);
+        let result = cmd_edit(dir.path(), "nonexistent", Some("Title"), None, vec![], vec![], vec![], vec![], false, false, None, false);
         assert!(result.is_err(), "editing a non-existent card should return Err");
+    }
+
+    // ── cmd_add / cmd_edit due date tests ──
+
+    #[test]
+    fn cmd_add_with_due_date_sets_field() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "Due task", vec![], vec![], Priority::Normal, Some("2025-12-31"), false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert_eq!(card.due, Some(chrono::NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()));
+    }
+
+    #[test]
+    fn cmd_add_with_invalid_due_date_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let result = cmd_add(dir.path(), "Bad date", vec![], vec![], Priority::Normal, Some("not-a-date"), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_add_without_due_date_field_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "No due", vec![], vec![], Priority::Normal, None, false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.columns[0].cards[0].due.is_none());
+    }
+
+    #[test]
+    fn cmd_edit_due_date_sets_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, false, Some("2025-08-15"), false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert_eq!(board.columns[ci].cards[ki].due, Some(chrono::NaiveDate::from_ymd_opt(2025, 8, 15).unwrap()));
+    }
+
+    #[test]
+    fn cmd_edit_due_date_clear_removes_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        // Set a due date first
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, false, Some("2025-08-15"), false).unwrap();
+        // Verify it was actually set
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert!(board.columns[ci].cards[ki].due.is_some(), "precondition: due date should be set before clearing");
+        // Clear it
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, false, Some("clear"), false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert!(board.columns[ci].cards[ki].due.is_none());
+    }
+
+    #[test]
+    fn cmd_edit_due_date_invalid_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, id) = setup_board_with_card(dir.path());
+        let result = cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, false, Some("bad"), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_edit_due_counts_as_has_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let (kando_dir, id) = setup_board_with_card(dir.path());
+        // Only --due, no other flags — should still trigger mutation without opening editor
+        cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, false, Some("2025-01-01"), false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let (ci, ki) = board.find_card(&id).unwrap();
+        assert_eq!(board.columns[ci].cards[ki].due, Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()));
     }
 
     // ── cmd_config_* tests ──
@@ -4703,6 +4824,23 @@ mod tests {
     }
 
     #[test]
+    fn card_entry_due_date_present_serializes() {
+        let mut card = Card::new("1".into(), "Due card".into());
+        card.due = Some(chrono::NaiveDate::from_ymd_opt(2025, 7, 4).unwrap());
+        let entry = CardEntry::from_card(&card, "Backlog", "backlog");
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value["due"], "2025-07-04");
+    }
+
+    #[test]
+    fn card_entry_due_date_none_omitted_from_json() {
+        let card = Card::new("1".into(), "No due".into());
+        let entry = CardEntry::from_card(&card, "Backlog", "backlog");
+        let value = serde_json::to_value(&entry).unwrap();
+        assert!(value.get("due").is_none(), "due should be omitted when None");
+    }
+
+    #[test]
     fn card_full_serializes_with_body_and_flattened_entry() {
         let card = Card::new("5".into(), "Full card".into());
         let entry = CardEntry::from_card(&card, "Backlog", "backlog");
@@ -4870,42 +5008,59 @@ mod tests {
     fn cmd_list_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        assert!(cmd_list(dir.path(), None, None, true, false).is_ok());
+        assert!(cmd_list(dir.path(), None, None, false, true, false).is_ok());
     }
 
     #[test]
     fn cmd_list_json_with_card_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         setup_board_with_card(dir.path());
-        assert!(cmd_list(dir.path(), None, None, true, false).is_ok());
+        assert!(cmd_list(dir.path(), None, None, false, true, false).is_ok());
     }
 
     #[test]
     fn cmd_list_json_tag_filter_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         setup_board_with_card(dir.path());
-        assert!(cmd_list(dir.path(), Some("bug"), None, true, false).is_ok());
+        assert!(cmd_list(dir.path(), Some("bug"), None, false, true, false).is_ok());
     }
 
     #[test]
     fn cmd_list_json_column_filter_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         setup_board_with_card(dir.path());
-        assert!(cmd_list(dir.path(), None, Some("backlog"), true, false).is_ok());
+        assert!(cmd_list(dir.path(), None, Some("backlog"), false, true, false).is_ok());
+    }
+
+    #[test]
+    fn cmd_list_overdue_filter_excludes_non_overdue() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        // Add one overdue card and one non-overdue card
+        cmd_add(dir.path(), "Overdue task", vec![], vec![], Priority::Normal, Some("2020-01-01"), false).unwrap();
+        cmd_add(dir.path(), "Future task", vec![], vec![], Priority::Normal, Some("2099-12-31"), false).unwrap();
+        cmd_add(dir.path(), "No due task", vec![], vec![], Priority::Normal, None, false).unwrap();
+        // With --overdue, only the overdue card should appear
+        assert!(cmd_list(dir.path(), None, None, true, false, false).is_ok());
+        let board = load_board(&kando_dir).unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let overdue_count = board.columns[0].cards.iter().filter(|c| c.is_overdue(today)).count();
+        assert_eq!(overdue_count, 1, "only the card with due=2020-01-01 should be overdue");
     }
 
     #[test]
     fn cmd_add_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        assert!(cmd_add(dir.path(), "JSON card", vec!["test".into()], vec![], Priority::Normal, true).is_ok());
+        assert!(cmd_add(dir.path(), "JSON card", vec!["test".into()], vec![], Priority::Normal, None, true).is_ok());
     }
 
     #[test]
     fn cmd_add_json_card_actually_created() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        cmd_add(dir.path(), "JSON card", vec![], vec![], Priority::Normal, true).unwrap();
+        cmd_add(dir.path(), "JSON card", vec![], vec![], Priority::Normal, None, true).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         let total: usize = board.columns.iter().map(|c| c.cards.len()).sum();
@@ -4939,14 +5094,14 @@ mod tests {
     fn cmd_edit_json_title_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let (_, id) = setup_board_with_card(dir.path());
-        assert!(cmd_edit(dir.path(), &id, Some("New Title"), None, vec![], vec![], vec![], vec![], false, false, true).is_ok());
+        assert!(cmd_edit(dir.path(), &id, Some("New Title"), None, vec![], vec![], vec![], vec![], false, false, None, true).is_ok());
     }
 
     #[test]
     fn cmd_edit_json_title_actually_changed() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        cmd_edit(dir.path(), &id, Some("New Title"), None, vec![], vec![], vec![], vec![], false, false, true).unwrap();
+        cmd_edit(dir.path(), &id, Some("New Title"), None, vec![], vec![], vec![], vec![], false, false, None, true).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
         assert_eq!(board.columns[ci].cards[ki].title, "New Title");
@@ -4956,7 +5111,7 @@ mod tests {
     fn cmd_edit_json_no_flags_bails() {
         let dir = tempfile::tempdir().unwrap();
         let (_, id) = setup_board_with_card(dir.path());
-        let result = cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, false, true);
+        let result = cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], false, false, None, true);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("--json requires at least one edit flag"), "got: {err_msg}");
@@ -4966,21 +5121,21 @@ mod tests {
     fn cmd_edit_json_priority_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let (_, id) = setup_board_with_card(dir.path());
-        assert!(cmd_edit(dir.path(), &id, None, Some(Priority::Urgent), vec![], vec![], vec![], vec![], false, false, true).is_ok());
+        assert!(cmd_edit(dir.path(), &id, None, Some(Priority::Urgent), vec![], vec![], vec![], vec![], false, false, None, true).is_ok());
     }
 
     #[test]
     fn cmd_edit_json_tag_add_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let (_, id) = setup_board_with_card(dir.path());
-        assert!(cmd_edit(dir.path(), &id, None, None, vec!["feature".into()], vec![], vec![], vec![], false, false, true).is_ok());
+        assert!(cmd_edit(dir.path(), &id, None, None, vec!["feature".into()], vec![], vec![], vec![], false, false, None, true).is_ok());
     }
 
     #[test]
     fn cmd_edit_json_blocked_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let (_, id) = setup_board_with_card(dir.path());
-        assert!(cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, false, true).is_ok());
+        assert!(cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], true, false, None, true).is_ok());
     }
 
     #[test]
@@ -5208,7 +5363,7 @@ mod tests {
     fn cmd_list_csv_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         setup_board_with_card(dir.path());
-        assert!(cmd_list(dir.path(), None, None, false, true).is_ok());
+        assert!(cmd_list(dir.path(), None, None, false, false, true).is_ok());
     }
 
     #[test]
@@ -5286,7 +5441,7 @@ mod tests {
     fn cmd_list_csv_empty_board_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        assert!(cmd_list(dir.path(), None, None, false, true).is_ok());
+        assert!(cmd_list(dir.path(), None, None, false, false, true).is_ok());
     }
 
     #[test]

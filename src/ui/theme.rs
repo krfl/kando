@@ -14,6 +14,7 @@ pub struct Icons {
     pub very_stale: &'static str,
     pub blocker: &'static str,
     pub chevron: &'static str,
+    pub overdue: &'static str,
     pub sync_online: &'static str,
     pub sync_offline: &'static str,
 }
@@ -25,6 +26,7 @@ pub const NERD_ICONS: Icons = Icons {
     stale: "\u{f017}",              // nf-fa-clock
     very_stale: "\u{f071}",          // nf-fa-warning
     blocker: "\u{f05e}",            // nf-fa-ban
+    overdue: "\u{f274}",            // nf-fa-calendar_times_o
     chevron: "\u{f054}",            // nf-fa-chevron_right
     sync_online: "\u{f021}",        // nf-fa-refresh
     sync_offline: "\u{f127}",       // nf-fa-chain_broken
@@ -37,6 +39,7 @@ pub const ASCII_ICONS: Icons = Icons {
     stale: "~",
     very_stale: "?",
     blocker: "X",
+    overdue: "D",
     chevron: ">",
     sync_online: "*",
     sync_offline: "!",
@@ -93,6 +96,7 @@ impl Theme {
     /// "very stale" and "actively blocking".
     pub const VERY_STALE: Color = Color::LightRed;
     pub const BLOCKER: Color = Color::Red;
+    pub const OVERDUE: Color = Color::Magenta;
 
     // WIP limit glyphs
     pub const WIP_OK: Color = Color::Green;
@@ -270,6 +274,7 @@ mod tests {
             assert!(!i.stale.is_empty());
             assert!(!i.very_stale.is_empty());
             assert!(!i.blocker.is_empty());
+            assert!(!i.overdue.is_empty());
             assert!(!i.chevron.is_empty());
             assert!(!i.sync_online.is_empty());
             assert!(!i.sync_offline.is_empty());
@@ -297,6 +302,7 @@ mod tests {
             i.stale,
             i.very_stale,
             i.blocker,
+            i.overdue,
             i.chevron,
             i.sync_online,
             i.sync_offline,

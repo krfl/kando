@@ -7,8 +7,9 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
+use super::board_view::card_border_color;
 use super::theme::{Icons, Theme};
-use crate::board::age::{format_age, staleness, Staleness};
+use crate::board::age::{format_age, staleness};
 use crate::board::{Card, Policies};
 use chrono::{DateTime, Utc};
 
@@ -20,15 +21,8 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
     f.render_widget(Clear, panel_area);
 
     let stale = staleness(card, policies, now);
-    let border_color = if card.blocked {
-        Theme::BLOCKER
-    } else {
-        match stale {
-            Staleness::VeryStale => Theme::VERY_STALE,
-            Staleness::Stale => Theme::STALE,
-            Staleness::Fresh => Theme::FG,
-        }
-    };
+    let is_overdue = card.is_overdue(now.date_naive());
+    let border_color = card_border_color(card.blocked, is_overdue, true, stale, false);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -86,6 +80,20 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
                 format!("{} BLOCKED", icons.blocker),
                 Style::default().fg(Theme::BLOCKER),
             ),
+        ]));
+    }
+
+    // Due date
+    if let Some(due) = card.due {
+        let due_str = due.format("%Y-%m-%d").to_string();
+        let (label, style) = if is_overdue {
+            (format!("{due_str} (overdue)"), Style::default().fg(Theme::OVERDUE))
+        } else {
+            (due_str, Style::default())
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Due:      ", Theme::dim_style()),
+            Span::styled(label, style),
         ]));
     }
 

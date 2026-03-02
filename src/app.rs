@@ -157,6 +157,7 @@ pub enum InputTarget {
     ColRename(String), // holds slug of column being renamed
     ColAdd,
     PipeCommand,
+    DueDate,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +179,7 @@ pub enum PickerTarget {
     TagFilter,
     AssigneeFilter,
     StalenessFilter,
+    DueDate,
 }
 
 /// Notification severity for statusbar coloring.
@@ -197,6 +199,7 @@ pub struct AppState {
     pub active_tag_filters: Vec<String>,
     pub active_assignee_filters: Vec<String>,
     pub active_staleness_filters: Vec<String>,
+    pub active_overdue_filter: bool,
     pub notification: Option<String>,
     pub notification_level: NotificationLevel,
     pub notification_expires: Option<Instant>,
@@ -230,6 +233,7 @@ impl AppState {
             active_tag_filters: Vec::new(),
             active_assignee_filters: Vec::new(),
             active_staleness_filters: Vec::new(),
+            active_overdue_filter: false,
             notification: None,
             notification_level: NotificationLevel::Info,
             notification_expires: None,
@@ -302,6 +306,7 @@ impl AppState {
             || !self.active_tag_filters.is_empty()
             || !self.active_assignee_filters.is_empty()
             || !self.active_staleness_filters.is_empty()
+            || self.active_overdue_filter
     }
 
     /// Clamp selection to the nearest visible card under active filters.
@@ -342,6 +347,7 @@ fn visible_card_indices(col: &Column, state: &AppState, board: &Board) -> Vec<us
                 &state.active_tag_filters,
                 &state.active_assignee_filters,
                 &state.active_staleness_filters,
+                state.active_overdue_filter,
                 &board.policies,
                 now,
                 &matcher,
@@ -393,6 +399,7 @@ fn jump_to_visible_card(board: &Board, state: &mut AppState, forward: bool) {
                 &state.active_tag_filters,
                 &state.active_assignee_filters,
                 &state.active_staleness_filters,
+                state.active_overdue_filter,
                 &board.policies,
                 now,
                 &matcher,
@@ -713,6 +720,7 @@ fn process_action(
         | Action::PickPriority
         | Action::MoveToColumn
         | Action::ToggleBlocker
+        | Action::SetDueDate
         | Action::EditTags
         | Action::EditAssignees
         | Action::OpenCardDetail
@@ -862,7 +870,7 @@ fn process_action(
         }
 
         // Filter / tag filter
-        Action::StartFilter | Action::StartTagFilter | Action::StartAssigneeFilter | Action::StartStalenessFilter => {
+        Action::StartFilter | Action::StartTagFilter | Action::StartAssigneeFilter | Action::StartStalenessFilter | Action::StartOverdueFilter => {
             handle_filter_start(board, state, action);
         }
 
@@ -932,6 +940,7 @@ fn process_action(
                 state.active_tag_filters.clear();
                 state.active_assignee_filters.clear();
                 state.active_staleness_filters.clear();
+                state.active_overdue_filter = false;
                 state.notify("Filters cleared");
             }
         }
@@ -1344,6 +1353,23 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 }
             }
         }
+        Action::SetDueDate => {
+            state.mode = Mode::Normal;
+            if state.selected_card_ref(board).is_some() {
+                let items: Vec<(String, bool)> = ["tomorrow", "+3 days", "+1 week", "+2 weeks", "+1 month", "custom", "clear"]
+                    .iter()
+                    .map(|s| (s.to_string(), false))
+                    .collect();
+                state.mode = Mode::Picker {
+                    title: "due date",
+                    items,
+                    selected: 0,
+                    target: PickerTarget::DueDate,
+                };
+            } else {
+                state.notify("No card selected");
+            }
+        }
         Action::ToggleBlocker => {
             if was_minor_mode { state.mode = Mode::Normal; }
             let col_idx = state.focused_column;
@@ -1524,6 +1550,37 @@ fn handle_col_toggle_hidden(
 // Handler: Filter / tag filter start
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Helper: apply a due date to the selected card
+// ---------------------------------------------------------------------------
+
+fn apply_due_date(
+    board: &mut Board,
+    state: &mut AppState,
+    due: Option<chrono::NaiveDate>,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<()> {
+    let col_idx = state.focused_column;
+    let card_idx = state.selected_card;
+    if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+        let card_id = card.id.clone();
+        let card_title = card.title.clone();
+        card.due = due;
+        card.touch();
+        let col_name = board.columns[col_idx].name.clone();
+        board.columns[col_idx].sort_cards();
+        save_board(kando_dir, board)?;
+        let date_str = due.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "none".into());
+        append_activity(kando_dir, "due", &card_id, &card_title, &[("due", &date_str), ("column", &col_name)]);
+        if due.is_some() {
+            state.notify(format!("Due: {date_str}"));
+        } else {
+            state.notify("Due date cleared");
+        }
+    }
+    Ok(())
+}
+
 fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
     match action {
         Action::StartFilter => {
@@ -1580,7 +1637,7 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                 ("new", "Created today"),
                 ("normal", "Not stale"),
                 ("stale", "Needs attention"),
-                ("very stale", "Overdue"),
+                ("very stale", "Very stale"),
             ];
             let items: Vec<(String, bool)> = labels
                 .iter()
@@ -1595,6 +1652,16 @@ fn handle_filter_start(board: &Board, state: &mut AppState, action: Action) {
                 selected: 0,
                 target: PickerTarget::StalenessFilter,
             };
+        }
+        Action::StartOverdueFilter => {
+            state.active_overdue_filter = !state.active_overdue_filter;
+            state.clamp_selection_filtered(board);
+            state.mode = Mode::Normal;
+            state.notify(if state.active_overdue_filter {
+                "Overdue filter on"
+            } else {
+                "Overdue filter off"
+            });
         }
         _ => unreachable!(),
     }
@@ -2103,6 +2170,22 @@ fn handle_input_confirm(
         }
         Mode::Input {
             buf,
+            on_confirm: InputTarget::DueDate,
+            ..
+        } => {
+            let input = buf.input.trim().to_string();
+            match chrono::NaiveDate::parse_from_str(&input, "%Y-%m-%d") {
+                Ok(date) => {
+                    apply_due_date(board, state, Some(date), kando_dir)?;
+                    sync_message = Some("Set due date".into());
+                }
+                Err(_) => {
+                    state.notify_error("Invalid date format. Use YYYY-MM-DD");
+                }
+            }
+        }
+        Mode::Input {
+            buf,
             on_confirm: InputTarget::PipeCommand,
             ..
         } => {
@@ -2285,6 +2368,40 @@ fn handle_input_confirm(
                             state.clamp_selection_filtered(board);
                             save_board(kando_dir, board)?;
                             sync_message = Some("Sort column".into());
+                        }
+                    }
+                }
+                PickerTarget::DueDate => {
+                    if let Some((choice, _)) = items.get(selected) {
+                        let today = chrono::Utc::now().date_naive();
+                        match choice.as_str() {
+                            "custom" => {
+                                state.mode = Mode::Input {
+                                    prompt: "Due date (YYYY-MM-DD)",
+                                    buf: TextBuffer::empty(),
+                                    on_confirm: InputTarget::DueDate,
+                                    completion: None,
+                                };
+                            }
+                            "clear" => {
+                                apply_due_date(board, state, None, kando_dir)?;
+                                sync_message = Some("Clear due date".into());
+                            }
+                            _ => {
+                                let date = match choice.as_str() {
+                                    "tomorrow" => today + chrono::Days::new(1),
+                                    "+3 days" => today + chrono::Days::new(3),
+                                    "+1 week" => today + chrono::Days::new(7),
+                                    "+2 weeks" => today + chrono::Days::new(14),
+                                    // checked_add_months returns None when target day doesn't exist
+                    // (e.g., Jan 31 + 1 month = Feb 31). Fall back to +30 days.
+                    "+1 month" => today.checked_add_months(chrono::Months::new(1))
+                                        .unwrap_or(today + chrono::Days::new(30)),
+                                    _ => today,
+                                };
+                                apply_due_date(board, state, Some(date), kando_dir)?;
+                                sync_message = Some("Set due date".into());
+                            }
                         }
                     }
                 }

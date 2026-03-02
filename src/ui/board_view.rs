@@ -50,9 +50,11 @@ pub(crate) fn fit_icons<'a>(candidates: &[(&'a str, Style)], avail_width: usize)
 ///
 /// Selection is expressed via `BorderType::Thick + Modifier::BOLD`, not via
 /// color — so `is_selected` is intentionally absent from this function.
-pub(crate) fn card_border_color(blocked: bool, is_col_focused: bool, stale: Staleness, is_new: bool) -> Color {
+pub(crate) fn card_border_color(blocked: bool, is_overdue: bool, is_col_focused: bool, stale: Staleness, is_new: bool) -> Color {
     if blocked {
         Theme::BLOCKER
+    } else if is_overdue {
+        Theme::OVERDUE
     } else {
         match stale {
             Staleness::VeryStale => Theme::VERY_STALE,
@@ -137,6 +139,7 @@ fn render_column(
                 &state.active_tag_filters,
                 &state.active_assignee_filters,
                 &state.active_staleness_filters,
+                state.active_overdue_filter,
                 policies,
                 now,
                 matcher,
@@ -284,8 +287,9 @@ fn render_card(
     let stale = staleness(card, policies, now);
     let age_str = format_age(card.created, now);
     let is_new = is_new_card(card.created, now);
+    let is_overdue = card.is_overdue(now.date_naive());
 
-    let border_color = card_border_color(card.blocked, is_col_focused, stale, is_new);
+    let border_color = card_border_color(card.blocked, is_overdue, is_col_focused, stale, is_new);
 
     let selected_mod = if is_selected { Modifier::BOLD } else { Modifier::empty() };
 
@@ -323,6 +327,9 @@ fn render_card(
     }
     if let Some(sym) = icons.priority(card.priority) {
         candidates.push((sym, Style::default().fg(Theme::priority_color(card.priority))));
+    }
+    if is_overdue {
+        candidates.push((icons.overdue, Style::default().fg(Theme::OVERDUE)));
     }
     if card.blocked {
         candidates.push((icons.blocker, Style::default().fg(Theme::BLOCKER)));
@@ -571,68 +578,89 @@ mod tests {
 
     #[test]
     fn border_color_blocked_wins_over_all() {
-        assert_eq!(card_border_color(true, true,  Staleness::Fresh, false),     Theme::BLOCKER);
-        assert_eq!(card_border_color(true, false, Staleness::Fresh, false),     Theme::BLOCKER);
-        assert_eq!(card_border_color(true, false, Staleness::VeryStale, false), Theme::BLOCKER);
-        assert_eq!(card_border_color(true, true,  Staleness::Stale, false),     Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, true,  Staleness::Fresh, false),     Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, false, Staleness::Fresh, false),     Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, false, Staleness::VeryStale, false), Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, true,  Staleness::Stale, false),     Theme::BLOCKER);
         // Blocker wins even for new cards
-        assert_eq!(card_border_color(true, true,  Staleness::Fresh, true),      Theme::BLOCKER);
+        assert_eq!(card_border_color(true, false, true,  Staleness::Fresh, true),      Theme::BLOCKER);
+        // Blocker wins even for overdue cards
+        assert_eq!(card_border_color(true, true, true,  Staleness::Fresh, false),      Theme::BLOCKER);
+    }
+
+    #[test]
+    fn border_color_overdue_beats_staleness() {
+        assert_eq!(card_border_color(false, true, true,  Staleness::Fresh, false), Theme::OVERDUE);
+        assert_eq!(card_border_color(false, true, false, Staleness::Stale, false), Theme::OVERDUE);
+        assert_eq!(card_border_color(false, true, true,  Staleness::VeryStale, false), Theme::OVERDUE);
     }
 
     #[test]
     fn border_color_unfocused_fresh_returns_dim() {
-        assert_eq!(card_border_color(false, false, Staleness::Fresh, false), Theme::DIM);
+        assert_eq!(card_border_color(false, false, false, Staleness::Fresh, false), Theme::DIM);
     }
 
     #[test]
     fn border_color_unfocused_stale_returns_stale_color() {
-        assert_eq!(card_border_color(false, false, Staleness::Stale, false), Theme::STALE);
+        assert_eq!(card_border_color(false, false, false, Staleness::Stale, false), Theme::STALE);
     }
 
     #[test]
     fn border_color_unfocused_very_stale_returns_very_stale_color() {
-        assert_eq!(card_border_color(false, false, Staleness::VeryStale, false), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, false, Staleness::VeryStale, false), Theme::VERY_STALE);
     }
 
     #[test]
     fn border_color_focused_fresh_is_card_border() {
-        assert_eq!(card_border_color(false, true, Staleness::Fresh, false), Theme::CARD_BORDER);
+        assert_eq!(card_border_color(false, false, true, Staleness::Fresh, false), Theme::CARD_BORDER);
     }
 
     #[test]
     fn border_color_focused_stale_is_stale_color() {
-        assert_eq!(card_border_color(false, true, Staleness::Stale, false), Theme::STALE);
+        assert_eq!(card_border_color(false, false, true, Staleness::Stale, false), Theme::STALE);
     }
 
     #[test]
     fn border_color_focused_very_stale_is_very_stale_color() {
-        assert_eq!(card_border_color(false, true, Staleness::VeryStale, false), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, true, Staleness::VeryStale, false), Theme::VERY_STALE);
     }
 
     #[test]
     fn border_color_stale_always_shows_semantic_color() {
-        assert_eq!(card_border_color(false, true, Staleness::Stale, false), Theme::STALE);
-        assert_eq!(card_border_color(false, false, Staleness::Stale, false), Theme::STALE);
+        assert_eq!(card_border_color(false, false, true, Staleness::Stale, false), Theme::STALE);
+        assert_eq!(card_border_color(false, false, false, Staleness::Stale, false), Theme::STALE);
     }
 
     #[test]
     fn border_color_very_stale_always_shows_semantic_color() {
-        assert_eq!(card_border_color(false, true, Staleness::VeryStale, false), Theme::VERY_STALE);
-        assert_eq!(card_border_color(false, false, Staleness::VeryStale, false), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, true, Staleness::VeryStale, false), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, false, Staleness::VeryStale, false), Theme::VERY_STALE);
     }
 
     #[test]
     fn border_color_new_card_is_green() {
         // New card border is green regardless of column focus
-        assert_eq!(card_border_color(false, true, Staleness::Fresh, true), Theme::NEW_CARD_TITLE);
-        assert_eq!(card_border_color(false, false, Staleness::Fresh, true), Theme::NEW_CARD_TITLE);
+        assert_eq!(card_border_color(false, false, true, Staleness::Fresh, true), Theme::NEW_CARD_TITLE);
+        assert_eq!(card_border_color(false, false, false, Staleness::Fresh, true), Theme::NEW_CARD_TITLE);
     }
 
     #[test]
     fn border_color_staleness_beats_new_card() {
         // Staleness takes priority over the new-green signal
-        assert_eq!(card_border_color(false, false, Staleness::Stale, true), Theme::STALE);
-        assert_eq!(card_border_color(false, false, Staleness::VeryStale, true), Theme::VERY_STALE);
+        assert_eq!(card_border_color(false, false, false, Staleness::Stale, true), Theme::STALE);
+        assert_eq!(card_border_color(false, false, false, Staleness::VeryStale, true), Theme::VERY_STALE);
+    }
+
+    #[test]
+    fn border_color_overdue_beats_new_card() {
+        assert_eq!(card_border_color(false, true, true, Staleness::Fresh, true), Theme::OVERDUE);
+        assert_eq!(card_border_color(false, true, false, Staleness::Fresh, true), Theme::OVERDUE);
+    }
+
+    #[test]
+    fn border_color_blocked_beats_overdue_with_stale() {
+        assert_eq!(card_border_color(true, true, false, Staleness::Stale, false), Theme::BLOCKER);
+        assert_eq!(card_border_color(true, true, true, Staleness::VeryStale, false), Theme::BLOCKER);
     }
 
     // ── is_new_card ─────────────────────────────────────────────────────────

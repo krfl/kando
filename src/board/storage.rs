@@ -360,6 +360,9 @@ fn serialize_card(card: &Card) -> String {
     if card.blocked {
         fm.push_str("blocked = true\n");
     }
+    if let Some(due) = card.due {
+        fm.push_str(&format!("due = \"{}\"\n", due.format("%Y-%m-%d")));
+    }
     if let Some(started) = card.started {
         fm.push_str(&format!(
             "started = \"{}\"\n",
@@ -1369,6 +1372,37 @@ mod tests {
         assert!(loaded.started.is_some());
         assert!(loaded.completed.is_some());
         assert_eq!(body, card.body);
+    }
+
+    #[test]
+    fn serialize_card_due_date_roundtrip() {
+        let mut card = Card::new("1".into(), "Due test".into());
+        card.due = Some(chrono::NaiveDate::from_ymd_opt(2025, 12, 31).unwrap());
+
+        let text = serialize_card(&card);
+        let (fm, _) = parse_frontmatter(&text).unwrap();
+        let loaded: Card = toml::from_str(&fm).unwrap();
+        assert_eq!(loaded.due, Some(chrono::NaiveDate::from_ymd_opt(2025, 12, 31).unwrap()));
+    }
+
+    #[test]
+    fn serialize_card_no_due_date_omitted() {
+        let card = Card::new("1".into(), "No due".into());
+        let text = serialize_card(&card);
+        // Verify structurally
+        let (fm, _) = parse_frontmatter(&text).unwrap();
+        let loaded: Card = toml::from_str(&fm).unwrap();
+        assert!(loaded.due.is_none());
+        // Also verify field is literally absent from serialized text
+        assert!(!text.contains("due ="), "due field should be omitted when None");
+    }
+
+    #[test]
+    fn serialize_card_due_date_format_is_yyyy_mm_dd() {
+        let mut card = Card::new("1".into(), "Format test".into());
+        card.due = Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap());
+        let text = serialize_card(&card);
+        assert!(text.contains(r#"due = "2025-01-15""#));
     }
 
     // -----------------------------------------------------------------------

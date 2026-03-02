@@ -3,7 +3,7 @@ pub mod metrics;
 pub mod storage;
 pub mod sync;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Serialize};
@@ -147,6 +147,8 @@ pub struct Card {
     pub assignees: Vec<String>,
     #[serde(default)]
     pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due: Option<NaiveDate>,
     /// When the card first moved past backlog (commitment point). `None` for cards still in backlog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started: Option<DateTime<Utc>>,
@@ -170,10 +172,18 @@ impl Card {
             tags: Vec::new(),
             assignees: Vec::new(),
             blocked: false,
+            due: None,
             started: None,
             completed: None,
             body: "<!-- add body content here -->".into(),
         }
+    }
+
+    /// Whether this card is past its due date.
+    ///
+    /// A card due *today* is NOT overdue — only `due < today`.
+    pub fn is_overdue(&self, today: NaiveDate) -> bool {
+        self.due.is_some_and(|d| d < today)
     }
 
     /// Touch the card, updating its `updated` timestamp.
@@ -281,6 +291,7 @@ pub fn card_is_visible(
     tag_filters: &[String],
     assignee_filters: &[String],
     staleness_filters: &[String],
+    overdue_filter: bool,
     policies: &Policies,
     now: DateTime<Utc>,
     matcher: &SkimMatcherV2,
@@ -296,7 +307,8 @@ pub fn card_is_visible(
             let label = age::card_staleness_label(card, policies, now);
             staleness_filters.iter().any(|f| f.as_str() == label)
         };
-        tag_ok && assignee_ok && staleness_ok
+        let overdue_ok = !overdue_filter || card.is_overdue(now.date_naive());
+        tag_ok && assignee_ok && staleness_ok && overdue_ok
     }
 }
 
@@ -767,7 +779,7 @@ mod tests {
         let policies = Policies::default();
         let now = Utc::now();
         let card = card_with_meta("Test", &[], &[]);
-        assert!(card_is_visible(&card, None, &[], &[], &[], &policies, now, &matcher));
+        assert!(card_is_visible(&card, None, &[], &[], &[], false, &policies, now, &matcher));
     }
 
     #[test]
@@ -783,6 +795,7 @@ mod tests {
             &["nonexistent".to_string()],
             &[],
             &[],
+            false,
             &policies,
             now,
             &matcher,
@@ -795,8 +808,8 @@ mod tests {
         let policies = Policies::default();
         let now = Utc::now();
         let card = card_with_meta("Test", &["bug"], &[]);
-        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &[], &policies, now, &matcher));
-        assert!(!card_is_visible(&card, None, &["feature".to_string()], &[], &[], &policies, now, &matcher));
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &[], false, &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &["feature".to_string()], &[], &[], false, &policies, now, &matcher));
     }
 
     #[test]
@@ -805,8 +818,8 @@ mod tests {
         let policies = Policies::default();
         let now = Utc::now();
         let card = card_with_meta("Test", &[], &["alice"]);
-        assert!(card_is_visible(&card, None, &[], &["alice".to_string()], &[], &policies, now, &matcher));
-        assert!(!card_is_visible(&card, None, &[], &["bob".to_string()], &[], &policies, now, &matcher));
+        assert!(card_is_visible(&card, None, &[], &["alice".to_string()], &[], false, &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &[], &["bob".to_string()], &[], false, &policies, now, &matcher));
     }
 
     #[test]
@@ -816,11 +829,11 @@ mod tests {
         let now = Utc::now();
         let card = card_with_meta("Test", &["bug"], &["alice"]);
         // Both match
-        assert!(card_is_visible(&card, None, &["bug".to_string()], &["alice".to_string()], &[], &policies, now, &matcher));
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &["alice".to_string()], &[], false, &policies, now, &matcher));
         // Tag matches, assignee doesn't
-        assert!(!card_is_visible(&card, None, &["bug".to_string()], &["bob".to_string()], &[], &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &["bug".to_string()], &["bob".to_string()], &[], false, &policies, now, &matcher));
         // Assignee matches, tag doesn't
-        assert!(!card_is_visible(&card, None, &["feature".to_string()], &["alice".to_string()], &[], &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &["feature".to_string()], &["alice".to_string()], &[], false, &policies, now, &matcher));
     }
 
     #[test]
@@ -833,7 +846,7 @@ mod tests {
         let mut card = card_with_meta("Test", &[], &[]);
         card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
         card.updated = now;
-        assert!(card_is_visible(&card, None, &[], &[], &["normal".to_string()], &policies, now, &matcher));
+        assert!(card_is_visible(&card, None, &[], &[], &["normal".to_string()], false, &policies, now, &matcher));
     }
 
     #[test]
@@ -846,7 +859,7 @@ mod tests {
         let mut card = card_with_meta("Test", &[], &[]);
         card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
         card.updated = now;
-        assert!(!card_is_visible(&card, None, &[], &[], &["stale".to_string()], &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &[], &[], &["stale".to_string()], false, &policies, now, &matcher));
     }
 
     #[test]
@@ -860,12 +873,12 @@ mod tests {
         stale_card.created = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap();
         stale_card.updated = Utc.with_ymd_and_hms(2025, 6, 8, 12, 0, 0).unwrap();
         let filters = vec!["stale".to_string(), "very stale".to_string()];
-        assert!(card_is_visible(&stale_card, None, &[], &[], &filters, &policies, now, &matcher));
+        assert!(card_is_visible(&stale_card, None, &[], &[], &filters, false, &policies, now, &matcher));
         // Normal card should not match
         let mut normal_card = card_with_meta("Normal", &[], &[]);
         normal_card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
         normal_card.updated = now;
-        assert!(!card_is_visible(&normal_card, None, &[], &[], &filters, &policies, now, &matcher));
+        assert!(!card_is_visible(&normal_card, None, &[], &[], &filters, false, &policies, now, &matcher));
     }
 
     #[test]
@@ -879,9 +892,9 @@ mod tests {
         card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
         card.updated = now;
         // Both tag and staleness match → visible
-        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &["normal".to_string()], &policies, now, &matcher));
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &["normal".to_string()], false, &policies, now, &matcher));
         // Tag matches but staleness doesn't → hidden
-        assert!(!card_is_visible(&card, None, &["bug".to_string()], &[], &["stale".to_string()], &policies, now, &matcher));
+        assert!(!card_is_visible(&card, None, &["bug".to_string()], &[], &["stale".to_string()], false, &policies, now, &matcher));
     }
 
     #[test]
@@ -894,7 +907,7 @@ mod tests {
         card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
         card.updated = now;
         // Text filter matches, staleness filter would NOT match — text takes precedence
-        assert!(card_is_visible(&card, Some("login"), &[], &[], &["stale".to_string()], &policies, now, &matcher));
+        assert!(card_is_visible(&card, Some("login"), &[], &[], &["stale".to_string()], false, &policies, now, &matcher));
     }
 
     // ── Sort tests ──
@@ -1377,5 +1390,131 @@ mod tests {
     fn normalize_column_orders_empty_vec_does_not_panic() {
         let mut cols: Vec<Column> = vec![];
         normalize_column_orders(&mut cols); // must not panic
+    }
+
+    // ── is_overdue tests ──
+
+    #[test]
+    fn is_overdue_none_returns_false() {
+        let card = Card::new("1".into(), "Test".into());
+        assert!(!card.is_overdue(chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()));
+    }
+
+    #[test]
+    fn is_overdue_yesterday_returns_true() {
+        let today = chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(today - chrono::Days::new(1));
+        assert!(card.is_overdue(today));
+    }
+
+    #[test]
+    fn is_overdue_today_returns_false() {
+        let today = chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(today);
+        assert!(!card.is_overdue(today));
+    }
+
+    #[test]
+    fn is_overdue_tomorrow_returns_false() {
+        let today = chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(today + chrono::Days::new(1));
+        assert!(!card.is_overdue(today));
+    }
+
+    #[test]
+    fn is_overdue_far_past_returns_true() {
+        let today = chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap());
+        assert!(card.is_overdue(today));
+    }
+
+    #[test]
+    fn card_new_due_is_none() {
+        let card = Card::new("1".into(), "Test".into());
+        assert!(card.due.is_none());
+    }
+
+    // ── card_is_visible overdue filter tests ──
+
+    fn fixed_now() -> DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn card_is_visible_overdue_filter_shows_overdue_card() {
+        let matcher = SkimMatcherV2::default();
+        let now = fixed_now();
+        let policies = Policies::default();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(now.date_naive() - chrono::Days::new(1));
+        assert!(card_is_visible(&card, None, &[], &[], &[], true, &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_overdue_filter_hides_non_overdue_card() {
+        let matcher = SkimMatcherV2::default();
+        let now = fixed_now();
+        let policies = Policies::default();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(now.date_naive() + chrono::Days::new(1));
+        assert!(!card_is_visible(&card, None, &[], &[], &[], true, &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_overdue_filter_hides_card_with_no_due() {
+        let matcher = SkimMatcherV2::default();
+        let now = fixed_now();
+        let policies = Policies::default();
+        let card = Card::new("1".into(), "Test".into());
+        assert!(!card_is_visible(&card, None, &[], &[], &[], true, &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_overdue_filter_off_shows_all() {
+        let matcher = SkimMatcherV2::default();
+        let now = fixed_now();
+        let policies = Policies::default();
+        let card = Card::new("1".into(), "Test".into());
+        assert!(card_is_visible(&card, None, &[], &[], &[], false, &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_overdue_filter_card_due_today_is_hidden() {
+        let matcher = SkimMatcherV2::default();
+        let now = fixed_now();
+        let policies = Policies::default();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(now.date_naive());
+        assert!(!card_is_visible(&card, None, &[], &[], &[], true, &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_overdue_combined_with_tag_filter() {
+        let matcher = SkimMatcherV2::default();
+        let now = fixed_now();
+        let policies = Policies::default();
+        let mut card = Card::new("1".into(), "Test".into());
+        card.due = Some(now.date_naive() - chrono::Days::new(1));
+        card.tags = vec!["bug".into()];
+        // Both match
+        assert!(card_is_visible(&card, None, &["bug".to_string()], &[], &[], true, &policies, now, &matcher));
+        // Tag doesn't match
+        assert!(!card_is_visible(&card, None, &["feature".to_string()], &[], &[], true, &policies, now, &matcher));
+    }
+
+    #[test]
+    fn card_is_visible_text_filter_overrides_overdue_filter() {
+        let matcher = SkimMatcherV2::default();
+        let now = fixed_now();
+        let policies = Policies::default();
+        let mut card = Card::new("1".into(), "Test card".into());
+        card.due = Some(now.date_naive() + chrono::Days::new(1)); // not overdue
+        // Text search takes precedence over overdue filter
+        assert!(card_is_visible(&card, Some("test"), &[], &[], &[], true, &policies, now, &matcher));
     }
 }

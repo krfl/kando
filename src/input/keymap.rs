@@ -100,6 +100,7 @@ fn map_space(key: KeyEvent) -> Action {
         KeyCode::Char('p') => Action::PickPriority,
         KeyCode::Char('m') => Action::MoveToColumn,
         KeyCode::Char('b') => Action::ToggleBlocker,
+        KeyCode::Char('D') => Action::SetDueDate,
         KeyCode::Char('x') => Action::ArchiveCard,
         KeyCode::Char('u') => Action::Undo,
         KeyCode::Esc => Action::None,
@@ -142,6 +143,7 @@ fn map_filter_menu(key: KeyEvent) -> Action {
         KeyCode::Char('t') => Action::StartTagFilter,
         KeyCode::Char('a') => Action::StartAssigneeFilter,
         KeyCode::Char('s') => Action::StartStalenessFilter,
+        KeyCode::Char('d') => Action::StartOverdueFilter,
         KeyCode::Char('/') => Action::StartFilter,
         KeyCode::Esc => Action::None,
         _ => Action::None,
@@ -230,6 +232,7 @@ pub const SPACE_BINDINGS: &[Binding] = &[
     Binding { key: "p", description: "Set priority" },
     Binding { key: "m", description: "Move to column" },
     Binding { key: "b", description: "Toggle blocker" },
+    Binding { key: "D", description: "Set due date" },
     Binding { key: "x", description: "Archive card" },
     Binding { key: "u", description: "Undo last delete" },
 ];
@@ -238,6 +241,7 @@ pub const FILTER_BINDINGS: &[Binding] = &[
     Binding { key: "t", description: "By tag" },
     Binding { key: "a", description: "By assignee" },
     Binding { key: "s", description: "By staleness" },
+    Binding { key: "d", description: "By overdue" },
     Binding { key: "/", description: "Text search" },
 ];
 
@@ -907,5 +911,31 @@ mod tests {
         let entry = DETAIL_BINDINGS.iter().find(|b| b.key == "|");
         assert!(entry.is_some(), "| binding missing from DETAIL_BINDINGS");
         assert_eq!(entry.unwrap().description, "Pipe card to command");
+    }
+
+    #[test]
+    fn space_shift_d_sets_due_date() {
+        let action = map_key(key(KeyCode::Char('D')), &Mode::Space);
+        assert_eq!(action, Action::SetDueDate);
+    }
+
+    #[test]
+    fn filter_menu_d_starts_overdue_filter() {
+        let action = map_key(key(KeyCode::Char('d')), &Mode::FilterMenu);
+        assert_eq!(action, Action::StartOverdueFilter);
+    }
+
+    #[test]
+    fn space_bindings_contains_due_date() {
+        let entry = SPACE_BINDINGS.iter().find(|b| b.key == "D");
+        assert!(entry.is_some(), "D binding missing from SPACE_BINDINGS");
+        assert_eq!(entry.unwrap().description, "Set due date");
+    }
+
+    #[test]
+    fn filter_bindings_contains_overdue() {
+        let entry = FILTER_BINDINGS.iter().find(|b| b.key == "d");
+        assert!(entry.is_some(), "d binding missing from FILTER_BINDINGS");
+        assert_eq!(entry.unwrap().description, "By overdue");
     }
 }
