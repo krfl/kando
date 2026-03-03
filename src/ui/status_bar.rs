@@ -100,25 +100,24 @@ fn build_left_zone(state: &AppState) -> Vec<Span<'_>> {
         ));
     }
 
-    // Show repeat-last-action hint
-    if let Some(ref repeatable) = state.last_repeatable {
-        let color = match repeatable.risk_level() {
-            RiskLevel::Low => Theme::DIM,
-            RiskLevel::Normal => Theme::FG,
-            RiskLevel::High => Color::Yellow,
-        };
-        spans.push(Span::styled(
-            format!("[. {}] ", repeatable.hint()),
-            Style::default().fg(color),
-        ));
-    }
-
     spans
 }
 
-/// Build the right zone: board name + sync status.
+/// Build the right zone: repeat hint + board name + sync status.
 fn build_right_zone<'a>(state: &'a AppState, board_name: &'a str) -> Vec<Span<'a>> {
-    let mut spans = Vec::new();
+    let mut spans = Vec::with_capacity(4);
+
+    // Show repeat-last-action hint
+    if let Some(ref repeatable) = state.last_repeatable {
+        let style = match repeatable.risk_level() {
+            RiskLevel::High => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            _ => Style::default().fg(Theme::FG),
+        };
+        spans.push(Span::styled(
+            format!(". {}  ", repeatable.hint()),
+            style,
+        ));
+    }
 
     // Board name
     spans.push(Span::styled(
@@ -422,84 +421,105 @@ mod tests {
         assert_eq!(spans[0].content.as_ref(), " TEMPLATE ");
     }
 
+    // --- right zone repeat hint tests ---
+
     #[test]
-    fn left_zone_shows_repeat_hint() {
+    fn right_zone_shows_repeat_hint() {
         use crate::app::RepeatableAction;
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::Archive);
-        let spans = build_left_zone(&state);
+        let spans = build_right_zone(&state, "board");
         let texts = span_texts(&spans);
-        assert!(texts.contains(&"[. archive] "));
+        assert!(texts.contains(&". archive  "));
     }
 
     #[test]
-    fn left_zone_no_repeat_hint_when_none() {
+    fn right_zone_no_repeat_hint_when_none() {
         let state = AppState::new();
-        let spans = build_left_zone(&state);
+        let spans = build_right_zone(&state, "board");
         let texts = span_texts(&spans);
-        assert!(!texts.iter().any(|t| t.contains("[.")));
+        assert!(!texts.iter().any(|t| t.starts_with(". ")));
     }
 
     #[test]
-    fn left_zone_repeat_hint_with_filters() {
-        use crate::app::RepeatableAction;
-        use crate::board::Priority;
-        let mut state = AppState::new();
-        state.active_filter = Some("bug".to_string());
-        state.last_repeatable = Some(RepeatableAction::SetPriority(Priority::Urgent));
-        let spans = build_left_zone(&state);
-        let texts = span_texts(&spans);
-        assert!(texts.contains(&"/bug "));
-        assert!(texts.contains(&"[. priority: urgent] "));
-    }
-
-    #[test]
-    fn left_zone_repeat_hint_low_risk_uses_dim_color() {
+    fn right_zone_repeat_hint_low_risk_fg() {
         use crate::app::RepeatableAction;
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetTags(vec![]));
-        let spans = build_left_zone(&state);
-        let hint_span = spans.iter().find(|s| s.content.contains("[.")).unwrap();
-        assert_eq!(hint_span.style.fg, Some(Theme::DIM));
+        let spans = build_right_zone(&state, "board");
+        let hint_span = spans.iter().find(|s| s.content.starts_with(". ")).unwrap();
+        assert_eq!(hint_span.style.fg, Some(Theme::FG));
+        assert_eq!(hint_span.style.bg, None);
     }
 
     #[test]
-    fn left_zone_repeat_hint_normal_risk_uses_fg_color() {
+    fn right_zone_repeat_hint_normal_risk_fg() {
         use crate::app::RepeatableAction;
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::Archive);
-        let spans = build_left_zone(&state);
-        let hint_span = spans.iter().find(|s| s.content.contains("[.")).unwrap();
+        let spans = build_right_zone(&state, "board");
+        let hint_span = spans.iter().find(|s| s.content.starts_with(". ")).unwrap();
         assert_eq!(hint_span.style.fg, Some(Theme::FG));
+        assert_eq!(hint_span.style.bg, None);
     }
 
     #[test]
-    fn left_zone_repeat_hint_high_risk_uses_yellow() {
+    fn right_zone_repeat_hint_high_risk_bold_yellow() {
         use crate::app::RepeatableAction;
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::DeleteCard);
-        let spans = build_left_zone(&state);
-        let hint_span = spans.iter().find(|s| s.content.contains("[.")).unwrap();
+        let spans = build_right_zone(&state, "board");
+        let hint_span = spans.iter().find(|s| s.content.starts_with(". ")).unwrap();
         assert_eq!(hint_span.style.fg, Some(Color::Yellow));
+        assert!(hint_span.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn left_zone_repeat_hint_delete_card_text() {
+    fn right_zone_repeat_hint_delete_text() {
         use crate::app::RepeatableAction;
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::DeleteCard);
-        let spans = build_left_zone(&state);
+        let spans = build_right_zone(&state, "board");
         let texts = span_texts(&spans);
-        assert!(texts.contains(&"[. delete] "));
+        assert!(texts.contains(&". delete  "));
     }
 
     #[test]
-    fn left_zone_repeat_hint_col_remove_text() {
+    fn right_zone_repeat_hint_col_remove_text() {
         use crate::app::RepeatableAction;
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColRemove);
-        let spans = build_left_zone(&state);
+        let spans = build_right_zone(&state, "board");
         let texts = span_texts(&spans);
-        assert!(texts.contains(&"[. remove col] "));
+        assert!(texts.contains(&". remove col  "));
+    }
+
+    #[test]
+    fn right_zone_repeat_hint_ends_with_double_space() {
+        use crate::app::RepeatableAction;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let spans = build_right_zone(&state, "board");
+        let hint_span = spans.iter().find(|s| s.content.starts_with(". ")).unwrap();
+        assert!(hint_span.content.ends_with("  "), "hint must end with double space");
+    }
+
+    #[test]
+    fn right_zone_repeat_hint_with_sync_icon_span_order() {
+        use crate::app::RepeatableAction;
+        use std::path::PathBuf;
+        use crate::board::sync::SyncState;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        state.sync_state = Some(SyncState {
+            shadow_path: PathBuf::new(),
+            branch: String::new(),
+            online: true,
+            last_error: None,
+        });
+        let spans = build_right_zone(&state, "my-project");
+        assert_eq!(spans.len(), 5);
+        assert!(spans[0].content.starts_with(". "));
+        assert_eq!(spans[1].content.as_ref(), "my-project");
     }
 }
