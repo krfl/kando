@@ -1,12 +1,12 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use super::theme::{self, Theme};
-use crate::app::{AppState, Mode, NotificationLevel, TextBuffer};
+use crate::app::{AppState, Mode, NotificationLevel, RiskLevel, TextBuffer};
 use crate::board::Board;
 
 pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board: &Board) {
@@ -97,6 +97,19 @@ fn build_left_zone(state: &AppState) -> Vec<Span<'_>> {
         spans.push(Span::styled(
             format!("[{labels}] "),
             Style::default().fg(Theme::FG),
+        ));
+    }
+
+    // Show repeat-last-action hint
+    if let Some(ref repeatable) = state.last_repeatable {
+        let color = match repeatable.risk_level() {
+            RiskLevel::Low => Theme::DIM,
+            RiskLevel::Normal => Theme::FG,
+            RiskLevel::High => Color::Yellow,
+        };
+        spans.push(Span::styled(
+            format!("[. {}] ", repeatable.hint()),
+            Style::default().fg(color),
         ));
     }
 
@@ -407,5 +420,86 @@ mod tests {
         state.mode = Mode::Template;
         let spans = build_left_zone(&state);
         assert_eq!(spans[0].content.as_ref(), " TEMPLATE ");
+    }
+
+    #[test]
+    fn left_zone_shows_repeat_hint() {
+        use crate::app::RepeatableAction;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let spans = build_left_zone(&state);
+        let texts = span_texts(&spans);
+        assert!(texts.contains(&"[. archive] "));
+    }
+
+    #[test]
+    fn left_zone_no_repeat_hint_when_none() {
+        let state = AppState::new();
+        let spans = build_left_zone(&state);
+        let texts = span_texts(&spans);
+        assert!(!texts.iter().any(|t| t.contains("[.")));
+    }
+
+    #[test]
+    fn left_zone_repeat_hint_with_filters() {
+        use crate::app::RepeatableAction;
+        use crate::board::Priority;
+        let mut state = AppState::new();
+        state.active_filter = Some("bug".to_string());
+        state.last_repeatable = Some(RepeatableAction::SetPriority(Priority::Urgent));
+        let spans = build_left_zone(&state);
+        let texts = span_texts(&spans);
+        assert!(texts.contains(&"/bug "));
+        assert!(texts.contains(&"[. priority: urgent] "));
+    }
+
+    #[test]
+    fn left_zone_repeat_hint_low_risk_uses_dim_color() {
+        use crate::app::RepeatableAction;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetTags(vec![]));
+        let spans = build_left_zone(&state);
+        let hint_span = spans.iter().find(|s| s.content.contains("[.")).unwrap();
+        assert_eq!(hint_span.style.fg, Some(Theme::DIM));
+    }
+
+    #[test]
+    fn left_zone_repeat_hint_normal_risk_uses_fg_color() {
+        use crate::app::RepeatableAction;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let spans = build_left_zone(&state);
+        let hint_span = spans.iter().find(|s| s.content.contains("[.")).unwrap();
+        assert_eq!(hint_span.style.fg, Some(Theme::FG));
+    }
+
+    #[test]
+    fn left_zone_repeat_hint_high_risk_uses_yellow() {
+        use crate::app::RepeatableAction;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::DeleteCard);
+        let spans = build_left_zone(&state);
+        let hint_span = spans.iter().find(|s| s.content.contains("[.")).unwrap();
+        assert_eq!(hint_span.style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn left_zone_repeat_hint_delete_card_text() {
+        use crate::app::RepeatableAction;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::DeleteCard);
+        let spans = build_left_zone(&state);
+        let texts = span_texts(&spans);
+        assert!(texts.contains(&"[. delete] "));
+    }
+
+    #[test]
+    fn left_zone_repeat_hint_col_remove_text() {
+        use crate::app::RepeatableAction;
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColRemove);
+        let spans = build_left_zone(&state);
+        let texts = span_texts(&spans);
+        assert!(texts.contains(&"[. remove col] "));
     }
 }

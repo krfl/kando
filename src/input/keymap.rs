@@ -75,6 +75,7 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::BackTab => Action::CyclePrevCard,
         KeyCode::Char('t') => Action::EnterTemplateMode,
         KeyCode::Char('|') => Action::PipeCard,
+        KeyCode::Char('.') => Action::RepeatLast,
         KeyCode::Esc => Action::ClearFilters,
         _ => Action::None,
     }
@@ -232,6 +233,7 @@ pub const NORMAL_BINDINGS: &[Binding] = &[
     Binding { key: "u", description: "Undo last delete" },
     Binding { key: "?", description: "Help" },
     Binding { key: "t", description: "Template mode" },
+    Binding { key: ".", description: "Repeat last action" },
     Binding { key: "|", description: "Pipe card to command" },
     Binding { key: "Esc", description: "Clear filters" },
     Binding { key: "q", description: "Quit" },
@@ -1034,5 +1036,34 @@ mod tests {
         let entry = TEMPLATE_BINDINGS.iter().find(|b| b.key == "r");
         assert!(entry.is_some(), "r binding missing from TEMPLATE_BINDINGS");
         assert_eq!(entry.unwrap().description, "Rename template");
+    }
+
+    // ── Repeat last action bindings ──
+
+    #[test]
+    fn normal_dot_maps_to_repeat_last() {
+        assert_eq!(map_key(key(KeyCode::Char('.')), &Mode::Normal), Action::RepeatLast);
+    }
+
+    #[test]
+    fn normal_bindings_contains_dot() {
+        let entry = NORMAL_BINDINGS.iter().find(|b| b.key == ".");
+        assert!(entry.is_some(), ". binding missing from NORMAL_BINDINGS");
+        assert_eq!(entry.unwrap().description, "Repeat last action");
+    }
+
+    #[test]
+    fn dot_is_noop_in_space_mode() {
+        assert_eq!(map_key(key(KeyCode::Char('.')), &Mode::Space), Action::None);
+    }
+
+    #[test]
+    fn dot_is_noop_in_goto_mode() {
+        assert_eq!(map_key(key(KeyCode::Char('.')), &Mode::Goto), Action::None);
+    }
+
+    #[test]
+    fn dot_is_noop_in_column_mode() {
+        assert_eq!(map_key(key(KeyCode::Char('.')), &Mode::Column), Action::None);
     }
 }

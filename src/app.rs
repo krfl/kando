@@ -191,6 +191,91 @@ pub enum PickerTarget {
     TemplateRename,
 }
 
+/// A resolved card mutation that can be replayed with `.` (repeat last action).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepeatableAction {
+    // Card-level
+    MoveCard { forward: bool },
+    MoveToColumn { column_slug: String, column_name: String },
+    SetPriority(crate::board::Priority),
+    SetTags(Vec<String>),
+    SetAssignees(Vec<String>),
+    SetDueDate(Option<chrono::NaiveDate>),
+    SetBlocked(bool),
+    Archive,
+    DeleteCard,
+    PipeCommand(String),
+    // Column-level
+    SortColumn(String),
+    ColRemove,
+    ColMove { forward: bool },
+    ColSetHidden(bool),
+    SetWipLimit(Option<u32>),
+}
+
+/// Risk level for repeat-last-action hint coloring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskLevel {
+    Low,
+    Normal,
+    High,
+}
+
+impl RepeatableAction {
+    /// Short display string for the status bar hint.
+    pub fn hint(&self) -> String {
+        match self {
+            Self::MoveCard { forward: true } => "move ->".into(),
+            Self::MoveCard { forward: false } => "move <-".into(),
+            Self::MoveToColumn { column_name, .. } => format!("move -> {column_name}"),
+            Self::SetPriority(p) => format!("priority: {}", p.as_str()),
+            Self::SetTags(tags) => format!("tags: {}", tags.join(", ")),
+            Self::SetAssignees(a) => format!("assignees: {}", a.join(", ")),
+            Self::SetDueDate(Some(d)) => format!("due: {}", d.format("%Y-%m-%d")),
+            Self::SetDueDate(None) => "clear due".into(),
+            Self::SetBlocked(true) => "block".into(),
+            Self::SetBlocked(false) => "unblock".into(),
+            Self::Archive => "archive".into(),
+            Self::DeleteCard => "delete".into(),
+            Self::PipeCommand(cmd) => {
+                let truncated: String = cmd.chars().take(20).collect();
+                format!("pipe: {truncated}")
+            }
+            Self::SortColumn(key) => format!("sort: {key}"),
+            Self::ColRemove => "remove col".into(),
+            Self::ColMove { forward: true } => "col ->".into(),
+            Self::ColMove { forward: false } => "col <-".into(),
+            Self::ColSetHidden(true) => "hide col".into(),
+            Self::ColSetHidden(false) => "show col".into(),
+            Self::SetWipLimit(Some(n)) => format!("wip: {n}"),
+            Self::SetWipLimit(None) => "wip: none".into(),
+        }
+    }
+
+    /// Risk level for status bar hint coloring.
+    pub fn risk_level(&self) -> RiskLevel {
+        match self {
+            Self::SetBlocked(_) | Self::SetTags(_) | Self::SetAssignees(_)
+            | Self::SetPriority(_) | Self::SetDueDate(_) | Self::SortColumn(_)
+            | Self::SetWipLimit(_) | Self::ColSetHidden(_) => RiskLevel::Low,
+
+            Self::MoveCard { .. } | Self::MoveToColumn { .. } | Self::Archive
+            | Self::ColMove { .. } | Self::PipeCommand(_) => RiskLevel::Normal,
+
+            Self::DeleteCard | Self::ColRemove => RiskLevel::High,
+        }
+    }
+
+    /// Whether this action targets a column rather than a card.
+    fn is_column_level(&self) -> bool {
+        matches!(
+            self,
+            Self::SortColumn(_) | Self::ColRemove | Self::ColMove { .. }
+            | Self::ColSetHidden(_) | Self::SetWipLimit(_)
+        )
+    }
+}
+
 /// Notification severity for statusbar coloring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationLevel {
@@ -229,6 +314,8 @@ pub struct AppState {
     pub nerd_font: bool,
     /// Whether the first-launch tutorial has been shown (from local.toml).
     pub tutorial_shown: bool,
+    /// Last repeatable card mutation for `.` (repeat last action).
+    pub last_repeatable: Option<RepeatableAction>,
     /// Deferred template editing — slug to open in $EDITOR after handler returns.
     pub pending_editor_template: Option<String>,
 }
@@ -256,6 +343,7 @@ impl AppState {
             completion_hint: None,
             nerd_font: false,
             tutorial_shown: false,
+            last_repeatable: None,
             pending_editor_template: None,
         }
     }
@@ -744,6 +832,15 @@ fn process_action(
             sync_message = handle_card_action(board, state, action, terminal, kando_dir, was_minor_mode)?;
         }
 
+        // Repeat last action
+        Action::RepeatLast => {
+            sync_message = handle_repeat_last(board, state, kando_dir)?;
+            if sync_message.is_some() {
+                state.last_delete = None;
+                state.deleted_this_session = false;
+            }
+        }
+
         // Visibility toggles
         Action::ToggleHiddenColumns => {
             handle_visibility_toggle(board, state, action);
@@ -863,6 +960,7 @@ fn process_action(
             let new_pos = target_idx + 1;
             append_activity(kando_dir, "col-move", &slug, &name, &[("to", &new_pos.to_string())]);
             state.notify(format!("Moved {name} to position {new_pos}"));
+            state.last_repeatable = Some(RepeatableAction::ColMove { forward: target_idx > col_idx });
             sync_message = Some(format!("Move column \"{name}\" to position {new_pos}"));
             state.mode = Mode::Normal;
         }
@@ -979,6 +1077,381 @@ fn process_action(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Handler: Repeat last action (`.` key)
+// ---------------------------------------------------------------------------
+
+fn handle_repeat_last(
+    board: &mut Board,
+    state: &mut AppState,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    let repeatable = match state.last_repeatable.clone() {
+        Some(r) => r,
+        None => {
+            state.notify("Nothing to repeat");
+            return Ok(None);
+        }
+    };
+
+    // Guard: card-level actions need a visible card; column-level only need a column
+    if repeatable.is_column_level() {
+        if state.focused_column >= board.columns.len() {
+            state.notify("No column selected");
+            return Ok(None);
+        }
+    } else if let Some(col) = board.columns.get(state.focused_column) {
+        if col.cards.is_empty() {
+            state.notify("No card selected");
+            return Ok(None);
+        }
+        if state.has_active_filter() {
+            let visible = visible_card_indices(col, state, board);
+            if !visible.contains(&state.selected_card) {
+                state.notify("No visible card selected");
+                return Ok(None);
+            }
+        }
+    } else {
+        return Ok(None);
+    }
+
+    match repeatable {
+        RepeatableAction::MoveCard { forward } => {
+            // Delegate to existing try_move_card (handles WIP limits)
+            return try_move_card(board, state, forward, kando_dir);
+        }
+        RepeatableAction::MoveToColumn { column_slug, column_name } => {
+            let target_col = board.columns.iter().enumerate()
+                .find(|(i, c)| c.slug == column_slug && *i != state.focused_column)
+                .map(|(i, _)| i);
+            let Some(to) = target_col else {
+                state.notify_error(format!("Column '{column_name}' not found or already there"));
+                return Ok(None);
+            };
+            let from = state.focused_column;
+            let card_idx = state.selected_card.min(
+                board.columns[from].cards.len().saturating_sub(1)
+            );
+            let card_id = board.columns[from].cards[card_idx].id.clone();
+            let card_title = board.columns[from].cards[card_idx].title.clone();
+            let from_name = board.columns[from].name.clone();
+            let to_name = board.columns[to].name.clone();
+            board.move_card(from, card_idx, to);
+            board.columns[to].sort_cards();
+            state.focused_column = to;
+            state.clamp_selection_filtered(board);
+            save_board(kando_dir, board)?;
+            append_activity(kando_dir, "move", &card_id, &card_title,
+                &[("from", &from_name), ("to", &to_name)]);
+            state.notify(format!("Moved to {to_name}"));
+            return Ok(Some(format!("Move card #{card_id} \"{card_title}\" from {from_name} to {to_name}")));
+        }
+        RepeatableAction::SetPriority(priority) => {
+            let col_idx = state.focused_column;
+            let card_idx = state.selected_card;
+            if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                let card_id = card.id.clone();
+                let card_title = card.title.clone();
+                card.priority = priority;
+                card.touch();
+                let p_str = priority.as_str().to_string();
+                board.columns[col_idx].sort_cards();
+                let col_name = board.columns[col_idx].name.clone();
+                save_board(kando_dir, board)?;
+                append_activity(kando_dir, "priority", &card_id, &card_title,
+                    &[("column", &col_name), ("priority", &p_str)]);
+                state.clamp_selection_filtered(board);
+                state.notify(format!("Priority: {p_str}"));
+                return Ok(Some(format!("Update priority of #{card_id} \"{card_title}\" to {p_str}")));
+            }
+        }
+        RepeatableAction::SetTags(tags) => {
+            let col_idx = state.focused_column;
+            let card_idx = state.selected_card;
+            if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                let card_id = card.id.clone();
+                let card_title = card.title.clone();
+                card.tags = tags;
+                card.touch();
+                board.columns[col_idx].sort_cards();
+                let col_name = board.columns[col_idx].name.clone();
+                save_board(kando_dir, board)?;
+                append_activity(kando_dir, "tags", &card_id, &card_title,
+                    &[("column", &col_name)]);
+                state.clamp_selection_filtered(board);
+                state.notify("Tags updated");
+                return Ok(Some(format!("Update tags on #{card_id} \"{card_title}\"")));
+            }
+        }
+        RepeatableAction::SetAssignees(assignees) => {
+            let col_idx = state.focused_column;
+            let card_idx = state.selected_card;
+            if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                let card_id = card.id.clone();
+                let card_title = card.title.clone();
+                card.assignees = assignees;
+                card.touch();
+                board.columns[col_idx].sort_cards();
+                let col_name = board.columns[col_idx].name.clone();
+                save_board(kando_dir, board)?;
+                append_activity(kando_dir, "assignees", &card_id, &card_title,
+                    &[("column", &col_name)]);
+                state.clamp_selection_filtered(board);
+                state.notify("Assignees updated");
+                return Ok(Some(format!("Update assignees on #{card_id} \"{card_title}\"")));
+            }
+        }
+        RepeatableAction::SetDueDate(due) => {
+            apply_due_date(board, state, due, kando_dir)?;
+            let label = if due.is_some() { "Set due date" } else { "Clear due date" };
+            return Ok(Some(label.into()));
+        }
+        RepeatableAction::SetBlocked(target) => {
+            let col_idx = state.focused_column;
+            let card_idx = state.selected_card;
+            if let Some(card) = board.columns.get_mut(col_idx).and_then(|c| c.cards.get_mut(card_idx)) {
+                if card.blocked == target {
+                    let msg = if target { "Already blocked" } else { "Already unblocked" };
+                    state.notify(msg);
+                    return Ok(None);
+                }
+                let card_id = card.id.clone();
+                let card_title = card.title.clone();
+                card.blocked = target;
+                card.touch();
+                let msg = if target { "Card blocked" } else { "Blocker removed" };
+                board.columns[col_idx].sort_cards();
+                let col_name = board.columns[col_idx].name.clone();
+                save_board(kando_dir, board)?;
+                let blocked_str = if target { "true" } else { "false" };
+                let action_str = if target { "Block" } else { "Unblock" };
+                append_activity(kando_dir, "blocker", &card_id, &card_title,
+                    &[("column", &col_name), ("blocked", blocked_str)]);
+                state.clamp_selection_filtered(board);
+                state.notify(msg);
+                return Ok(Some(format!("{action_str} #{card_id} \"{card_title}\"")));
+            }
+        }
+        RepeatableAction::Archive => {
+            let archive_idx = match board.columns.iter().position(|c| c.slug == "archive") {
+                Some(i) => i,
+                None => {
+                    state.notify_error("No 'archive' column found — create one first");
+                    return Ok(None);
+                }
+            };
+            let col_idx = state.focused_column;
+            let card_idx = state.selected_card;
+            if board.columns.get(col_idx).and_then(|c| c.cards.get(card_idx)).is_none() {
+                state.notify_error("No card selected");
+                return Ok(None);
+            }
+            if col_idx == archive_idx {
+                state.notify_error("Card is already in the archive");
+                return Ok(None);
+            }
+            let card = board.columns[col_idx].cards.remove(card_idx);
+            let title = card.title.clone();
+            let id = card.id.clone();
+            let from_col_name = board.columns[col_idx].name.clone();
+            let archive_name = board.columns[archive_idx].name.clone();
+            board.columns[archive_idx].cards.push(card);
+            board.columns[archive_idx].sort_cards();
+            save_board(kando_dir, board)?;
+            append_activity(kando_dir, "archive", &id, &title,
+                &[("from", &from_col_name), ("to", &archive_name)]);
+            state.clamp_selection_filtered(board);
+            state.notify(format!("Archived: {title}"));
+            return Ok(Some("Archive card".into()));
+        }
+        RepeatableAction::DeleteCard => {
+            if let Some(card) = state.selected_card_ref(board) {
+                let id = card.id.clone();
+                state.mode = Mode::Confirm {
+                    prompt: "Delete card?",
+                    on_confirm: ConfirmTarget::DeleteCard(id),
+                };
+            } else {
+                state.notify("No card selected");
+            }
+        }
+        RepeatableAction::PipeCommand(cmd) => {
+            let card = match state.selected_card_ref(board) {
+                Some(c) => c,
+                None => {
+                    state.notify("No card selected");
+                    return Ok(None);
+                }
+            };
+            let col_slug = board.columns[state.focused_column].slug.clone();
+            let col_name = board.columns[state.focused_column].name.clone();
+            let card_id = card.id.clone();
+            let card_title = card.title.clone();
+            let card_tags = card.tags.join(",");
+            let card_assignees = card.assignees.join(",");
+            let card_priority = card.priority.to_string();
+            let card_path = kando_dir.join("columns").join(&col_slug)
+                .join(format!("{card_id}.md"));
+            let contents = std::fs::read_to_string(&card_path).unwrap_or_default();
+
+            let mut child = match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .env("KANDO_CARD_ID", &card_id)
+                .env("KANDO_CARD_TITLE", &card_title)
+                .env("KANDO_CARD_TAGS", &card_tags)
+                .env("KANDO_CARD_ASSIGNEES", &card_assignees)
+                .env("KANDO_CARD_PRIORITY", &card_priority)
+                .env("KANDO_CARD_COLUMN", &col_name)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    state.notify_error(format!("Failed to spawn command: {e}"));
+                    return Ok(None);
+                }
+            };
+
+            let mut stdin = child.stdin.take().expect("stdin was piped");
+            let write_handle = std::thread::spawn(move || {
+                let _ = std::io::Write::write_all(&mut stdin, contents.as_bytes());
+            });
+
+            match child.wait_with_output() {
+                Ok(output) => {
+                    let _ = write_handle.join();
+                    if output.status.success() {
+                        let first_line = String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .find(|l| !l.is_empty())
+                            .unwrap_or("Pipe complete")
+                            .to_string();
+                        state.notify(first_line);
+                    } else {
+                        let stderr_line = String::from_utf8_lossy(&output.stderr)
+                            .lines()
+                            .next()
+                            .map(|s| s.to_string());
+                        let msg = stderr_line.unwrap_or_else(|| {
+                            format!("Command exited with {}", output.status)
+                        });
+                        state.notify_error(msg);
+                    }
+                }
+                Err(e) => {
+                    let _ = write_handle.join();
+                    state.notify_error(format!("Command failed: {e}"));
+                }
+            }
+        }
+        RepeatableAction::SortColumn(sort_key) => {
+            let col_idx = state.focused_column;
+            if let Some(col) = board.columns.get_mut(col_idx) {
+                if col.cards.is_empty() {
+                    state.notify("No cards to sort");
+                    return Ok(None);
+                }
+                match sort_key.as_str() {
+                    "priority" => col.sort_cards(),
+                    "created" => col.cards.sort_by(|a, b| b.created.cmp(&a.created)),
+                    "updated" => col.cards.sort_by(|a, b| b.updated.cmp(&a.updated)),
+                    "title" => col.cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+                    _ => {
+                        state.notify_error(format!("Unknown sort key: {sort_key}"));
+                        return Ok(None);
+                    }
+                }
+                state.clamp_selection_filtered(board);
+                save_board(kando_dir, board)?;
+                state.notify(format!("Sorted by {sort_key}"));
+                return Ok(Some("Sort column".into()));
+            }
+        }
+        RepeatableAction::ColRemove => {
+            let col_idx = state.focused_column;
+            if let Some(col) = board.columns.get(col_idx) {
+                if board.columns.len() <= 1 {
+                    state.notify_error("Cannot remove the only column");
+                    return Ok(None);
+                }
+                if col.slug == "archive" {
+                    state.notify_error("The 'archive' column is reserved and cannot be removed");
+                    return Ok(None);
+                }
+                if !col.cards.is_empty() {
+                    state.notify_error(format!("Column has {} card(s); move them first", col.cards.len()));
+                    return Ok(None);
+                }
+                let slug = col.slug.clone();
+                state.mode = Mode::Confirm {
+                    prompt: "Remove column?",
+                    on_confirm: ConfirmTarget::ColRemove(slug),
+                };
+            }
+        }
+        RepeatableAction::ColMove { forward } => {
+            let col_idx = state.focused_column;
+            let len = board.columns.len();
+            let target = if forward {
+                if col_idx + 1 >= len {
+                    state.notify_error("Already rightmost column");
+                    return Ok(None);
+                }
+                col_idx + 1
+            } else {
+                if col_idx == 0 {
+                    state.notify_error("Already leftmost column");
+                    return Ok(None);
+                }
+                col_idx - 1
+            };
+            let slug = board.columns[col_idx].slug.clone();
+            let name = board.columns[col_idx].name.clone();
+            let col = board.columns.remove(col_idx);
+            board.columns.insert(target, col);
+            for (i, c) in board.columns.iter_mut().enumerate() {
+                c.order = i as u32;
+            }
+            state.focused_column = board.columns.iter().position(|c| c.slug == slug).unwrap_or(0);
+            state.clamp_selection(board);
+            save_board(kando_dir, board)?;
+            let new_pos = target + 1;
+            append_activity(kando_dir, "col-move", &slug, &name, &[("to", &new_pos.to_string())]);
+            state.notify(format!("Moved {name} to position {new_pos}"));
+            return Ok(Some(format!("Move column \"{name}\" to position {new_pos}")));
+        }
+        RepeatableAction::ColSetHidden(target) => {
+            let col_idx = state.focused_column;
+            if let Some(col) = board.columns.get(col_idx) {
+                if col.hidden == target {
+                    let msg = if target { "Already hidden" } else { "Already visible" };
+                    state.notify(msg);
+                    return Ok(None);
+                }
+            }
+            return handle_col_toggle_hidden(board, state, kando_dir);
+        }
+        RepeatableAction::SetWipLimit(limit) => {
+            let col_idx = state.focused_column;
+            if let Some(col) = board.columns.get_mut(col_idx) {
+                col.wip_limit = limit;
+                let col_name = col.name.clone();
+                save_board(kando_dir, board)?;
+                if let Some(n) = limit {
+                    state.notify(format!("WIP limit: {col_name} = {n}"));
+                } else {
+                    state.notify(format!("WIP limit removed: {col_name}"));
+                }
+                return Ok(Some("Set WIP limit".into()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,9 +1681,15 @@ fn handle_card_action<B: ratatui::backend::Backend>(
     match action {
         Action::MoveCardPrevColumn => {
             sync_message = try_move_card(board, state, false, kando_dir)?;
+            if sync_message.is_some() {
+                state.last_repeatable = Some(RepeatableAction::MoveCard { forward: false });
+            }
         }
         Action::MoveCardNextColumn => {
             sync_message = try_move_card(board, state, true, kando_dir)?;
+            if sync_message.is_some() {
+                state.last_repeatable = Some(RepeatableAction::MoveCard { forward: true });
+            }
         }
         Action::NewCard => {
             use crate::board::{slug_to_name, storage::load_templates};
@@ -1275,6 +1754,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 &[("from", &from_col_name), ("to", &archive_name)]);
             state.clamp_selection_filtered(board);
             state.notify(format!("Archived: {title}"));
+            state.last_repeatable = Some(RepeatableAction::Archive);
             sync_message = Some("Archive card".into());
         }
         Action::PipeCard => {
@@ -1429,6 +1909,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                 append_activity(kando_dir, "blocker", &card_id, &card_title,
                     &[("column", &col_name), ("blocked", blocked_str)]);
                 sync_message = Some(format!("{action_str} #{card_id} \"{card_title}\""));
+                state.last_repeatable = Some(RepeatableAction::SetBlocked(blocked));
                 state.clamp_selection_filtered(board);
                 state.notify(msg);
             }
@@ -1582,6 +2063,7 @@ fn handle_col_toggle_hidden(
         }
     }
     let label = if new_hidden { "hidden" } else { "visible" };
+    state.last_repeatable = Some(RepeatableAction::ColSetHidden(new_hidden));
     state.notify(format!("{name}: {label}"));
     Ok(Some(if new_hidden { "Hide column" } else { "Show column" }.into()))
 }
@@ -1612,6 +2094,7 @@ fn apply_due_date(
         save_board(kando_dir, board)?;
         let date_str = due.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "none".into());
         append_activity(kando_dir, "due", &card_id, &card_title, &[("due", &date_str), ("column", &col_name)]);
+        state.last_repeatable = Some(RepeatableAction::SetDueDate(due));
         if due.is_some() {
             state.notify(format!("Due: {date_str}"));
         } else {
@@ -2131,6 +2614,7 @@ fn handle_input_confirm(
                     (card.id.clone(), card.title.clone(), col.name.clone())
                 }))
                 .unwrap_or_default();
+            state.last_repeatable = Some(RepeatableAction::SetTags(tags.clone()));
             if let Some(col) = board.columns.get_mut(state.focused_column) {
                 if let Some(card) = col.cards.get_mut(state.selected_card) {
                     card.tags = tags;
@@ -2160,9 +2644,11 @@ fn handle_input_confirm(
             };
             let col_idx = state.focused_column;
             if let Some(col) = board.columns.get_mut(col_idx) {
-                col.wip_limit = if limit == 0 { None } else { Some(limit) };
+                let wip_value = if limit == 0 { None } else { Some(limit) };
+                col.wip_limit = wip_value;
                 let col_name = col.name.clone();
                 save_board(kando_dir, board)?;
+                state.last_repeatable = Some(RepeatableAction::SetWipLimit(wip_value));
                 if limit == 0 {
                     state.notify(format!("WIP limit removed: {col_name}"));
                 } else {
@@ -2282,6 +2768,7 @@ fn handle_input_confirm(
                     (card.id.clone(), card.title.clone(), col.name.clone())
                 }))
                 .unwrap_or_default();
+            state.last_repeatable = Some(RepeatableAction::SetAssignees(assignees.clone()));
             if let Some(col) = board.columns.get_mut(state.focused_column) {
                 if let Some(card) = col.cards.get_mut(state.selected_card) {
                     card.assignees = assignees;
@@ -2367,6 +2854,7 @@ fn handle_input_confirm(
                                     .unwrap_or("Pipe complete")
                                     .to_string();
                                 state.notify(first_line);
+                                state.last_repeatable = Some(RepeatableAction::PipeCommand(cmd.clone()));
                             } else {
                                 let stderr_line = String::from_utf8_lossy(&output.stderr)
                                     .lines()
@@ -2465,6 +2953,7 @@ fn handle_input_confirm(
                             append_activity(kando_dir, "priority", &card_id, &card_title,
                                 &[("column", &col_name), ("priority", &new_priority)]);
                             sync_message = Some(format!("Update priority of #{card_id} \"{card_title}\" to {new_priority}"));
+                            state.last_repeatable = Some(RepeatableAction::SetPriority(*priority));
                             state.clamp_selection_filtered(board);
                             state.notify(priority_str);
                         }
@@ -2495,6 +2984,7 @@ fn handle_input_confirm(
                             }
                             state.clamp_selection_filtered(board);
                             save_board(kando_dir, board)?;
+                            state.last_repeatable = Some(RepeatableAction::SortColumn(field.clone()));
                             sync_message = Some("Sort column".into());
                         }
                     }
@@ -2614,6 +3104,7 @@ fn handle_input_confirm(
                                 .map(|c| c.title.clone()).unwrap_or_default();
                             let from_name = board.columns[from].name.clone();
                             let to_name = col_name.clone();
+                            let to_slug = board.columns[to].slug.clone();
                             board.move_card(from, card_idx, to);
                             board.columns[to].sort_cards();
                             state.focused_column = to;
@@ -2622,6 +3113,10 @@ fn handle_input_confirm(
                             append_activity(kando_dir, "move", &card_id, &card_title,
                                 &[("from", &from_name), ("to", &to_name)]);
                             sync_message = Some(format!("Move card #{card_id} \"{card_title}\" from {from_name} to {to_name}"));
+                            state.last_repeatable = Some(RepeatableAction::MoveToColumn {
+                                column_slug: to_slug,
+                                column_name: to_name,
+                            });
                             state.notify(format!("Moved to {col_name}"));
                         }
                     }
@@ -2865,6 +3360,7 @@ fn handle_confirm(
                                 state.clamp_selection_filtered(board);
                                 state.last_delete = Some(entry);
                                 state.deleted_this_session = true;
+                                state.last_repeatable = Some(RepeatableAction::DeleteCard);
                                 state.notify("Card deleted (u to undo)");
                             }
                             Err(e) => {
@@ -2892,6 +3388,7 @@ fn handle_confirm(
                     append_activity(kando_dir, "move", &card_id, &card_title,
                         &[("from", &from_name), ("to", &to_name)]);
                     sync_message = Some(format!("Move card #{card_id} \"{card_title}\" from {from_name} to {to_name}"));
+                    state.last_repeatable = Some(RepeatableAction::MoveCard { forward: to > from });
                     state.notify("Card moved");
                 }
                 Mode::Confirm {
@@ -2920,6 +3417,7 @@ fn handle_confirm(
                         .and_then(|s| board.columns.iter().position(|c| c.slug == s))
                         .unwrap_or(0);
                     state.clamp_selection(board);
+                    state.last_repeatable = Some(RepeatableAction::ColRemove);
                     state.notify(format!("Removed column: {name}"));
                     sync_message = Some(format!("Remove column \"{name}\""));
                 }
@@ -5998,5 +6496,1187 @@ mod tests {
         };
         let sync = handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
         assert!(sync.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // RepeatableAction::hint() unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hint_move_forward() {
+        assert_eq!(RepeatableAction::MoveCard { forward: true }.hint(), "move ->");
+    }
+
+    #[test]
+    fn hint_move_backward() {
+        assert_eq!(RepeatableAction::MoveCard { forward: false }.hint(), "move <-");
+    }
+
+    #[test]
+    fn hint_move_to_column() {
+        let ra = RepeatableAction::MoveToColumn {
+            column_slug: "done".into(),
+            column_name: "Done".into(),
+        };
+        assert_eq!(ra.hint(), "move -> Done");
+    }
+
+    #[test]
+    fn hint_set_priority_all_variants() {
+        use crate::board::Priority;
+        assert_eq!(RepeatableAction::SetPriority(Priority::Low).hint(), "priority: low");
+        assert_eq!(RepeatableAction::SetPriority(Priority::Normal).hint(), "priority: normal");
+        assert_eq!(RepeatableAction::SetPriority(Priority::High).hint(), "priority: high");
+        assert_eq!(RepeatableAction::SetPriority(Priority::Urgent).hint(), "priority: urgent");
+    }
+
+    #[test]
+    fn hint_set_tags() {
+        let ra = RepeatableAction::SetTags(vec!["bug".into(), "ui".into()]);
+        assert_eq!(ra.hint(), "tags: bug, ui");
+    }
+
+    #[test]
+    fn hint_set_tags_empty() {
+        assert_eq!(RepeatableAction::SetTags(vec![]).hint(), "tags: ");
+    }
+
+    #[test]
+    fn hint_set_assignees() {
+        let ra = RepeatableAction::SetAssignees(vec!["alice".into()]);
+        assert_eq!(ra.hint(), "assignees: alice");
+    }
+
+    #[test]
+    fn hint_set_due_date_some() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
+        assert_eq!(RepeatableAction::SetDueDate(Some(date)).hint(), "due: 2026-03-15");
+    }
+
+    #[test]
+    fn hint_set_due_date_none() {
+        assert_eq!(RepeatableAction::SetDueDate(None).hint(), "clear due");
+    }
+
+    #[test]
+    fn hint_set_blocked_true() {
+        assert_eq!(RepeatableAction::SetBlocked(true).hint(), "block");
+    }
+
+    #[test]
+    fn hint_set_blocked_false() {
+        assert_eq!(RepeatableAction::SetBlocked(false).hint(), "unblock");
+    }
+
+    #[test]
+    fn hint_archive() {
+        assert_eq!(RepeatableAction::Archive.hint(), "archive");
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_repeat_last tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repeat_nothing_to_repeat() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Nothing to repeat"));
+    }
+
+    #[test]
+    fn repeat_no_card_selected() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Ensure column 0 is empty
+        board.columns[0].cards.clear();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("No card selected"));
+    }
+
+    #[test]
+    fn repeat_set_priority() {
+        use crate::board::Priority;
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetPriority(Priority::High));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].cards[0].priority, Priority::High);
+        assert_eq!(state.notification.as_deref(), Some("Priority: high"));
+    }
+
+    #[test]
+    fn repeat_set_tags() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetTags(vec!["bug".into(), "ui".into()]));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].cards[0].tags, vec!["bug", "ui"]);
+        assert_eq!(state.notification.as_deref(), Some("Tags updated"));
+    }
+
+    #[test]
+    fn repeat_set_assignees() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetAssignees(vec!["alice".into()]));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].cards[0].assignees, vec!["alice"]);
+        assert_eq!(state.notification.as_deref(), Some("Assignees updated"));
+    }
+
+    #[test]
+    fn repeat_set_due_date() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        state.last_repeatable = Some(RepeatableAction::SetDueDate(Some(date)));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].cards[0].due, Some(date));
+        assert_eq!(state.notification.as_deref(), Some("Due: 2026-06-15"));
+    }
+
+    #[test]
+    fn repeat_clear_due_date() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut card = Card::new("001".into(), "Test".into());
+        card.due = Some(chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap());
+        board.columns[0].cards.push(card);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetDueDate(None));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].cards[0].due, None);
+        assert_eq!(state.notification.as_deref(), Some("Due date cleared"));
+    }
+
+    #[test]
+    fn repeat_block_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetBlocked(true));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[0].cards[0].blocked);
+        assert_eq!(state.notification.as_deref(), Some("Card blocked"));
+    }
+
+    #[test]
+    fn repeat_unblock_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut card = Card::new("001".into(), "Test".into());
+        card.blocked = true;
+        board.columns[0].cards.push(card);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetBlocked(false));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(!board.columns[0].cards[0].blocked);
+        assert_eq!(state.notification.as_deref(), Some("Blocker removed"));
+    }
+
+    #[test]
+    fn repeat_block_already_blocked() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut card = Card::new("001".into(), "Test".into());
+        card.blocked = true;
+        board.columns[0].cards.push(card);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetBlocked(true));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Already blocked"));
+    }
+
+    #[test]
+    fn repeat_unblock_already_unblocked() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetBlocked(false));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Already unblocked"));
+    }
+
+    #[test]
+    fn repeat_archive() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        // Ensure archive column exists
+        assert!(board.columns.iter().any(|c| c.slug == "archive"));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[0].cards.is_empty());
+        let archive = board.columns.iter().find(|c| c.slug == "archive").unwrap();
+        assert_eq!(archive.cards.len(), 1);
+        assert_eq!(archive.cards[0].id, "001");
+    }
+
+    #[test]
+    fn repeat_archive_already_in_archive() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        board.columns[archive_idx].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = archive_idx;
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Card is already in the archive"));
+    }
+
+    #[test]
+    fn repeat_archive_no_archive_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns.retain(|c| c.slug != "archive");
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("No 'archive' column found — create one first"));
+    }
+
+    #[test]
+    fn repeat_move_to_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        // Board should have multiple columns from init_board
+        let done_slug = board.columns.iter().find(|c| c.slug == "done").map(|c| c.slug.clone());
+        let done_name = board.columns.iter().find(|c| c.slug == "done").map(|c| c.name.clone());
+        assert!(done_slug.is_some(), "Board must have a 'done' column");
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::MoveToColumn {
+            column_slug: done_slug.unwrap(),
+            column_name: done_name.unwrap(),
+        });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[0].cards.is_empty());
+        let done_col = board.columns.iter().find(|c| c.slug == "done").unwrap();
+        assert_eq!(done_col.cards.len(), 1);
+    }
+
+    #[test]
+    fn repeat_move_to_column_missing() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::MoveToColumn {
+            column_slug: "nonexistent".into(),
+            column_name: "Nonexistent".into(),
+        });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(state.notification.as_deref().unwrap().contains("not found or already there"));
+    }
+
+    #[test]
+    fn repeat_move_to_column_already_there() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
+        board.columns[done_idx].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = done_idx;
+        state.last_repeatable = Some(RepeatableAction::MoveToColumn {
+            column_slug: "done".into(),
+            column_name: "Done".into(),
+        });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(state.notification.as_deref().unwrap().contains("not found or already there"));
+    }
+
+    #[test]
+    fn repeat_move_card_forward() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::MoveCard { forward: true });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[0].cards.is_empty());
+        assert_eq!(state.notification.as_deref(), Some("Card moved"));
+    }
+
+    #[test]
+    fn repeat_move_card_backward() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Put card in second column (index 1)
+        board.columns[1].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        state.last_repeatable = Some(RepeatableAction::MoveCard { forward: false });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[1].cards.is_empty());
+        assert_eq!(state.notification.as_deref(), Some("Card moved"));
+    }
+
+    #[test]
+    fn repeat_does_not_update_last_repeatable() {
+        use crate::board::Priority;
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let original = RepeatableAction::SetPriority(Priority::High);
+        state.last_repeatable = Some(original.clone());
+        handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(original));
+    }
+
+    #[test]
+    fn repeat_preserves_undo_on_noop() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        state.last_delete = Some(crate::board::storage::TrashEntry {
+            id: "001".into(),
+            title: "Doomed".into(),
+            from_column: "backlog".into(),
+            deleted: "2026-01-01T00:00:00Z".into(),
+        });
+        state.deleted_this_session = true;
+        // last_repeatable is None, so repeat does nothing
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        // Undo state must still be intact
+        assert!(state.last_delete.is_some());
+        assert!(state.deleted_this_session);
+    }
+
+    #[test]
+    fn repeat_with_active_filter_no_visible_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        // Set a filter that hides the card
+        state.active_filter = Some("zzz_no_match_zzz".to_string());
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("No visible card selected"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Recording tests — verify mutations set last_repeatable
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn record_move_card_next_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        handle_card_action(
+            &mut board, &mut state, Action::MoveCardNextColumn,
+            &mut terminal, &kando_dir, false,
+        ).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::MoveCard { forward: true }));
+    }
+
+    #[test]
+    fn record_move_card_prev_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[1].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        handle_card_action(
+            &mut board, &mut state, Action::MoveCardPrevColumn,
+            &mut terminal, &kando_dir, false,
+        ).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::MoveCard { forward: false }));
+    }
+
+    #[test]
+    fn record_toggle_blocker() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        handle_card_action(
+            &mut board, &mut state, Action::ToggleBlocker,
+            &mut terminal, &kando_dir, false,
+        ).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SetBlocked(true)));
+    }
+
+    #[test]
+    fn record_archive_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        handle_card_action(
+            &mut board, &mut state, Action::ArchiveCard,
+            &mut terminal, &kando_dir, false,
+        ).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::Archive));
+    }
+
+    #[test]
+    fn record_set_priority() {
+        use crate::board::Priority;
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let high_idx = Priority::ALL.iter().position(|p| *p == Priority::High).unwrap();
+        state.mode = Mode::Picker {
+            title: "priority",
+            items: Priority::ALL.iter().map(|p| (p.as_str().to_string(), false)).collect(),
+            selected: high_idx,
+            target: PickerTarget::Priority,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SetPriority(Priority::High)));
+    }
+
+    #[test]
+    fn record_edit_tags() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags (comma-separated)",
+            buf: TextBuffer::new("bug, ui".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SetTags(vec!["bug".into(), "ui".into()])));
+    }
+
+    #[test]
+    fn record_edit_assignees() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Assignees (comma-separated)",
+            buf: TextBuffer::new("alice, bob".into()),
+            on_confirm: InputTarget::EditAssignees,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SetAssignees(vec!["alice".into(), "bob".into()])));
+    }
+
+    #[test]
+    fn record_set_due_date() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        apply_due_date(&mut board, &mut state, Some(date), &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SetDueDate(Some(date))));
+    }
+
+    #[test]
+    fn record_move_to_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        let done_slug = board.columns.iter().find(|c| c.slug == "done").unwrap().slug.clone();
+        let done_name = board.columns.iter().find(|c| c.slug == "done").unwrap().name.clone();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        // Build move-to-column picker items (excluding focused column 0)
+        let items: Vec<(String, bool)> = board.columns.iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 0)
+            .map(|(_, col)| (col.name.clone(), false))
+            .collect();
+        let done_picker_idx = items.iter().position(|(name, _)| *name == done_name).unwrap();
+        state.mode = Mode::Picker {
+            title: "move to column",
+            items,
+            selected: done_picker_idx,
+            target: PickerTarget::MoveToColumn,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::MoveToColumn {
+            column_slug: done_slug,
+            column_name: done_name,
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // New hint() tests for expanded variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hint_delete_card() {
+        assert_eq!(RepeatableAction::DeleteCard.hint(), "delete");
+    }
+
+    #[test]
+    fn hint_pipe_command_short() {
+        assert_eq!(RepeatableAction::PipeCommand("echo hi".into()).hint(), "pipe: echo hi");
+    }
+
+    #[test]
+    fn hint_pipe_command_truncates_at_20_chars() {
+        let long_cmd = "a]".repeat(25);
+        let hint = RepeatableAction::PipeCommand(long_cmd).hint();
+        // "pipe: " prefix + 20 chars from command
+        assert!(hint.starts_with("pipe: "));
+        let payload = &hint["pipe: ".len()..];
+        assert_eq!(payload.chars().count(), 20);
+    }
+
+    #[test]
+    fn hint_sort_column() {
+        assert_eq!(RepeatableAction::SortColumn("priority".into()).hint(), "sort: priority");
+    }
+
+    #[test]
+    fn hint_col_remove() {
+        assert_eq!(RepeatableAction::ColRemove.hint(), "remove col");
+    }
+
+    #[test]
+    fn hint_col_move_forward() {
+        assert_eq!(RepeatableAction::ColMove { forward: true }.hint(), "col ->");
+    }
+
+    #[test]
+    fn hint_col_move_backward() {
+        assert_eq!(RepeatableAction::ColMove { forward: false }.hint(), "col <-");
+    }
+
+    #[test]
+    fn hint_col_set_hidden_true() {
+        assert_eq!(RepeatableAction::ColSetHidden(true).hint(), "hide col");
+    }
+
+    #[test]
+    fn hint_col_set_hidden_false() {
+        assert_eq!(RepeatableAction::ColSetHidden(false).hint(), "show col");
+    }
+
+    #[test]
+    fn hint_set_wip_limit_some() {
+        assert_eq!(RepeatableAction::SetWipLimit(Some(5)).hint(), "wip: 5");
+    }
+
+    #[test]
+    fn hint_set_wip_limit_none() {
+        assert_eq!(RepeatableAction::SetWipLimit(None).hint(), "wip: none");
+    }
+
+    // -----------------------------------------------------------------------
+    // RiskLevel tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn risk_level_low_variants() {
+        use crate::board::Priority;
+        assert_eq!(RepeatableAction::SetBlocked(true).risk_level(), RiskLevel::Low);
+        assert_eq!(RepeatableAction::SetTags(vec![]).risk_level(), RiskLevel::Low);
+        assert_eq!(RepeatableAction::SetAssignees(vec![]).risk_level(), RiskLevel::Low);
+        assert_eq!(RepeatableAction::SetPriority(Priority::Normal).risk_level(), RiskLevel::Low);
+        assert_eq!(RepeatableAction::SetDueDate(None).risk_level(), RiskLevel::Low);
+        assert_eq!(RepeatableAction::SortColumn("priority".into()).risk_level(), RiskLevel::Low);
+        assert_eq!(RepeatableAction::SetWipLimit(Some(3)).risk_level(), RiskLevel::Low);
+        assert_eq!(RepeatableAction::ColSetHidden(true).risk_level(), RiskLevel::Low);
+    }
+
+    #[test]
+    fn risk_level_normal_variants() {
+        assert_eq!(RepeatableAction::MoveCard { forward: true }.risk_level(), RiskLevel::Normal);
+        assert_eq!(RepeatableAction::MoveToColumn {
+            column_slug: "done".into(),
+            column_name: "Done".into(),
+        }.risk_level(), RiskLevel::Normal);
+        assert_eq!(RepeatableAction::Archive.risk_level(), RiskLevel::Normal);
+        assert_eq!(RepeatableAction::ColMove { forward: true }.risk_level(), RiskLevel::Normal);
+        assert_eq!(RepeatableAction::PipeCommand("echo hi".into()).risk_level(), RiskLevel::Normal);
+    }
+
+    #[test]
+    fn risk_level_high_variants() {
+        assert_eq!(RepeatableAction::DeleteCard.risk_level(), RiskLevel::High);
+        assert_eq!(RepeatableAction::ColRemove.risk_level(), RiskLevel::High);
+    }
+
+    // -----------------------------------------------------------------------
+    // is_column_level() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_column_level_true() {
+        assert!(RepeatableAction::SortColumn("title".into()).is_column_level());
+        assert!(RepeatableAction::ColRemove.is_column_level());
+        assert!(RepeatableAction::ColMove { forward: true }.is_column_level());
+        assert!(RepeatableAction::ColSetHidden(false).is_column_level());
+        assert!(RepeatableAction::SetWipLimit(Some(3)).is_column_level());
+    }
+
+    #[test]
+    fn is_column_level_false() {
+        assert!(!RepeatableAction::DeleteCard.is_column_level());
+        assert!(!RepeatableAction::PipeCommand("echo".into()).is_column_level());
+        assert!(!RepeatableAction::Archive.is_column_level());
+        assert!(!RepeatableAction::MoveCard { forward: true }.is_column_level());
+        assert!(!RepeatableAction::SetBlocked(true).is_column_level());
+    }
+
+    // -----------------------------------------------------------------------
+    // New recording tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn record_delete_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Doomed".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Confirm {
+            prompt: "Delete card?",
+            on_confirm: ConfirmTarget::DeleteCard("001".into()),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::DeleteCard));
+    }
+
+    #[test]
+    fn record_pipe_command() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("1".into(), "Test Card".into()));
+        save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("echo hello".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::PipeCommand("echo hello".into())));
+    }
+
+    #[test]
+    fn record_pipe_command_not_on_failure() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("1".into(), "Test Card".into()));
+        save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::Archive);
+        state.mode = Mode::Input {
+            prompt: "Pipe to command",
+            buf: TextBuffer::new("exit 1".into()),
+            on_confirm: InputTarget::PipeCommand,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        // Should not have been updated to PipeCommand
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::Archive));
+    }
+
+    #[test]
+    fn record_sort_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Picker {
+            title: "sort by",
+            items: vec![
+                ("priority".into(), false),
+                ("created".into(), false),
+                ("updated".into(), false),
+                ("title".into(), false),
+            ],
+            selected: 0,
+            target: PickerTarget::SortColumn,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SortColumn("priority".into())));
+    }
+
+    #[test]
+    fn record_col_remove() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // in-progress column should be empty by default
+        let ip_slug = board.columns.iter().find(|c| c.slug == "in-progress")
+            .expect("in-progress column").slug.clone();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Confirm {
+            prompt: "Remove column?",
+            on_confirm: ConfirmTarget::ColRemove(ip_slug),
+        };
+        handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::ColRemove));
+    }
+
+    #[test]
+    fn record_col_set_hidden() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::ColSetHidden(true)));
+    }
+
+    #[test]
+    fn record_col_set_hidden_to_false() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].hidden = true;
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::ColSetHidden(false)));
+    }
+
+    #[test]
+    fn record_set_wip_limit() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "WIP limit (0=off)",
+            buf: TextBuffer::new("5".into()),
+            on_confirm: InputTarget::WipLimit,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SetWipLimit(Some(5))));
+    }
+
+    #[test]
+    fn record_set_wip_limit_zero_clears() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].wip_limit = Some(5);
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "WIP limit (0=off)",
+            buf: TextBuffer::new("0".into()),
+            on_confirm: InputTarget::WipLimit,
+            completion: None,
+        };
+        handle_input_confirm(&mut board, &mut state, &kando_dir).unwrap();
+        assert_eq!(state.last_repeatable, Some(RepeatableAction::SetWipLimit(None)));
+    }
+
+    // -----------------------------------------------------------------------
+    // New replay tests for expanded handle_repeat_last()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repeat_delete_card_enters_confirm() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::DeleteCard);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none()); // no sync yet, confirm pending
+        assert!(matches!(state.mode, Mode::Confirm { on_confirm: ConfirmTarget::DeleteCard(_), .. }));
+    }
+
+    #[test]
+    fn repeat_delete_card_no_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.clear();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::DeleteCard);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("No card selected"));
+    }
+
+    #[test]
+    fn repeat_sort_column_by_priority() {
+        use crate::board::Priority;
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut card_a = Card::new("001".into(), "Low Card".into());
+        card_a.priority = Priority::Low;
+        let mut card_b = Card::new("002".into(), "Urgent Card".into());
+        card_b.priority = Priority::Urgent;
+        board.columns[0].cards.push(card_a);
+        board.columns[0].cards.push(card_b);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SortColumn("priority".into()));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(state.notification.as_deref(), Some("Sorted by priority"));
+        // Urgent should sort before Low
+        assert_eq!(board.columns[0].cards[0].priority, Priority::Urgent);
+    }
+
+    #[test]
+    fn repeat_sort_column_by_title() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Zebra".into()));
+        board.columns[0].cards.push(Card::new("002".into(), "Apple".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SortColumn("title".into()));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].cards[0].title, "Apple");
+        assert_eq!(board.columns[0].cards[1].title, "Zebra");
+    }
+
+    #[test]
+    fn repeat_sort_column_empty() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.clear();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SortColumn("priority".into()));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("No cards to sort"));
+    }
+
+    #[test]
+    fn repeat_sort_column_unknown_key() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SortColumn("bogus".into()));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(state.notification.as_deref().unwrap().contains("Unknown sort key"));
+    }
+
+    #[test]
+    fn repeat_col_remove_enters_confirm() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Focus on an empty, non-archive column
+        let ip_idx = board.columns.iter().position(|c| c.slug == "in-progress").unwrap();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = ip_idx;
+        state.last_repeatable = Some(RepeatableAction::ColRemove);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(matches!(state.mode, Mode::Confirm { on_confirm: ConfirmTarget::ColRemove(_), .. }));
+    }
+
+    #[test]
+    fn repeat_col_remove_only_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Reduce to a single column
+        board.columns.truncate(1);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColRemove);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Cannot remove the only column"));
+    }
+
+    #[test]
+    fn repeat_col_remove_archive_blocked() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = archive_idx;
+        state.last_repeatable = Some(RepeatableAction::ColRemove);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(state.notification.as_deref().unwrap().contains("reserved"));
+    }
+
+    #[test]
+    fn repeat_col_remove_has_cards() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColRemove);
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert!(state.notification.as_deref().unwrap().contains("card(s)"));
+    }
+
+    #[test]
+    fn repeat_col_move_forward() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let original_name = board.columns[0].name.clone();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColMove { forward: true });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        // Column 0 should have moved to position 1
+        assert_eq!(board.columns[1].name, original_name);
+        assert_eq!(state.focused_column, 1);
+    }
+
+    #[test]
+    fn repeat_col_move_backward() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let original_name = board.columns[1].name.clone();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = 1;
+        state.last_repeatable = Some(RepeatableAction::ColMove { forward: false });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].name, original_name);
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn repeat_col_move_forward_already_rightmost() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let last = board.columns.len() - 1;
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = last;
+        state.last_repeatable = Some(RepeatableAction::ColMove { forward: true });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Already rightmost column"));
+    }
+
+    #[test]
+    fn repeat_col_move_backward_already_leftmost() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = 0;
+        state.last_repeatable = Some(RepeatableAction::ColMove { forward: false });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Already leftmost column"));
+    }
+
+    #[test]
+    fn repeat_col_set_hidden_true() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        assert!(!board.columns[0].hidden);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColSetHidden(true));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(board.columns[0].hidden);
+    }
+
+    #[test]
+    fn repeat_col_set_hidden_false() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].hidden = true;
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColSetHidden(false));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert!(!board.columns[0].hidden);
+    }
+
+    #[test]
+    fn repeat_col_set_hidden_already_hidden() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].hidden = true;
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColSetHidden(true));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Already hidden"));
+    }
+
+    #[test]
+    fn repeat_col_set_hidden_already_visible() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        assert!(!board.columns[0].hidden);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::ColSetHidden(false));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("Already visible"));
+    }
+
+    #[test]
+    fn repeat_set_wip_limit_some() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetWipLimit(Some(3)));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].wip_limit, Some(3));
+    }
+
+    #[test]
+    fn repeat_set_wip_limit_none() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].wip_limit = Some(5);
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetWipLimit(None));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].wip_limit, None);
+        assert!(state.notification.as_deref().unwrap().contains("WIP limit removed"));
+    }
+
+    #[test]
+    fn repeat_column_level_no_column() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut state = AppState::new();
+        state.focused_column = 999; // out of bounds
+        state.last_repeatable = Some(RepeatableAction::ColMove { forward: true });
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("No column selected"));
+    }
+
+    #[test]
+    fn repeat_column_level_skips_card_guard() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        // Column 0 is empty — card guard would block card-level actions
+        board.columns[0].cards.clear();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::SetWipLimit(Some(3)));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        // Should succeed despite no cards
+        assert!(sync.is_some());
+        assert_eq!(board.columns[0].wip_limit, Some(3));
+    }
+
+    #[test]
+    fn repeat_pipe_command_on_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.push(Card::new("1".into(), "Test Card".into()));
+        save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::PipeCommand("echo replayed".into()));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none()); // pipe doesn't produce sync messages
+        assert_eq!(state.notification.as_deref(), Some("replayed"));
+    }
+
+    #[test]
+    fn repeat_pipe_command_no_card() {
+        let (_dir, kando_dir) = setup_kando_dir();
+        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        board.columns[0].cards.clear();
+        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut state = AppState::new();
+        state.last_repeatable = Some(RepeatableAction::PipeCommand("echo test".into()));
+        let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
+        assert!(sync.is_none());
+        assert_eq!(state.notification.as_deref(), Some("No card selected"));
     }
 }

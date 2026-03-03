@@ -61,6 +61,7 @@ The interface is designed for speed. You don't need a mouse.
 - `m` - Show board metrics
 - `r` - Reload board from disk
 - `u` - Undo last delete
+- `.` - Repeat last action
 - `|` - Pipe selected card to an external command
 - `?` - Show keybinding reference
 - `q` - Quit
@@ -104,6 +105,32 @@ Kando uses "minor modes" (inspired by the Helix text editor) to keep commands di
 - `e` - Edit an existing template
 - `d` - Delete a template
 - `a` - Create a new card from a template
+
+### Repeat Last Action
+
+Press `.` to repeat the last mutation. The status bar shows what `.` will do (e.g. `[. priority: urgent]`).
+
+**Supported actions:**
+
+| Action | Hint | Behavior |
+|--------|------|----------|
+| Move card left/right | `move ->` / `move <-` | Moves selected card one column |
+| Move to column | `move -> Done` | Moves selected card to the stored column |
+| Set priority | `priority: high` | Applies stored priority to selected card |
+| Set tags | `tags: bug, ui` | Overwrites tags on selected card |
+| Set assignees | `assignees: alice` | Overwrites assignees on selected card |
+| Set due date | `due: 2026-03-15` | Sets or clears due date on selected card |
+| Toggle blocked | `block` / `unblock` | Sets or clears blocked flag |
+| Archive | `archive` | Moves selected card to archive column |
+| Delete card | `delete` | Opens confirmation prompt before deleting |
+| Pipe command | `pipe: echo hi` | Re-runs stored command on selected card |
+| Sort column | `sort: priority` | Re-sorts focused column by stored key |
+| Remove column | `remove col` | Opens confirmation prompt before removing |
+| Move column | `col ->` / `col <-` | Shifts focused column one position |
+| Hide/show column | `hide col` / `show col` | Toggles column visibility |
+| Set WIP limit | `wip: 3` / `wip: none` | Sets or clears WIP limit on focused column |
+
+The hint is color-coded by risk: dim for safe actions (tags, priority, sort), default for moves and archive, and yellow for destructive actions (delete, remove column). Destructive actions always require confirmation — `.` opens the prompt, you must press `y` to proceed.
 
 ### Searching and Filtering
 

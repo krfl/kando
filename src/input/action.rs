@@ -64,8 +64,9 @@ pub enum Action {
     FindNext,
     FindPrev,
     ClearFilters,
-    // Undo
+    // Undo / Repeat
     Undo,
+    RepeatLast,
 
     // Board
     ReloadBoard,
