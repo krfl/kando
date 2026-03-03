@@ -33,6 +33,7 @@ pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
         Mode::Column => "column",
         Mode::ColMove => "move column",
         Mode::FilterMenu => "filter",
+        Mode::Template => "template",
         _ => "",
     };
 

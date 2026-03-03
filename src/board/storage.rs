@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{slug_to_name, Board, Card, Column, Policies};
+use super::{slug_to_name, Board, Card, Column, Policies, Template};
 use crate::config::BoardConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -452,7 +452,7 @@ pub struct ColumnConfig {
 
 // ── Trash (soft-delete) ──
 
-/// A single entry in `.kando/.trash/_meta.toml`.
+/// A single entry in `.kando/trash/_meta.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrashEntry {
     pub id: String,
@@ -469,7 +469,7 @@ struct TrashMeta {
 
 /// Path to the trash directory.
 fn trash_dir(kando_dir: &Path) -> PathBuf {
-    kando_dir.join(".trash")
+    kando_dir.join("trash")
 }
 
 /// Path to the trash metadata file.
@@ -477,7 +477,7 @@ fn trash_meta_path(kando_dir: &Path) -> PathBuf {
     trash_dir(kando_dir).join("_meta.toml")
 }
 
-/// Move a card file to `.trash/` and record metadata.
+/// Move a card file to `trash/` and record metadata.
 /// Returns the `TrashEntry` (for undo tracking).
 pub fn trash_card(
     kando_dir: &Path,
@@ -514,7 +514,7 @@ pub fn trash_card(
     Ok(entry)
 }
 
-/// Restore a card from `.trash/` back to a column directory.
+/// Restore a card from `trash/` back to a column directory.
 /// Removes the entry from `_meta.toml`.
 pub fn restore_card(
     kando_dir: &Path,
@@ -724,6 +724,164 @@ fn ensure_local_gitignore(kando_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Template storage
+// ---------------------------------------------------------------------------
+
+/// Load all templates from `.kando/templates/`, sorted by slug.
+/// Returns `(slug, Template)` pairs. Skips invalid files with a warning.
+pub fn load_templates(kando_dir: &Path) -> Vec<(String, Template)> {
+    let templates_dir = kando_dir.join("templates");
+    if !templates_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut entries: Vec<(String, Template)> = Vec::new();
+    let Ok(read_dir) = fs::read_dir(&templates_dir) else {
+        return Vec::new();
+    };
+    for entry in read_dir {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let slug = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if slug.is_empty() {
+            continue;
+        }
+        match load_template(&path) {
+            Ok(tmpl) => entries.push((slug, tmpl)),
+            Err(e) => {
+                eprintln!("Warning: skipping invalid template {}: {e}", path.display());
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
+/// Load a single template from a `.md` file with TOML frontmatter.
+pub fn load_template(path: &Path) -> Result<Template, StorageError> {
+    let content = fs::read_to_string(path)?;
+    let (frontmatter, body) = parse_frontmatter(&content).ok_or_else(|| {
+        StorageError::InvalidCard {
+            path: path.to_path_buf(),
+            reason: "missing or invalid TOML frontmatter".into(),
+        }
+    })?;
+    let mut tmpl: Template = toml::from_str(&frontmatter).map_err(|e| StorageError::InvalidCard {
+        path: path.to_path_buf(),
+        reason: format!("invalid TOML: {e}"),
+    })?;
+    tmpl.body = body;
+    Ok(tmpl)
+}
+
+/// Serialize a template to the frontmatter + markdown body format.
+pub fn serialize_template(tmpl: &Template) -> String {
+    let mut fm = String::new();
+    fm.push_str(&format!("priority = {:?}\n", tmpl.priority.as_str()));
+    if !tmpl.tags.is_empty() {
+        let tags: Vec<String> = tmpl.tags.iter().map(|t| format!("{t:?}")).collect();
+        fm.push_str(&format!("tags = [{}]\n", tags.join(", ")));
+    } else {
+        fm.push_str("tags = []\n");
+    }
+    if !tmpl.assignees.is_empty() {
+        let assignees: Vec<String> = tmpl.assignees.iter().map(|a| format!("{a:?}")).collect();
+        fm.push_str(&format!("assignees = [{}]\n", assignees.join(", ")));
+    } else {
+        fm.push_str("assignees = []\n");
+    }
+    if tmpl.blocked {
+        fm.push_str("blocked = true\n");
+    }
+    if let Some(offset) = tmpl.due_offset_days {
+        fm.push_str(&format!("due_offset_days = {offset}\n"));
+    }
+
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str(&fm);
+    out.push_str("---\n");
+    if !tmpl.body.is_empty() {
+        out.push('\n');
+        out.push_str(&tmpl.body);
+        if !tmpl.body.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Save a template to `.kando/templates/<slug>.md`. Creates the directory if needed.
+pub fn save_template(kando_dir: &Path, slug: &str, tmpl: &Template) -> Result<PathBuf, StorageError> {
+    validate_slug(slug)?;
+    let templates_dir = kando_dir.join("templates");
+    fs::create_dir_all(&templates_dir)?;
+    let path = templates_dir.join(format!("{slug}.md"));
+    let content = serialize_template(tmpl);
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+/// Delete a template file.
+pub fn delete_template(kando_dir: &Path, slug: &str) -> Result<(), StorageError> {
+    validate_slug(slug)?;
+    let path = kando_dir.join("templates").join(format!("{slug}.md"));
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+/// Rename a template from `old_slug` to `new_slug`.
+///
+/// Both slugs are validated. If the new slug already exists on disk the
+/// operation is rejected. The old file is only removed after the new one
+/// has been written successfully.
+pub fn rename_template(kando_dir: &Path, old_slug: &str, new_slug: &str) -> Result<(), StorageError> {
+    validate_slug(old_slug)?;
+    validate_slug(new_slug)?;
+    if old_slug == new_slug {
+        return Ok(());
+    }
+    let templates_dir = kando_dir.join("templates");
+    let old_path = templates_dir.join(format!("{old_slug}.md"));
+    let new_path = templates_dir.join(format!("{new_slug}.md"));
+    if new_path.exists() {
+        return Err(StorageError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("template '{new_slug}' already exists"),
+        )));
+    }
+    let tmpl = load_template(&old_path)?;
+    let content = serialize_template(&tmpl);
+    fs::write(&new_path, content)?;
+    if let Err(e) = fs::remove_file(&old_path) {
+        // Clean up the new file to avoid duplicates.
+        let _ = fs::remove_file(&new_path);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// Find a template by slug (exact) or derived name (case-insensitive).
+pub fn find_template(kando_dir: &Path, name_or_slug: &str) -> Option<(String, Template)> {
+    use crate::board::slug_to_name;
+    let templates = load_templates(kando_dir);
+    // Exact slug match first
+    if let Some(entry) = templates.iter().find(|(slug, _)| slug == name_or_slug) {
+        return Some(entry.clone());
+    }
+    // Case-insensitive derived-name match
+    let lower = name_or_slug.to_lowercase();
+    templates.into_iter().find(|(slug, _)| slug_to_name(slug).to_lowercase() == lower)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,7 +1018,7 @@ mod tests {
 
         // Source gone, trash file present
         assert!(!src.exists());
-        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        let trash_file = kando_dir.join("trash").join(format!("{id}.md"));
         assert!(trash_file.exists());
 
         // Meta records the entry
@@ -891,7 +1049,7 @@ mod tests {
         assert!(restored.exists());
 
         // Trash file gone, meta cleared
-        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        let trash_file = kando_dir.join("trash").join(format!("{id}.md"));
         assert!(!trash_file.exists());
         assert!(load_trash(&kando_dir).is_empty());
     }
@@ -947,7 +1105,7 @@ mod tests {
         assert_eq!(purged, vec![id.clone()]);
 
         // File removed, meta empty
-        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        let trash_file = kando_dir.join("trash").join(format!("{id}.md"));
         assert!(!trash_file.exists());
         assert!(load_trash(&kando_dir).is_empty());
     }
@@ -1008,7 +1166,7 @@ mod tests {
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
-        // No .trash directory exists yet
+        // No trash directory exists yet
         assert!(load_trash(&kando_dir).is_empty());
     }
 
@@ -1029,8 +1187,8 @@ mod tests {
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
-        // Create .trash dir and _meta.toml with an entry but no actual file
-        let trash = kando_dir.join(".trash");
+        // Create trash dir and _meta.toml with an entry but no actual file
+        let trash = kando_dir.join("trash");
         fs::create_dir_all(&trash).unwrap();
         let meta = TrashMeta {
             entries: vec![TrashEntry {
@@ -1159,7 +1317,7 @@ mod tests {
         let kando_dir = dir.path().join(".kando");
 
         // Create a trash entry with a garbage date
-        let trash = kando_dir.join(".trash");
+        let trash = kando_dir.join("trash");
         fs::create_dir_all(&trash).unwrap();
         fs::write(trash.join("bad.md"), "---\nid = \"bad\"\ntitle = \"Bad date\"\n---\n").unwrap();
         let meta = TrashMeta {
@@ -1206,7 +1364,7 @@ mod tests {
 
         let restored = kando_dir.join("columns").join(&col_slug).join("001.md");
         assert!(restored.exists());
-        let still_trashed = kando_dir.join(".trash/002.md");
+        let still_trashed = kando_dir.join("trash/002.md");
         assert!(still_trashed.exists());
     }
 
@@ -1904,5 +2062,450 @@ mod tests {
             let col = board.columns.iter().find(|c| c.slug == *slug).unwrap();
             assert_eq!(&col.name, expected_name, "slug={slug}");
         }
+    }
+
+    // ── Template storage tests ──
+
+    fn make_test_template() -> Template {
+        Template {
+            priority: Priority::Normal,
+            tags: Vec::new(),
+            assignees: Vec::new(),
+            blocked: false,
+            due_offset_days: None,
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn template_serialize_roundtrip() {
+        let tmpl = Template {
+            priority: Priority::High,
+            tags: vec!["bug".into(), "critical".into()],
+            assignees: vec!["alice".into()],
+            blocked: true,
+            due_offset_days: Some(7),
+            body: "## Steps\n\n1. Do X\n2. Do Y".to_string(),
+        };
+        let text = serialize_template(&tmpl);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.md");
+        fs::write(&path, &text).unwrap();
+        let loaded = load_template(&path).unwrap();
+        assert_eq!(loaded.priority, Priority::High);
+        assert_eq!(loaded.tags, vec!["bug", "critical"]);
+        assert_eq!(loaded.assignees, vec!["alice"]);
+        assert!(loaded.blocked);
+        assert_eq!(loaded.due_offset_days, Some(7));
+        assert_eq!(loaded.body, "## Steps\n\n1. Do X\n2. Do Y");
+    }
+
+    #[test]
+    fn template_serialize_roundtrip_minimal() {
+        let tmpl = make_test_template();
+        let text = serialize_template(&tmpl);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.md");
+        fs::write(&path, &text).unwrap();
+        let loaded = load_template(&path).unwrap();
+        assert_eq!(loaded.priority, Priority::Normal);
+        assert!(loaded.tags.is_empty());
+        assert!(loaded.assignees.is_empty());
+        assert!(!loaded.blocked);
+        assert!(loaded.due_offset_days.is_none());
+        assert!(loaded.body.is_empty());
+    }
+
+    #[test]
+    fn template_serialize_empty_body() {
+        let tmpl = make_test_template();
+        let text = serialize_template(&tmpl);
+        assert!(text.ends_with("---\n"));
+        // Nothing follows the closing delimiter
+        let after_close = text.rsplit_once("---\n").unwrap().1;
+        assert!(after_close.is_empty());
+    }
+
+    #[test]
+    fn save_template_creates_templates_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let tmpl = make_test_template();
+        save_template(&kando_dir, "bug", &tmpl).unwrap();
+        assert!(kando_dir.join("templates").join("bug.md").exists());
+    }
+
+    #[test]
+    fn save_and_load_template() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let tmpl = Template {
+            priority: Priority::Low,
+            tags: vec!["feat".into()],
+            assignees: vec!["bob".into()],
+            blocked: false,
+            due_offset_days: Some(14),
+            body: "Description here".to_string(),
+        };
+        let path = save_template(&kando_dir, "feature", &tmpl).unwrap();
+        let loaded = load_template(&path).unwrap();
+        assert_eq!(loaded.priority, Priority::Low);
+        assert_eq!(loaded.tags, vec!["feat"]);
+        assert_eq!(loaded.assignees, vec!["bob"]);
+        assert_eq!(loaded.due_offset_days, Some(14));
+        assert_eq!(loaded.body, "Description here");
+    }
+
+    #[test]
+    fn delete_template_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let tmpl = make_test_template();
+        save_template(&kando_dir, "bug", &tmpl).unwrap();
+        assert!(kando_dir.join("templates").join("bug.md").exists());
+        delete_template(&kando_dir, "bug").unwrap();
+        assert!(!kando_dir.join("templates").join("bug.md").exists());
+    }
+
+    #[test]
+    fn delete_template_nonexistent_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        assert!(delete_template(&kando_dir, "nonexistent").is_ok());
+    }
+
+    #[test]
+    fn delete_template_invalid_slug_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        assert!(delete_template(&kando_dir, "UPPER").is_err());
+    }
+
+    #[test]
+    fn save_template_invalid_slug_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let tmpl = make_test_template();
+        assert!(save_template(&kando_dir, "has spaces", &tmpl).is_err());
+    }
+
+    #[test]
+    fn load_templates_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::create_dir_all(kando_dir.join("templates")).unwrap();
+        let templates = load_templates(&kando_dir);
+        assert!(templates.is_empty());
+    }
+
+    #[test]
+    fn load_templates_no_templates_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let templates = load_templates(&kando_dir);
+        assert!(templates.is_empty());
+    }
+
+    #[test]
+    fn load_templates_sorted_by_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "zebra", &make_test_template()).unwrap();
+        save_template(&kando_dir, "alpha", &make_test_template()).unwrap();
+        save_template(&kando_dir, "middle", &make_test_template()).unwrap();
+        let templates = load_templates(&kando_dir);
+        let slugs: Vec<&str> = templates.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(slugs, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[test]
+    fn load_templates_skips_non_md_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug", &make_test_template()).unwrap();
+        fs::write(kando_dir.join("templates").join("notes.txt"), "not a template").unwrap();
+        let templates = load_templates(&kando_dir);
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].0, "bug");
+    }
+
+    #[test]
+    fn load_templates_skips_invalid_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "good", &make_test_template()).unwrap();
+        fs::write(kando_dir.join("templates").join("bad.md"), "no frontmatter here").unwrap();
+        let templates = load_templates(&kando_dir);
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].0, "good");
+    }
+
+    #[test]
+    fn find_template_by_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug-report", &make_test_template()).unwrap();
+        let result = find_template(&kando_dir, "bug-report");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, "bug-report");
+    }
+
+    #[test]
+    fn find_template_by_derived_name_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug-report", &make_test_template()).unwrap();
+        // slug "bug-report" derives to "Bug Report"; case-insensitive lookup
+        let result = find_template(&kando_dir, "bug report");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, "bug-report");
+    }
+
+    #[test]
+    fn find_template_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        assert!(find_template(&kando_dir, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_template_slug_takes_precedence_over_derived_name() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        // slug "alpha" derives to "Alpha", slug "beta" derives to "Beta"
+        save_template(&kando_dir, "alpha", &make_test_template()).unwrap();
+        save_template(&kando_dir, "beta", &make_test_template()).unwrap();
+        // Searching "alpha" should match slug "alpha" exactly, not derived name
+        let result = find_template(&kando_dir, "alpha");
+        assert!(result.is_some());
+        let (slug, _) = result.unwrap();
+        assert_eq!(slug, "alpha");
+    }
+
+    #[test]
+    fn template_with_all_default_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.md");
+        // Only priority specified; everything else falls back to defaults
+        fs::write(&path, "---\npriority = \"normal\"\n---\n").unwrap();
+        let loaded = load_template(&path).unwrap();
+        assert_eq!(loaded.priority, Priority::Normal);
+        assert!(loaded.tags.is_empty());
+        assert!(loaded.assignees.is_empty());
+        assert!(!loaded.blocked);
+        assert!(loaded.due_offset_days.is_none());
+        assert!(loaded.body.is_empty());
+    }
+
+    #[test]
+    fn save_template_slug_with_leading_hyphen_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let tmpl = make_test_template();
+        assert!(save_template(&kando_dir, "-bug", &tmpl).is_err());
+    }
+
+    #[test]
+    fn save_template_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut tmpl = make_test_template();
+        save_template(&kando_dir, "bug", &tmpl).unwrap();
+        // Overwrite with different priority
+        tmpl.priority = crate::board::Priority::Urgent;
+        save_template(&kando_dir, "bug", &tmpl).unwrap();
+        let (_, loaded) = find_template(&kando_dir, "bug").unwrap();
+        assert_eq!(loaded.priority, crate::board::Priority::Urgent);
+    }
+
+    #[test]
+    fn template_body_with_frontmatter_delimiter_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut tmpl = make_test_template();
+        tmpl.body = "Above\n---\nBelow".to_string();
+        save_template(&kando_dir, "tricky", &tmpl).unwrap();
+        let (_, loaded) = find_template(&kando_dir, "tricky").unwrap();
+        assert_eq!(loaded.body, "Above\n---\nBelow");
+    }
+
+    #[test]
+    fn load_template_with_legacy_name_field_in_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.md");
+        // Old-format template file that still has a `name` field — should load fine
+        fs::write(&path, "---\nname = \"Bug Report\"\npriority = \"high\"\ntags = [\"bug\"]\n---\nBody text\n").unwrap();
+        let loaded = load_template(&path).unwrap();
+        assert_eq!(loaded.priority, Priority::High);
+        assert_eq!(loaded.tags, vec!["bug"]);
+        assert_eq!(loaded.body, "Body text");
+    }
+
+    #[test]
+    fn serialize_template_does_not_contain_name_field() {
+        let tmpl = make_test_template();
+        let text = serialize_template(&tmpl);
+        assert!(!text.contains("name ="), "serialized template should not contain a name field");
+    }
+
+    #[test]
+    fn find_template_partial_name_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug-report", &make_test_template()).unwrap();
+        // "bug" is neither the slug nor the full derived name "Bug Report"
+        assert!(find_template(&kando_dir, "bug").is_none());
+    }
+
+    #[test]
+    fn save_template_file_does_not_contain_name_field() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let tmpl = make_test_template();
+        save_template(&kando_dir, "bug", &tmpl).unwrap();
+        let content = fs::read_to_string(kando_dir.join("templates").join("bug.md")).unwrap();
+        assert!(!content.contains("name ="), "template file on disk should not contain a name field");
+    }
+
+    // ── rename_template tests ──
+
+    #[test]
+    fn rename_template_moves_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug", &make_test_template()).unwrap();
+        rename_template(&kando_dir, "bug", "defect").unwrap();
+        assert!(kando_dir.join("templates").join("defect.md").exists());
+        assert!(!kando_dir.join("templates").join("bug.md").exists());
+    }
+
+    #[test]
+    fn rename_template_preserves_content() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut tmpl = make_test_template();
+        tmpl.priority = Priority::High;
+        tmpl.tags = vec!["rust".into(), "tui".into()];
+        tmpl.assignees = vec!["alice".into()];
+        tmpl.blocked = true;
+        tmpl.body = "Template body content".into();
+        tmpl.due_offset_days = Some(7);
+        save_template(&kando_dir, "bug", &tmpl).unwrap();
+        rename_template(&kando_dir, "bug", "defect").unwrap();
+        let loaded = load_template(&kando_dir.join("templates").join("defect.md")).unwrap();
+        assert_eq!(loaded.priority, Priority::High);
+        assert_eq!(loaded.tags, vec!["rust", "tui"]);
+        assert_eq!(loaded.assignees, vec!["alice"]);
+        assert!(loaded.blocked);
+        assert_eq!(loaded.body, "Template body content");
+        assert_eq!(loaded.due_offset_days, Some(7));
+    }
+
+    #[test]
+    fn rename_template_same_slug_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug", &make_test_template()).unwrap();
+        rename_template(&kando_dir, "bug", "bug").unwrap();
+        assert!(kando_dir.join("templates").join("bug.md").exists());
+    }
+
+    #[test]
+    fn rename_template_target_already_exists_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug", &make_test_template()).unwrap();
+        save_template(&kando_dir, "defect", &make_test_template()).unwrap();
+        let result = rename_template(&kando_dir, "bug", "defect");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("already exists"), "expected 'already exists' in: {err_msg}");
+        // Both original files must survive.
+        assert!(kando_dir.join("templates").join("bug.md").exists());
+        assert!(kando_dir.join("templates").join("defect.md").exists());
+    }
+
+    #[test]
+    fn rename_template_invalid_old_slug_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        assert!(rename_template(&kando_dir, "UPPER", "valid").is_err());
+    }
+
+    #[test]
+    fn rename_template_invalid_new_slug_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug", &make_test_template()).unwrap();
+        assert!(rename_template(&kando_dir, "bug", "HAS SPACES").is_err());
+    }
+
+    #[test]
+    fn rename_template_old_slug_not_found_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let result = rename_template(&kando_dir, "nonexistent", "new-name");
+        assert!(result.is_err());
+        assert!(!kando_dir.join("templates").join("new-name.md").exists());
+    }
+
+    #[test]
+    fn rename_template_multi_word_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        save_template(&kando_dir, "bug-report", &make_test_template()).unwrap();
+        rename_template(&kando_dir, "bug-report", "defect-report").unwrap();
+        assert!(kando_dir.join("templates").join("defect-report.md").exists());
+        assert!(!kando_dir.join("templates").join("bug-report.md").exists());
+    }
+
+    #[test]
+    fn rename_template_body_with_frontmatter_delimiter_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let mut tmpl = make_test_template();
+        tmpl.body = "Above\n---\nBelow".into();
+        save_template(&kando_dir, "tricky", &tmpl).unwrap();
+        rename_template(&kando_dir, "tricky", "renamed").unwrap();
+        let loaded = load_template(&kando_dir.join("templates").join("renamed.md")).unwrap();
+        assert_eq!(loaded.body, "Above\n---\nBelow");
+    }
+
+    #[test]
+    fn rename_template_no_templates_dir_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        // templates directory does not exist — rename should fail gracefully.
+        let result = rename_template(&kando_dir, "bug", "defect");
+        assert!(result.is_err());
     }
 }

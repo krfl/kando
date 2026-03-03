@@ -160,6 +160,44 @@ pub struct Card {
     pub body: String,
 }
 
+/// A card template for creating new cards with preset fields.
+/// Display name is derived from the slug via `slug_to_name()` — no stored name field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Template {
+    #[serde(default)]
+    pub priority: Priority,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_offset_days: Option<u32>,
+    #[serde(skip)]
+    pub body: String,
+}
+
+/// Generate a filesystem-safe slug for a template name, unique among `existing_slugs`.
+pub fn generate_template_slug(name: &str, existing_slugs: &[String]) -> String {
+    let base = slug_from_name(name);
+    let base = if base == "col" && !name.chars().any(|c| c.is_ascii_alphanumeric()) {
+        "template".to_string()
+    } else {
+        base
+    };
+    if !existing_slugs.iter().any(|s| s == &base) {
+        return base;
+    }
+    for n in 2u32.. {
+        let candidate = format!("{base}-{n}");
+        if !existing_slugs.iter().any(|s| s == &candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("generate_template_slug: exhausted candidates for base={base:?}")
+}
+
 impl Card {
     pub fn new(id: String, title: String) -> Self {
         let now = Utc::now();
@@ -1516,5 +1554,57 @@ mod tests {
         card.due = Some(now.date_naive() + chrono::Days::new(1)); // not overdue
         // Text search takes precedence over overdue filter
         assert!(card_is_visible(&card, Some("test"), &[], &[], &[], true, &policies, now, &matcher));
+    }
+
+    // ── generate_template_slug ──
+
+    #[test]
+    fn generate_template_slug_basic_name() {
+        assert_eq!(generate_template_slug("Bug Report", &[]), "bug-report");
+    }
+
+    #[test]
+    fn generate_template_slug_dedup_appends_suffix() {
+        let existing = vec!["bug-report".to_string()];
+        assert_eq!(generate_template_slug("Bug Report", &existing), "bug-report-2");
+    }
+
+    #[test]
+    fn generate_template_slug_dedup_skips_taken_suffixes() {
+        let existing = vec!["bug-report".to_string(), "bug-report-2".to_string()];
+        assert_eq!(generate_template_slug("Bug Report", &existing), "bug-report-3");
+    }
+
+    #[test]
+    fn generate_template_slug_empty_name_returns_template() {
+        assert_eq!(generate_template_slug("", &[]), "template");
+    }
+
+    #[test]
+    fn generate_template_slug_special_chars_only_returns_template() {
+        assert_eq!(generate_template_slug("!!! ???", &[]), "template");
+    }
+
+    #[test]
+    fn generate_template_slug_short_alpha_name() {
+        // "Col" contains alphanumeric chars so slug_from_name produces "col",
+        // which is a regular slug — not the empty/unicode fallback path.
+        assert_eq!(generate_template_slug("Col", &[]), "col");
+    }
+
+    #[test]
+    fn generate_template_slug_numeric_only() {
+        assert_eq!(generate_template_slug("123", &[]), "123");
+    }
+
+    #[test]
+    fn generate_template_slug_unicode_only_returns_template() {
+        assert_eq!(generate_template_slug("日本語", &[]), "template");
+    }
+
+    #[test]
+    fn generate_template_slug_template_already_exists() {
+        let existing = vec!["template".to_string()];
+        assert_eq!(generate_template_slug("", &existing), "template-2");
     }
 }

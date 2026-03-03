@@ -74,6 +74,13 @@ pub enum Action {
     DismissTutorial,
     Quit,
 
+    // Template actions
+    EnterTemplateMode,
+    TemplateNew,
+    TemplateEdit,
+    TemplateDelete,
+    TemplateRename,
+
     // Minor mode entry
     EnterGotoMode,
     EnterSpaceMode,

@@ -115,6 +115,7 @@ pub enum Mode {
     Column,
     ColMove,
     FilterMenu,
+    Template,
     Input {
         prompt: &'static str,
         buf: TextBuffer,
@@ -151,6 +152,8 @@ pub enum Mode {
 #[derive(Debug, Clone)]
 pub enum InputTarget {
     NewCardTitle,
+    NewCardFromTemplate(String), // template slug
+    TemplateName,
     EditTags,
     EditAssignees,
     WipLimit,
@@ -158,6 +161,7 @@ pub enum InputTarget {
     ColAdd,
     PipeCommand,
     DueDate,
+    TemplateRename(String), // holds old slug
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +173,7 @@ pub enum ConfirmTarget {
         to_col: usize,
     },
     ColRemove(String), // slug of column to remove
+    DeleteTemplate(String), // template slug
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +185,10 @@ pub enum PickerTarget {
     AssigneeFilter,
     StalenessFilter,
     DueDate,
+    TemplateSelect,
+    TemplateEdit,
+    TemplateDelete,
+    TemplateRename,
 }
 
 /// Notification severity for statusbar coloring.
@@ -220,6 +229,8 @@ pub struct AppState {
     pub nerd_font: bool,
     /// Whether the first-launch tutorial has been shown (from local.toml).
     pub tutorial_shown: bool,
+    /// Deferred template editing — slug to open in $EDITOR after handler returns.
+    pub pending_editor_template: Option<String>,
 }
 
 impl AppState {
@@ -245,6 +256,7 @@ impl AppState {
             completion_hint: None,
             nerd_font: false,
             tutorial_shown: false,
+            pending_editor_template: None,
         }
     }
 
@@ -680,7 +692,7 @@ fn process_action(
     terminal: &mut DefaultTerminal,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<()> {
-    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::Column | Mode::ColMove | Mode::FilterMenu);
+    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::Column | Mode::ColMove | Mode::FilterMenu | Mode::Template);
     let mut sync_message: Option<String> = None;
 
     match action {
@@ -906,6 +918,10 @@ fn process_action(
         Action::EnterSpaceMode => state.mode = Mode::Space,
         Action::EnterColumnMode => state.mode = Mode::Column,
         Action::EnterFilterMode => state.mode = Mode::FilterMenu,
+        Action::EnterTemplateMode => state.mode = Mode::Template,
+        Action::TemplateNew | Action::TemplateEdit | Action::TemplateDelete | Action::TemplateRename => {
+            sync_message = handle_template_action(board, state, action, terminal, kando_dir)?;
+        }
         // Undo last delete
         Action::Undo => {
             if was_minor_mode { state.mode = Mode::Normal; }
@@ -950,6 +966,15 @@ fn process_action(
     if let Some(msg) = sync_message {
         if let Some(ref mut sync_state) = state.sync_state {
             sync::commit_and_push(sync_state, kando_dir, &msg);
+        }
+    }
+
+    // Launch $EDITOR for template if deferred from a picker/input handler
+    if let Some(slug) = state.pending_editor_template.take() {
+        launch_editor_for_template(board, state, terminal, kando_dir, &slug)?;
+        // Sync template changes made in the editor
+        if let Some(ref mut sync_state) = state.sync_state {
+            sync::commit_and_push(sync_state, kando_dir, &format!("Edit template \"{slug}\""));
         }
     }
 
@@ -1188,12 +1213,27 @@ fn handle_card_action<B: ratatui::backend::Backend>(
             sync_message = try_move_card(board, state, true, kando_dir)?;
         }
         Action::NewCard => {
-            state.mode = Mode::Input {
-                prompt: "New card",
-                buf: TextBuffer::empty(),
-                on_confirm: InputTarget::NewCardTitle,
-                completion: None,
-            };
+            use crate::board::{slug_to_name, storage::load_templates};
+            let templates = load_templates(kando_dir);
+            if templates.is_empty() {
+                state.mode = Mode::Input {
+                    prompt: "New card",
+                    buf: TextBuffer::empty(),
+                    on_confirm: InputTarget::NewCardTitle,
+                    completion: None,
+                };
+            } else {
+                let mut items: Vec<(String, bool)> = vec![("(blank)".to_string(), false)];
+                for (slug, _) in &templates {
+                    items.push((slug_to_name(slug), false));
+                }
+                state.mode = Mode::Picker {
+                    title: "template",
+                    items,
+                    selected: 0,
+                    target: PickerTarget::TemplateSelect,
+                };
+            }
         }
         Action::DeleteCard => {
             if let Some(card) = state.selected_card_ref(board) {
@@ -1989,6 +2029,94 @@ fn handle_input_confirm(
         }
         Mode::Input {
             buf,
+            on_confirm: InputTarget::NewCardFromTemplate(slug),
+            ..
+        } => {
+            use crate::board::storage::find_template;
+            let title = buf.input.trim().to_string();
+            if !title.is_empty() {
+                let id = board.next_card_id();
+                let col_name = board.columns.get(state.focused_column)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                let mut card = Card::new(id.clone(), title.clone());
+                if let Some((_, tmpl)) = find_template(kando_dir, &slug) {
+                    card.priority = tmpl.priority;
+                    card.tags = tmpl.tags.clone();
+                    card.assignees = tmpl.assignees.clone();
+                    card.blocked = tmpl.blocked;
+                    if let Some(offset) = tmpl.due_offset_days {
+                        let today = chrono::Utc::now().date_naive();
+                        card.due = today.checked_add_days(chrono::Days::new(offset as u64));
+                    }
+                    card.body = tmpl.body.clone();
+                }
+                if let Some(col) = board.columns.get_mut(state.focused_column) {
+                    col.cards.push(card);
+                    col.sort_cards();
+                }
+                save_board(kando_dir, board)?;
+                append_activity(kando_dir, "create", &id, &title,
+                    &[("column", &col_name), ("template", &slug)]);
+                sync_message = Some(format!("Create card #{id} \"{title}\" in {col_name}"));
+                state.notify("Card created from template");
+            }
+        }
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::TemplateName,
+            ..
+        } => {
+            use crate::board::storage::{load_templates, save_template};
+            use crate::board::{generate_template_slug, Template};
+            let name = buf.input.trim().to_string();
+            if !name.is_empty() {
+                let templates = load_templates(kando_dir);
+                let existing_slugs: Vec<String> = templates.iter().map(|(s, _)| s.clone()).collect();
+                let slug = generate_template_slug(&name, &existing_slugs);
+                let tmpl = Template {
+                    priority: crate::board::Priority::default(),
+                    tags: Vec::new(),
+                    assignees: Vec::new(),
+                    blocked: false,
+                    due_offset_days: None,
+                    body: String::new(),
+                };
+                save_template(kando_dir, &slug, &tmpl)?;
+                sync_message = Some(format!("Create template \"{slug}\""));
+                state.pending_editor_template = Some(slug);
+            }
+        }
+        Mode::Input {
+            buf,
+            on_confirm: InputTarget::TemplateRename(old_slug),
+            ..
+        } => {
+            use crate::board::storage::rename_template;
+            use crate::board::slug_from_name;
+            let new_name = buf.input.trim().to_string();
+            if new_name.is_empty() {
+                state.notify_error("Template name cannot be empty");
+            } else {
+                let new_slug = slug_from_name(&new_name);
+                if new_slug == old_slug {
+                    state.notify("Template unchanged");
+                } else {
+                    match rename_template(kando_dir, &old_slug, &new_slug) {
+                        Ok(()) => {
+                            let display = crate::board::slug_to_name(&new_slug);
+                            state.notify(format!("Renamed template → {display}"));
+                            sync_message = Some(format!("Rename template \"{old_slug}\" to \"{new_slug}\""));
+                        }
+                        Err(e) => {
+                            state.notify_error(format!("Rename failed: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        Mode::Input {
+            buf,
             on_confirm: InputTarget::EditTags,
             ..
         } => {
@@ -2405,6 +2533,70 @@ fn handle_input_confirm(
                         }
                     }
                 }
+                PickerTarget::TemplateSelect => {
+                    use crate::board::storage::find_template;
+                    if selected == 0 {
+                        // "(blank)" selected — plain new card
+                        state.mode = Mode::Input {
+                            prompt: "New card",
+                            buf: TextBuffer::empty(),
+                            on_confirm: InputTarget::NewCardTitle,
+                            completion: None,
+                        };
+                    } else if let Some((name, _)) = items.get(selected) {
+                        // Look up template by name to avoid TOCTOU index issues
+                        if let Some((slug, _)) = find_template(kando_dir, name) {
+                            state.mode = Mode::Input {
+                                prompt: "New card",
+                                buf: TextBuffer::empty(),
+                                on_confirm: InputTarget::NewCardFromTemplate(slug),
+                                completion: None,
+                            };
+                        } else {
+                            state.notify_error("Template no longer exists");
+                        }
+                    }
+                }
+                PickerTarget::TemplateEdit => {
+                    use crate::board::storage::find_template;
+                    if let Some((name, _)) = items.get(selected) {
+                        if let Some((slug, _)) = find_template(kando_dir, name) {
+                            state.pending_editor_template = Some(slug);
+                        } else {
+                            state.notify_error("Template no longer exists");
+                        }
+                    }
+                }
+                PickerTarget::TemplateDelete => {
+                    use crate::board::storage::find_template;
+                    if let Some((name, _)) = items.get(selected) {
+                        if let Some((slug, _)) = find_template(kando_dir, name) {
+                            state.mode = Mode::Confirm {
+                                prompt: "Delete template?",
+                                on_confirm: ConfirmTarget::DeleteTemplate(slug),
+                            };
+                        } else {
+                            state.notify_error("Template no longer exists");
+                        }
+                    }
+                }
+                PickerTarget::TemplateRename => {
+                    use crate::board::storage::find_template;
+                    use crate::board::slug_to_name;
+                    if let Some((name, _)) = items.get(selected) {
+                        if let Some((slug, _)) = find_template(kando_dir, name) {
+                            let current_name = slug_to_name(&slug);
+                            state.mode = Mode::Input {
+                                prompt: "New name",
+                                buf: TextBuffer::new(current_name),
+                                on_confirm: InputTarget::TemplateRename(slug),
+                                completion: None,
+                            };
+                        } else {
+                            state.notify_error("Template no longer exists");
+                        }
+                    }
+                }
                 PickerTarget::MoveToColumn => {
                     if let Some((col_name, _)) = items.get(selected) {
                         let target_col = board.columns.iter().enumerate()
@@ -2519,6 +2711,128 @@ fn handle_undo(
 // ---------------------------------------------------------------------------
 // Handler: Confirmation (delete card, WIP limit override)
 // ---------------------------------------------------------------------------
+// Handler: Template actions
+// ---------------------------------------------------------------------------
+
+fn handle_template_action<B: ratatui::backend::Backend>(
+    _board: &mut Board,
+    state: &mut AppState,
+    action: Action,
+    _terminal: &mut ratatui::Terminal<B>,
+    kando_dir: &std::path::Path,
+) -> color_eyre::Result<Option<String>> {
+    use crate::board::storage::load_templates;
+
+    state.mode = Mode::Normal;
+
+    match action {
+        Action::TemplateNew => {
+            state.mode = Mode::Input {
+                prompt: "Template name",
+                buf: TextBuffer::empty(),
+                on_confirm: InputTarget::TemplateName,
+                completion: None,
+            };
+        }
+        Action::TemplateEdit => {
+            use crate::board::slug_to_name;
+            let templates = load_templates(kando_dir);
+            if templates.is_empty() {
+                state.notify("No templates");
+            } else {
+                let items: Vec<(String, bool)> = templates.iter().map(|(slug, _)| (slug_to_name(slug), false)).collect();
+                state.mode = Mode::Picker {
+                    title: "edit template",
+                    items,
+                    selected: 0,
+                    target: PickerTarget::TemplateEdit,
+                };
+            }
+        }
+        Action::TemplateDelete => {
+            use crate::board::slug_to_name;
+            let templates = load_templates(kando_dir);
+            if templates.is_empty() {
+                state.notify("No templates");
+            } else {
+                let items: Vec<(String, bool)> = templates.iter().map(|(slug, _)| (slug_to_name(slug), false)).collect();
+                state.mode = Mode::Picker {
+                    title: "delete template",
+                    items,
+                    selected: 0,
+                    target: PickerTarget::TemplateDelete,
+                };
+            }
+        }
+        Action::TemplateRename => {
+            use crate::board::slug_to_name;
+            let templates = load_templates(kando_dir);
+            if templates.is_empty() {
+                state.notify("No templates");
+            } else {
+                let items: Vec<(String, bool)> = templates.iter().map(|(slug, _)| (slug_to_name(slug), false)).collect();
+                state.mode = Mode::Picker {
+                    title: "rename template",
+                    items,
+                    selected: 0,
+                    target: PickerTarget::TemplateRename,
+                };
+            }
+        }
+        _ => {}
+    }
+    Ok(None)
+}
+
+fn launch_editor_for_template<B: ratatui::backend::Backend>(
+    _board: &mut Board,
+    state: &mut AppState,
+    terminal: &mut ratatui::Terminal<B>,
+    kando_dir: &std::path::Path,
+    slug: &str,
+) -> color_eyre::Result<()> {
+    let template_path = kando_dir.join("templates").join(format!("{slug}.md"));
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let editor_trimmed = editor.trim();
+    if editor_trimmed.is_empty() {
+        state.notify_error("$EDITOR is empty");
+        return Ok(());
+    }
+
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
+
+    let editor_result = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor_trimmed} \"$1\""))
+        .arg("--")
+        .arg(&template_path)
+        .status();
+
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::EnterAlternateScreen,
+    )?;
+    crossterm::terminal::enable_raw_mode()?;
+
+    terminal.clear()?;
+
+    match editor_result {
+        Ok(status) if status.success() => {
+            state.notify("Template saved");
+        }
+        Ok(status) => {
+            state.notify_error(format!("Editor exited with {status}"));
+        }
+        Err(e) => {
+            state.notify_error(format!("Failed to launch editor: {e}"));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 
 fn handle_confirm(
     board: &mut Board,
@@ -2608,6 +2922,15 @@ fn handle_confirm(
                     state.clamp_selection(board);
                     state.notify(format!("Removed column: {name}"));
                     sync_message = Some(format!("Remove column \"{name}\""));
+                }
+                Mode::Confirm {
+                    on_confirm: ConfirmTarget::DeleteTemplate(slug),
+                    ..
+                } => {
+                    use crate::board::storage::delete_template;
+                    delete_template(kando_dir, slug)?;
+                    state.notify("Template deleted");
+                    sync_message = Some("Delete template".into());
                 }
                 _ => {}
             }
@@ -3286,9 +3609,9 @@ mod tests {
         };
         handle_confirm(&mut board, &mut state, Action::Confirm, &kando_dir).unwrap();
 
-        // Card file is in .trash, not in column directory
+        // Card file is in trash, not in column directory
         let col_file = kando_dir.join("columns/backlog/001.md");
-        let trash_file = kando_dir.join(".trash/001.md");
+        let trash_file = kando_dir.join("trash/001.md");
         assert!(!col_file.exists());
         assert!(trash_file.exists());
     }

@@ -12,6 +12,7 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Column => map_column(key),
         Mode::ColMove => map_col_move(key),
         Mode::FilterMenu => map_filter_menu(key),
+        Mode::Template => map_template(key),
         Mode::Input { .. } => map_input(key),
         Mode::Confirm { .. } => map_confirm(key),
         Mode::Filter { .. } => map_input(key),
@@ -72,6 +73,7 @@ fn map_normal(key: KeyEvent) -> Action {
         KeyCode::Char('?') => Action::ShowHelp,
         KeyCode::Tab => Action::CycleNextCard,
         KeyCode::BackTab => Action::CyclePrevCard,
+        KeyCode::Char('t') => Action::EnterTemplateMode,
         KeyCode::Char('|') => Action::PipeCard,
         KeyCode::Esc => Action::ClearFilters,
         _ => Action::None,
@@ -150,6 +152,17 @@ fn map_filter_menu(key: KeyEvent) -> Action {
     }
 }
 
+fn map_template(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('n') => Action::TemplateNew,
+        KeyCode::Char('e') => Action::TemplateEdit,
+        KeyCode::Char('d') => Action::TemplateDelete,
+        KeyCode::Char('r') => Action::TemplateRename,
+        KeyCode::Esc => Action::None,
+        _ => Action::None,
+    }
+}
+
 fn map_input(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Enter => Action::InputConfirm,
@@ -218,6 +231,7 @@ pub const NORMAL_BINDINGS: &[Binding] = &[
     Binding { key: "r", description: "Reload board" },
     Binding { key: "u", description: "Undo last delete" },
     Binding { key: "?", description: "Help" },
+    Binding { key: "t", description: "Template mode" },
     Binding { key: "|", description: "Pipe card to command" },
     Binding { key: "Esc", description: "Clear filters" },
     Binding { key: "q", description: "Quit" },
@@ -271,6 +285,13 @@ pub const COL_MOVE_BINDINGS: &[Binding] = &[
     Binding { key: "e",   description: "Move column to last" },
 ];
 
+pub const TEMPLATE_BINDINGS: &[Binding] = &[
+    Binding { key: "n", description: "New template" },
+    Binding { key: "e", description: "Edit template" },
+    Binding { key: "d", description: "Delete template" },
+    Binding { key: "r", description: "Rename template" },
+];
+
 pub const DETAIL_BINDINGS: &[Binding] = &[
     Binding { key: "j / k", description: "Scroll" },
     Binding { key: "Tab/S-Tab", description: "Next/prev card" },
@@ -287,6 +308,7 @@ pub const HELP_GROUPS: &[BindingGroup] = &[
     BindingGroup { name: "Filter (f)", bindings: FILTER_BINDINGS },
     BindingGroup { name: "Column (c)", bindings: COLUMN_BINDINGS },
     BindingGroup { name: "Column Move (cm)", bindings: COL_MOVE_BINDINGS },
+    BindingGroup { name: "Template (t)", bindings: TEMPLATE_BINDINGS },
     BindingGroup { name: "Card Detail", bindings: DETAIL_BINDINGS },
 ];
 
@@ -298,6 +320,7 @@ pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
         Mode::Column => COLUMN_BINDINGS,
         Mode::ColMove => COL_MOVE_BINDINGS,
         Mode::FilterMenu => FILTER_BINDINGS,
+        Mode::Template => TEMPLATE_BINDINGS,
         _ => &[],
     }
 }
@@ -937,5 +960,79 @@ mod tests {
         let entry = FILTER_BINDINGS.iter().find(|b| b.key == "d");
         assert!(entry.is_some(), "d binding missing from FILTER_BINDINGS");
         assert_eq!(entry.unwrap().description, "By overdue");
+    }
+
+    // ── Template mode bindings ──
+
+    #[test]
+    fn normal_t_enters_template_mode() {
+        assert_eq!(map_key(key(KeyCode::Char('t')), &Mode::Normal), Action::EnterTemplateMode);
+    }
+
+    #[test]
+    fn template_n_maps_to_template_new() {
+        assert_eq!(map_key(key(KeyCode::Char('n')), &Mode::Template), Action::TemplateNew);
+    }
+
+    #[test]
+    fn template_e_maps_to_template_edit() {
+        assert_eq!(map_key(key(KeyCode::Char('e')), &Mode::Template), Action::TemplateEdit);
+    }
+
+    #[test]
+    fn template_d_maps_to_template_delete() {
+        assert_eq!(map_key(key(KeyCode::Char('d')), &Mode::Template), Action::TemplateDelete);
+    }
+
+    #[test]
+    fn template_esc_is_noop() {
+        assert_eq!(map_key(key(KeyCode::Esc), &Mode::Template), Action::None);
+    }
+
+    #[test]
+    fn template_unmapped_key_is_noop() {
+        assert_eq!(map_key(key(KeyCode::Char('x')), &Mode::Template), Action::None);
+    }
+
+    #[test]
+    fn mode_bindings_template_returns_bindings() {
+        let bindings = mode_bindings(&Mode::Template);
+        assert!(!bindings.is_empty());
+        assert_eq!(bindings.len(), TEMPLATE_BINDINGS.len());
+    }
+
+    #[test]
+    fn template_bindings_contains_expected_keys() {
+        let keys: Vec<&str> = TEMPLATE_BINDINGS.iter().map(|b| b.key).collect();
+        assert!(keys.contains(&"n"));
+        assert!(keys.contains(&"e"));
+        assert!(keys.contains(&"d"));
+        assert!(keys.contains(&"r"));
+    }
+
+    #[test]
+    fn normal_bindings_contains_template_mode() {
+        let entry = NORMAL_BINDINGS.iter().find(|b| b.key == "t");
+        assert!(entry.is_some(), "t binding missing from NORMAL_BINDINGS");
+        assert_eq!(entry.unwrap().description, "Template mode");
+    }
+
+    #[test]
+    fn help_groups_contains_template() {
+        let group = HELP_GROUPS.iter().find(|g| g.name.contains("Template"));
+        assert!(group.is_some(), "Template group missing from HELP_GROUPS");
+        assert_eq!(group.unwrap().bindings.len(), TEMPLATE_BINDINGS.len());
+    }
+
+    #[test]
+    fn template_r_maps_to_template_rename() {
+        assert_eq!(map_key(key(KeyCode::Char('r')), &Mode::Template), Action::TemplateRename);
+    }
+
+    #[test]
+    fn template_bindings_rename_description() {
+        let entry = TEMPLATE_BINDINGS.iter().find(|b| b.key == "r");
+        assert!(entry.is_some(), "r binding missing from TEMPLATE_BINDINGS");
+        assert_eq!(entry.unwrap().description, "Rename template");
     }
 }

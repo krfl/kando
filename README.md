@@ -71,7 +71,7 @@ The interface is designed for speed. You don't need a mouse.
 Kando uses "minor modes" (inspired by the Helix text editor) to keep commands discoverable without memorizing dozens of keybindings:
 
 **Press `Space` to see available card actions:**
-- `n` - Create a new card
+- `n` - Create a new card (shows template picker when templates exist)
 - `d` - Delete the selected card
 - `e` - Edit card in your text editor ($EDITOR)
 - `t` - Edit tags
@@ -98,6 +98,12 @@ Kando uses "minor modes" (inspired by the Helix text editor) to keep commands di
   - `h`/`l` to shift
   - `g`/`e` for first/last
   - `1`-`9` for position
+
+**Press `t` to manage templates:**
+- `n` - Create a new template (opens in $EDITOR)
+- `e` - Edit an existing template
+- `d` - Delete a template
+- `a` - Create a new card from a template
 
 ### Searching and Filtering
 
@@ -157,7 +163,8 @@ kando sync-status
 
 How it works:
 - Kando creates a "shadow clone" of your git repo in a hidden directory
-- Changes are committed and pushed to your specified branch automatically
+- **TUI:** Changes are committed and pushed automatically as you work — no manual sync needed
+- **CLI:** Changes are written to disk only. Run `kando sync` after CLI mutations to push them to the remote
 - When offline, changes are saved locally and synced when you're back online
 - Each team member can work on the same board, and changes merge automatically
 
@@ -200,11 +207,16 @@ kando config archive-after-days 7
 
 ## Command Line Interface
 
-Kando isn't just a TUI. You can also manage cards from the command line for scripting and automation:
+Kando isn't just a TUI. You can also manage cards from the command line for scripting and automation.
+
+**Important:** CLI commands write changes to disk but do not automatically sync with the remote. If your board uses git sync, run `kando sync` after any mutations to push your changes.
 
 ```sh
 # Add a card
 kando add "Fix login bug" -t bug,auth -p high -a alice
+
+# Add a card from a template
+kando add "Login crash" --template bug
 
 # List all cards (filter with --column, --tag)
 kando list
@@ -220,6 +232,9 @@ kando edit 3 --priority high --tag-add backend --assignee-add alice
 
 # Delete a card (soft-delete, recoverable from trash)
 kando delete 3
+
+# Sync changes to remote (required after CLI mutations)
+kando sync
 ```
 
 ### Column management
@@ -230,6 +245,18 @@ kando col rename "in-progress" "Doing"
 kando col move "Doing" 2
 kando col hide backlog
 ```
+
+### Templates
+Templates reduce friction for recurring card types like bugs, features, or chores. They are stored as `.md` files with TOML frontmatter in `.kando/templates/` and can set priority, tags, assignees, blocked status, due date offset, and body content.
+
+```sh
+kando template list              # list all templates
+kando template add "Bug Report"  # create and open in $EDITOR
+kando template edit bug-report   # edit an existing template
+kando template remove bug-report # delete a template
+```
+
+When creating a card with `--template`, the template's fields are applied first. Explicit CLI flags (`--priority`, `--due`) override the template values, while `--tags` and `--assignee` are merged with the template's values.
 
 ### Archive and trash
 ```sh
@@ -288,6 +315,7 @@ kando --json doctor
 kando --json log
 kando --json add "New card" -t bug
 kando --json move 001 done
+kando --json template list
 ```
 
 Mutation commands return result objects (e.g. `{"id", "title", "column"}`). Read commands return arrays or objects. `--json` is ignored by commands that don't produce data output (`init`, `sync`).
@@ -304,6 +332,7 @@ kando trash --csv
 kando archive list --csv
 kando archive search "login" --csv
 kando metrics --csv
+kando template list --csv
 ```
 
 This makes it easy to pipe board data into other tools:

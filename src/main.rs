@@ -51,11 +51,14 @@ enum Command {
         #[arg(short, long, value_delimiter = ',')]
         assignee: Vec<String>,
         /// Priority (low, normal, high, urgent)
-        #[arg(short, long, default_value = "normal")]
-        priority: Priority,
+        #[arg(short, long)]
+        priority: Option<Priority>,
         /// Due date (YYYY-MM-DD)
         #[arg(short = 'D', long)]
         due: Option<String>,
+        /// Apply a card template (name or slug)
+        #[arg(long, short = 'T')]
+        template: Option<String>,
     },
     /// List all cards
     List {
@@ -174,6 +177,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<ColAction>,
     },
+    /// Manage card templates
+    Template {
+        #[command(subcommand)]
+        action: Option<TemplateAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -260,6 +268,31 @@ enum ColAction {
     Show {
         /// Column to show (slug or name)
         column: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TemplateAction {
+    /// List all templates
+    List {
+        /// Output in CSV format for piping to other tools
+        #[arg(long, conflicts_with = "json")]
+        csv: bool,
+    },
+    /// Create a new template and open in $EDITOR
+    Add {
+        /// Template display name
+        name: String,
+    },
+    /// Edit an existing template in $EDITOR
+    Edit {
+        /// Template name or slug
+        name: String,
+    },
+    /// Remove a template
+    Remove {
+        /// Template name or slug
+        name: String,
     },
 }
 
@@ -515,7 +548,8 @@ fn main() {
             assignee,
             priority,
             due,
-        }) => cmd_add(&cwd, &title, tags, assignee, priority, due.as_deref(), json),
+            template,
+        }) => cmd_add(&cwd, &title, tags, assignee, priority, due.as_deref(), template.as_deref(), json),
         Some(Command::List { tag, column, overdue, csv }) => cmd_list(&cwd, tag.as_deref(), column.as_deref(), overdue, json, csv),
         Some(Command::Delete { card_id }) => cmd_delete(&cwd, &card_id, json),
         Some(Command::Edit {
@@ -571,6 +605,7 @@ fn main() {
         Some(Command::Log { stream, follow }) => cmd_log(&cwd, stream, json, follow),
         Some(Command::Archive { action }) => cmd_archive(&cwd, action, json),
         Some(Command::Col { action }) => cmd_col_cli(&cwd, action, json),
+        Some(Command::Template { action }) => cmd_template_cli(&cwd, action, json),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
 
@@ -719,13 +754,15 @@ fn ensure_git_repo<'a>(cwd: &Path, branch: &'a str) -> color_eyre::Result<Option
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_add(
     cwd: &Path,
     title: &str,
     tags: Vec<String>,
     assignees: Vec<String>,
-    priority: Priority,
+    priority: Option<Priority>,
     due: Option<&str>,
+    template: Option<&str>,
     json: bool,
 ) -> color_eyre::Result<()> {
     let kando_dir = find_kando_dir(cwd)?;
@@ -733,17 +770,47 @@ fn cmd_add(
 
     let id = board.next_card_id();
     let mut card = Card::new(id.clone(), title.to_string());
-    card.priority = priority;
-    card.tags = tags
+
+    // Apply template if specified
+    if let Some(tmpl_name) = template {
+        use board::storage::find_template;
+        if let Some((_, tmpl)) = find_template(&kando_dir, tmpl_name) {
+            card.priority = tmpl.priority;
+            card.tags = tmpl.tags.clone();
+            card.assignees = tmpl.assignees.clone();
+            card.blocked = tmpl.blocked;
+            if let Some(offset) = tmpl.due_offset_days {
+                let today = chrono::Utc::now().date_naive();
+                card.due = today.checked_add_days(chrono::Days::new(offset as u64));
+            }
+            card.body = tmpl.body.clone();
+        } else {
+            bail!("Template not found: {tmpl_name}");
+        }
+    }
+
+    // Explicit CLI flags override template values
+    card.priority = priority.unwrap_or(card.priority);
+
+    // Tags/assignees from CLI are added to template values
+    let mut cli_tags: Vec<String> = tags
         .into_iter()
         .map(|t| t.trim().to_lowercase())
         .filter(|t| !t.is_empty())
         .collect();
-    card.assignees = assignees
+    card.tags.append(&mut cli_tags);
+    card.tags.sort();
+    card.tags.dedup();
+
+    let mut cli_assignees: Vec<String> = assignees
         .into_iter()
         .map(|a| a.trim().to_lowercase())
         .filter(|a| !a.is_empty())
         .collect();
+    card.assignees.append(&mut cli_assignees);
+    card.assignees.sort();
+    card.assignees.dedup();
+
     if let Some(due_str) = due {
         card.due = Some(
             chrono::NaiveDate::parse_from_str(due_str, "%Y-%m-%d")
@@ -1792,7 +1859,7 @@ fn cmd_trash(cwd: &Path, action: Option<TrashAction>, json: bool, csv: bool) -> 
                 return Ok(());
             }
             let count = entries.len();
-            let trash_dir = kando_dir.join(".trash");
+            let trash_dir = kando_dir.join("trash");
             for entry in &entries {
                 let card_file = trash_dir.join(format!("{}.md", entry.id));
                 let _ = std::fs::remove_file(card_file);
@@ -2782,6 +2849,150 @@ fn format_follow_line(line: &str) -> String {
     }
 }
 
+fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> color_eyre::Result<()> {
+    use board::storage::{load_templates, find_template, save_template, delete_template};
+    use board::{generate_template_slug, slug_to_name, Template};
+
+    let kando_dir = find_kando_dir(cwd)?;
+
+    match action {
+        None | Some(TemplateAction::List { .. }) => {
+            let csv_mode = matches!(action, Some(TemplateAction::List { csv: true }));
+            let templates = load_templates(&kando_dir);
+
+            if json {
+                #[derive(Serialize)]
+                struct TemplateEntry {
+                    slug: String,
+                    name: String,
+                    priority: Priority,
+                    tags: Vec<String>,
+                    assignees: Vec<String>,
+                    blocked: bool,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    due_offset_days: Option<u32>,
+                }
+                let entries: Vec<TemplateEntry> = templates.iter().map(|(slug, t)| TemplateEntry {
+                    slug: slug.clone(),
+                    name: slug_to_name(slug),
+                    priority: t.priority,
+                    tags: t.tags.clone(),
+                    assignees: t.assignees.clone(),
+                    blocked: t.blocked,
+                    due_offset_days: t.due_offset_days,
+                }).collect();
+                return print_json(&entries);
+            }
+
+            if csv_mode {
+                let rows: Vec<Vec<String>> = templates.iter().map(|(slug, t)| {
+                    vec![
+                        slug.clone(),
+                        slug_to_name(slug),
+                        t.priority.as_str().to_string(),
+                        t.tags.join(";"),
+                        t.assignees.join(";"),
+                        t.blocked.to_string(),
+                        t.due_offset_days.map(|d| d.to_string()).unwrap_or_default(),
+                    ]
+                }).collect();
+                return print_csv(
+                    &["slug", "name", "priority", "tags", "assignees", "blocked", "due_offset_days"],
+                    &rows,
+                );
+            }
+
+            if templates.is_empty() {
+                println!("No templates.");
+                return Ok(());
+            }
+            for (slug, t) in &templates {
+                let tags_str = if t.tags.is_empty() { String::new() } else { format!(" [{}]", t.tags.join(", ")) };
+                let priority_str = if t.priority == Priority::Normal { String::new() } else { format!(" ({})", t.priority.as_str()) };
+                let due_str = t.due_offset_days.map(|d| format!(" +{d}d")).unwrap_or_default();
+                println!("  {slug}: {}{priority_str}{tags_str}{due_str}", slug_to_name(slug));
+            }
+            Ok(())
+        }
+        Some(TemplateAction::Add { name }) => {
+            let templates = load_templates(&kando_dir);
+            let existing_slugs: Vec<String> = templates.iter().map(|(s, _)| s.clone()).collect();
+            let slug = generate_template_slug(&name, &existing_slugs);
+            let tmpl = Template {
+                priority: Priority::Normal,
+                tags: Vec::new(),
+                assignees: Vec::new(),
+                blocked: false,
+                due_offset_days: None,
+                body: String::new(),
+            };
+            let path = save_template(&kando_dir, &slug, &tmpl)?;
+
+            if json {
+                return print_json(&serde_json::json!({
+                    "slug": slug,
+                    "name": slug_to_name(&slug),
+                    "path": path.display().to_string(),
+                }));
+            }
+
+            println!("Created template: {slug}");
+
+            // Open in $EDITOR
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+            let editor_trimmed = editor.trim();
+            if !editor_trimmed.is_empty() {
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!("{editor_trimmed} \"$1\""))
+                    .arg("--")
+                    .arg(&path)
+                    .status()?;
+                if !status.success() {
+                    eprintln!("Warning: editor exited with {status}");
+                }
+            }
+            Ok(())
+        }
+        Some(TemplateAction::Edit { name }) => {
+            let (slug, _) = find_template(&kando_dir, &name)
+                .ok_or_else(|| color_eyre::eyre::eyre!("Template not found: {name}"))?;
+            let path = kando_dir.join("templates").join(format!("{slug}.md"));
+
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+            let editor_trimmed = editor.trim();
+            if editor_trimmed.is_empty() {
+                bail!("$EDITOR is not set");
+            }
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{editor_trimmed} \"$1\""))
+                .arg("--")
+                .arg(&path)
+                .status()?;
+            if !status.success() {
+                eprintln!("Warning: editor exited with {status}");
+            }
+            Ok(())
+        }
+        Some(TemplateAction::Remove { name }) => {
+            let (slug, _) = find_template(&kando_dir, &name)
+                .ok_or_else(|| color_eyre::eyre::eyre!("Template not found: {name}"))?;
+            delete_template(&kando_dir, &slug)?;
+
+            if json {
+                return print_json(&serde_json::json!({
+                    "slug": slug,
+                    "name": slug_to_name(&slug),
+                }));
+            }
+
+            println!("Removed template: {} ({})", slug_to_name(&slug), slug);
+            Ok(())
+        }
+    }
+}
+
 fn cmd_tui(cwd: &Path, nerd_font_flag: bool) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
     let result = app::run(&mut terminal, cwd, nerd_font_flag);
@@ -3520,7 +3731,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
         cmd_delete(dir.path(), &id, false).unwrap();
-        let trash_file = kando_dir.join(".trash").join(format!("{id}.md"));
+        let trash_file = kando_dir.join("trash").join(format!("{id}.md"));
         assert!(trash_file.exists(), "card file should be in trash, not permanently deleted");
         // Also verify the trash metadata entry was recorded
         let entries = board::storage::load_trash(&kando_dir);
@@ -3668,7 +3879,7 @@ mod tests {
     fn cmd_add_with_due_date_sets_field() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        cmd_add(dir.path(), "Due task", vec![], vec![], Priority::Normal, Some("2025-12-31"), false).unwrap();
+        cmd_add(dir.path(), "Due task", vec![], vec![], Some(Priority::Normal), Some("2025-12-31"), None, false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         let card = &board.columns[0].cards[0];
@@ -3679,7 +3890,7 @@ mod tests {
     fn cmd_add_with_invalid_due_date_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        let result = cmd_add(dir.path(), "Bad date", vec![], vec![], Priority::Normal, Some("not-a-date"), false);
+        let result = cmd_add(dir.path(), "Bad date", vec![], vec![], Some(Priority::Normal), Some("not-a-date"), None, false);
         assert!(result.is_err());
     }
 
@@ -3687,7 +3898,7 @@ mod tests {
     fn cmd_add_without_due_date_field_is_none() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        cmd_add(dir.path(), "No due", vec![], vec![], Priority::Normal, None, false).unwrap();
+        cmd_add(dir.path(), "No due", vec![], vec![], Some(Priority::Normal), None, None, false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         assert!(board.columns[0].cards[0].due.is_none());
@@ -5038,9 +5249,9 @@ mod tests {
         board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         // Add one overdue card and one non-overdue card
-        cmd_add(dir.path(), "Overdue task", vec![], vec![], Priority::Normal, Some("2020-01-01"), false).unwrap();
-        cmd_add(dir.path(), "Future task", vec![], vec![], Priority::Normal, Some("2099-12-31"), false).unwrap();
-        cmd_add(dir.path(), "No due task", vec![], vec![], Priority::Normal, None, false).unwrap();
+        cmd_add(dir.path(), "Overdue task", vec![], vec![], Some(Priority::Normal), Some("2020-01-01"), None, false).unwrap();
+        cmd_add(dir.path(), "Future task", vec![], vec![], Some(Priority::Normal), Some("2099-12-31"), None, false).unwrap();
+        cmd_add(dir.path(), "No due task", vec![], vec![], Some(Priority::Normal), None, None, false).unwrap();
         // With --overdue, only the overdue card should appear
         assert!(cmd_list(dir.path(), None, None, true, false, false).is_ok());
         let board = load_board(&kando_dir).unwrap();
@@ -5053,14 +5264,14 @@ mod tests {
     fn cmd_add_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        assert!(cmd_add(dir.path(), "JSON card", vec!["test".into()], vec![], Priority::Normal, None, true).is_ok());
+        assert!(cmd_add(dir.path(), "JSON card", vec!["test".into()], vec![], Some(Priority::Normal), None, None, true).is_ok());
     }
 
     #[test]
     fn cmd_add_json_card_actually_created() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        cmd_add(dir.path(), "JSON card", vec![], vec![], Priority::Normal, None, true).unwrap();
+        cmd_add(dir.path(), "JSON card", vec![], vec![], Some(Priority::Normal), None, None, true).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         let total: usize = board.columns.iter().map(|c| c.cards.len()).sum();
@@ -5463,5 +5674,249 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_metrics(dir.path(), None, true, false).is_ok());
+    }
+
+    // ── Template CLI tests ──
+
+    #[test]
+    fn cmd_template_list_empty_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        assert!(cmd_template_cli(dir.path(), None, false).is_ok());
+    }
+
+    #[test]
+    fn cmd_template_list_json_empty_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        assert!(cmd_template_cli(dir.path(), None, true).is_ok());
+    }
+
+    #[test]
+    fn cmd_template_list_csv_empty_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        assert!(cmd_template_cli(
+            dir.path(),
+            Some(TemplateAction::List { csv: true }),
+            false,
+        ).is_ok());
+    }
+
+    fn create_test_template(kando_dir: &Path, name: &str) -> String {
+        use board::storage::save_template;
+        use board::{generate_template_slug, Template};
+        let templates = board::storage::load_templates(kando_dir);
+        let existing: Vec<String> = templates.iter().map(|(s, _)| s.clone()).collect();
+        let slug = generate_template_slug(name, &existing);
+        let tmpl = Template {
+            priority: Priority::Normal,
+            tags: Vec::new(),
+            assignees: Vec::new(),
+            blocked: false,
+            due_offset_days: None,
+            body: String::new(),
+        };
+        save_template(kando_dir, &slug, &tmpl).unwrap();
+        slug
+    }
+
+    #[test]
+    fn cmd_template_list_with_templates_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        create_test_template(&kando_dir, "Bug Report");
+        assert!(cmd_template_cli(dir.path(), None, false).is_ok());
+    }
+
+    #[test]
+    fn cmd_template_list_json_with_templates_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        create_test_template(&kando_dir, "Bug Report");
+        assert!(cmd_template_cli(dir.path(), None, true).is_ok());
+    }
+
+    #[test]
+    fn cmd_template_remove_existing_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        create_test_template(&kando_dir, "Feature");
+        assert!(cmd_template_cli(
+            dir.path(),
+            Some(TemplateAction::Remove { name: "feature".to_string() }),
+            false,
+        ).is_ok());
+        // Verify it's gone
+        let templates = board::storage::load_templates(&kando_dir);
+        assert!(templates.is_empty());
+    }
+
+    #[test]
+    fn cmd_template_remove_nonexistent_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let result = cmd_template_cli(
+            dir.path(),
+            Some(TemplateAction::Remove { name: "nope".to_string() }),
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_template_remove_json_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        create_test_template(&kando_dir, "Bug");
+        assert!(cmd_template_cli(
+            dir.path(),
+            Some(TemplateAction::Remove { name: "bug".to_string() }),
+            true,
+        ).is_ok());
+    }
+
+    #[test]
+    fn cmd_add_with_template_applies_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Create a template with specific fields
+        use board::{Template, generate_template_slug};
+        use board::storage::save_template;
+        let tmpl = Template {
+            priority: Priority::High,
+            tags: vec!["bug".to_string()],
+            assignees: vec!["alice".to_string()],
+            blocked: true,
+            due_offset_days: Some(7),
+            body: "## Steps\n\n## Expected\n".to_string(),
+        };
+        let slug = generate_template_slug("Bug", &[]);
+        save_template(&kando_dir, &slug, &tmpl).unwrap();
+
+        cmd_add(dir.path(), "Login crash", vec![], vec![], None, None, Some("bug"), false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert_eq!(card.priority, Priority::High);
+        assert_eq!(card.tags, vec!["bug"]);
+        assert_eq!(card.assignees, vec!["alice"]);
+        assert!(card.blocked);
+        // due_offset_days=7 means today + 7 days
+        let expected_due = chrono::Utc::now().date_naive()
+            .checked_add_days(chrono::Days::new(7)).unwrap();
+        assert_eq!(card.due, Some(expected_due));
+        // Body trailing newline is trimmed by parse_frontmatter on card reload
+        assert_eq!(card.body, "## Steps\n\n## Expected");
+    }
+
+    #[test]
+    fn cmd_add_with_template_cli_priority_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        use board::{Template, generate_template_slug};
+        use board::storage::save_template;
+        let tmpl = Template {
+            priority: Priority::High,
+            tags: vec!["bug".to_string()],
+            assignees: Vec::new(),
+            blocked: false,
+            due_offset_days: None,
+            body: String::new(),
+        };
+        save_template(&kando_dir, &generate_template_slug("Bug", &[]), &tmpl).unwrap();
+
+        cmd_add(dir.path(), "Override", vec![], vec![], Some(Priority::Urgent), None, Some("bug"), false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert_eq!(card.priority, Priority::Urgent);
+    }
+
+    #[test]
+    fn cmd_add_with_template_cli_tags_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        use board::{Template, generate_template_slug};
+        use board::storage::save_template;
+        let tmpl = Template {
+            priority: Priority::Normal,
+            tags: vec!["bug".to_string()],
+            assignees: vec!["alice".to_string()],
+            blocked: false,
+            due_offset_days: None,
+            body: String::new(),
+        };
+        save_template(&kando_dir, &generate_template_slug("Bug", &[]), &tmpl).unwrap();
+
+        cmd_add(
+            dir.path(),
+            "Merged",
+            vec!["urgent".to_string()],
+            vec!["bob".to_string()],
+            None,
+            None,
+            Some("bug"),
+            false,
+        ).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert!(card.tags.contains(&"bug".to_string()));
+        assert!(card.tags.contains(&"urgent".to_string()));
+        assert!(card.assignees.contains(&"alice".to_string()));
+        assert!(card.assignees.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn cmd_add_with_nonexistent_template_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let result = cmd_add(dir.path(), "Fail", vec![], vec![], None, None, Some("nope"), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cmd_add_with_template_due_override() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        use board::{Template, generate_template_slug};
+        use board::storage::save_template;
+        let tmpl = Template {
+            priority: Priority::Normal,
+            tags: Vec::new(),
+            assignees: Vec::new(),
+            blocked: false,
+            due_offset_days: Some(7),
+            body: String::new(),
+        };
+        save_template(&kando_dir, &generate_template_slug("Bug", &[]), &tmpl).unwrap();
+
+        // Explicit --due overrides template's due_offset_days
+        cmd_add(dir.path(), "Explicit due", vec![], vec![], None, Some("2025-12-25"), Some("bug"), false).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        let card = &board.columns[0].cards[0];
+        assert_eq!(card.due, Some(chrono::NaiveDate::from_ymd_opt(2025, 12, 25).unwrap()));
+    }
+
+    #[test]
+    fn cmd_template_edit_nonexistent_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let result = cmd_template_cli(
+            dir.path(),
+            Some(TemplateAction::Edit { name: "nope".to_string() }),
+            false,
+        );
+        assert!(result.is_err());
     }
 }

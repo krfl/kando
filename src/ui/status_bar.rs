@@ -51,6 +51,7 @@ fn build_left_zone(state: &AppState) -> Vec<Span<'_>> {
         Mode::Metrics { .. } => "METRICS",
         Mode::Tutorial { .. } => "TUTORIAL",
         Mode::Help { .. } => "HELP",
+        Mode::Template => "TEMPLATE",
         Mode::Picker { .. } => "PICKER",
         // Full-line modes handled separately
         Mode::Input { .. } | Mode::Confirm { .. } | Mode::Filter { .. } => "",
@@ -398,5 +399,13 @@ mod tests {
         let icons = super::super::theme::icons(false);
         assert_eq!(spans[2].content.as_ref(), icons.sync_offline);
         assert_eq!(spans[2].style.fg, Some(Theme::WIP_OVER));
+    }
+
+    #[test]
+    fn left_zone_template_mode_shows_badge() {
+        let mut state = AppState::new();
+        state.mode = Mode::Template;
+        let spans = build_left_zone(&state);
+        assert_eq!(spans[0].content.as_ref(), " TEMPLATE ");
     }
 }
