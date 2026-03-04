@@ -293,13 +293,18 @@ pub fn commit_and_push(state: &mut SyncState, kando_dir: &Path, message: &str) {
         .args(["commit", "-m", message])
         .output();
 
-    if let Ok(out) = commit_result {
-        if !out.status.success() {
+    match commit_result {
+        Ok(out) if !out.status.success() => {
             state.last_error = Some(
                 String::from_utf8_lossy(&out.stderr).trim().to_string()
             );
             return;
         }
+        Err(e) => {
+            state.last_error = Some(format!("git commit failed: {e}"));
+            return;
+        }
+        _ => {}
     }
 
     // Push
@@ -323,6 +328,153 @@ pub fn commit_and_push(state: &mut SyncState, kando_dir: &Path, message: &str) {
             state.last_error = Some(format!("git push failed: {e}"));
         }
     }
+}
+
+/// Initialize a shadow clone for a git-synced board (no local `.kando/` dir needed).
+///
+/// Unlike `init_shadow`, this derives the repo info from the project root
+/// rather than from a `.kando/` directory.
+pub fn init_shadow_for_gitsync(project_root: &Path, branch: &str) -> Result<SyncState, SyncError> {
+    let git_root = find_git_root(project_root).ok_or(SyncError::NotGitRepo)?;
+    let remote_url = get_remote_url(&git_root)?;
+    let shadow_path = shadow_dir_for(&remote_url);
+
+    let ssh_warning = if check_ssh_agent(&remote_url) {
+        Some("No ssh-agent keys found. Run `ssh-add` to avoid passphrase prompts.".to_string())
+    } else {
+        None
+    };
+
+    if shadow_path.join(".git").exists() {
+        let shadow_remote = get_remote_url(&shadow_path).unwrap_or_default();
+        if shadow_remote != remote_url {
+            std::fs::remove_dir_all(&shadow_path)?;
+            clone_shadow(&remote_url, &shadow_path, branch)?;
+        } else {
+            let _ = git_cmd(&shadow_path)
+                .args(["checkout", branch])
+                .output();
+            let _ = git_cmd(&shadow_path)
+                .args(["branch", "--set-upstream-to", &format!("origin/{branch}"), branch])
+                .output();
+        }
+    } else {
+        clone_shadow(&remote_url, &shadow_path, branch)?;
+    }
+
+    Ok(SyncState {
+        shadow_path,
+        branch: branch.to_string(),
+        online: true,
+        last_error: ssh_warning,
+    })
+}
+
+/// Pull latest changes in shadow (no copy to working tree — shadow IS the data).
+pub fn pull_shadow(state: &mut SyncState) -> SyncStatus {
+    let output = git_cmd(&state.shadow_path)
+        .args(["pull", "--rebase", "--autostash"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            state.online = true;
+            state.last_error = None;
+
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+
+            if stdout.contains("Already up to date") || stderr.contains("Already up to date") {
+                SyncStatus::AlreadyUpToDate
+            } else {
+                SyncStatus::Updated
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("no tracking information") {
+                state.online = true;
+                state.last_error = None;
+                SyncStatus::AlreadyUpToDate
+            } else {
+                state.online = false;
+                state.last_error = Some(stderr.trim().to_string());
+                SyncStatus::Offline
+            }
+        }
+        Err(e) => {
+            state.online = false;
+            state.last_error = Some(format!("git pull failed: {e}"));
+            SyncStatus::Offline
+        }
+    }
+}
+
+/// Commit and push changes in the shadow (shadow IS the source, no copy needed).
+pub fn commit_and_push_shadow(state: &mut SyncState, message: &str) {
+    // Stage all changes
+    let _ = git_cmd(&state.shadow_path)
+        .args(["add", "-A", ".kando/"])
+        .output();
+
+    // Check if there are changes to commit
+    let diff_output = git_cmd(&state.shadow_path)
+        .args(["diff", "--cached", "--quiet"])
+        .output();
+
+    match diff_output {
+        Ok(out) if out.status.success() => {
+            // No changes staged
+            return;
+        }
+        _ => {}
+    }
+
+    // Commit
+    let commit_result = git_cmd(&state.shadow_path)
+        .args(["commit", "-m", message])
+        .output();
+
+    match commit_result {
+        Ok(out) if !out.status.success() => {
+            state.last_error = Some(
+                String::from_utf8_lossy(&out.stderr).trim().to_string()
+            );
+            return;
+        }
+        Err(e) => {
+            state.last_error = Some(format!("git commit failed: {e}"));
+            return;
+        }
+        _ => {}
+    }
+
+    // Push
+    let push_result = git_cmd(&state.shadow_path)
+        .args(["push", "origin", &state.branch])
+        .output();
+
+    match push_result {
+        Ok(out) if out.status.success() => {
+            state.online = true;
+            state.last_error = None;
+        }
+        Ok(out) => {
+            state.online = false;
+            state.last_error = Some(
+                String::from_utf8_lossy(&out.stderr).trim().to_string()
+            );
+        }
+        Err(e) => {
+            state.online = false;
+            state.last_error = Some(format!("git push failed: {e}"));
+        }
+    }
+}
+
+/// Public wrapper for `copy_dir_contents` for use by the migrate command.
+pub fn copy_dir_contents_pub(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_dir_contents(src, dst)
 }
 
 /// Recursively copy directory contents from src to dst.

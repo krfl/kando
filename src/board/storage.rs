@@ -5,7 +5,52 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{slug_to_name, Board, Card, Column, Policies, Template};
-use crate::config::BoardConfig;
+use crate::config::{BoardConfig, KandoToml};
+
+#[derive(Debug, Clone)]
+pub enum BoardMode {
+    Local,
+    GitSync {
+        #[allow(dead_code)]
+        shadow_root: PathBuf,
+        branch: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct BoardContext {
+    /// Path to `.kando/` (local dir or shadow dir).
+    pub kando_dir: PathBuf,
+    /// Project root (parent of `.kando/` or `.kando.toml`).
+    pub project_root: PathBuf,
+    pub mode: BoardMode,
+}
+
+impl BoardContext {
+    pub fn is_git_sync(&self) -> bool {
+        matches!(self.mode, BoardMode::GitSync { .. })
+    }
+
+    /// Push changes to remote, dispatching based on board mode.
+    pub fn sync_push(&self, ss: &mut crate::board::sync::SyncState, msg: &str) {
+        match &self.mode {
+            BoardMode::GitSync { .. } => {
+                crate::board::sync::commit_and_push_shadow(ss, msg);
+            }
+            BoardMode::Local => {
+                crate::board::sync::commit_and_push(ss, &self.kando_dir, msg);
+            }
+        }
+    }
+
+    /// Pull changes from remote, dispatching based on board mode.
+    pub fn sync_pull(&self, ss: &mut crate::board::sync::SyncState) -> crate::board::sync::SyncStatus {
+        match &self.mode {
+            BoardMode::GitSync { .. } => crate::board::sync::pull_shadow(ss),
+            BoardMode::Local => crate::board::sync::pull(ss, &self.kando_dir),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -17,6 +62,8 @@ pub enum StorageError {
     TomlDe(#[from] toml::de::Error),
     #[error(".kando directory not found (walk up from {0})")]
     NotFound(PathBuf),
+    #[error("broken git-sync: .kando.toml found at {toml_path} but {reason}")]
+    BrokenGitSync { toml_path: PathBuf, reason: String },
     #[error("invalid card file {path}: {reason}")]
     InvalidCard { path: PathBuf, reason: String },
     #[error("invalid slug: {0:?} (must match [a-z0-9-]+)")]
@@ -50,14 +97,136 @@ pub fn find_kando_dir(start: &Path) -> Result<PathBuf, StorageError> {
     }
 }
 
-/// Initialize a new .kando directory with default config and columns.
-pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<PathBuf, StorageError> {
-    let kando_dir = root.join(".kando");
-    fs::create_dir_all(&kando_dir)?;
+/// Find the `.kando.toml` marker by walking up from `start`.
+fn find_kando_toml(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join(".kando.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
 
-    let columns_dir = kando_dir.join("columns");
+/// Check if the current directory's git repo has a `kando` branch (local or remote).
+fn has_kando_branch(git_root: &Path) -> Option<String> {
+    use std::process::Command;
 
-    let default_columns = vec![
+    // Check local branches
+    let output = Command::new("git")
+        .args(["branch", "--list", "kando"])
+        .current_dir(git_root)
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.lines().any(|l| {
+        let trimmed = l.trim();
+        trimmed == "kando" || trimmed == "* kando"
+    }) {
+        return Some("kando".to_string());
+    }
+
+    // Check remote branches
+    let output = Command::new("git")
+        .args(["branch", "-r", "--list", "origin/kando"])
+        .current_dir(git_root)
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.lines().any(|l| l.trim() == "origin/kando") {
+        return Some("kando".to_string());
+    }
+
+    None
+}
+
+/// Resolve the board context by searching for `.kando.toml` (git-synced) or `.kando/` (local).
+///
+/// Resolution order:
+/// 1. Walk up looking for `.kando.toml` → GitSync mode (shadow-primary)
+/// 2. Walk up looking for `.kando/` directory → Local mode
+/// 3. Check for `kando` branch in git repo → auto-bootstrap GitSync
+/// 4. Error: no board found
+pub fn resolve_board(start: &Path) -> Result<BoardContext, StorageError> {
+    use crate::board::sync;
+
+    // 1. Look for .kando.toml (git-synced board)
+    if let Some(toml_path) = find_kando_toml(start) {
+        let project_root = toml_path.parent().unwrap().to_path_buf();
+        let toml_str = fs::read_to_string(&toml_path)?;
+        let kando_toml: KandoToml = toml::from_str(&toml_str)?;
+
+        let git_root = sync::find_git_root(&project_root)
+            .ok_or_else(|| StorageError::BrokenGitSync {
+                toml_path: toml_path.clone(),
+                reason: "no git repository found".to_string(),
+            })?;
+        let remote_url = sync::get_remote_url(&git_root).map_err(|_| {
+            StorageError::BrokenGitSync {
+                toml_path: toml_path.clone(),
+                reason: "no git remote configured".to_string(),
+            }
+        })?;
+        let shadow_root = sync::shadow_dir_for(&remote_url);
+        let kando_dir = shadow_root.join(".kando");
+
+        return Ok(BoardContext {
+            kando_dir,
+            project_root,
+            mode: BoardMode::GitSync {
+                shadow_root,
+                branch: kando_toml.branch,
+            },
+        });
+    }
+
+    // 2. Look for .kando/ directory (local board)
+    if let Ok(kando_dir) = find_kando_dir(start) {
+        let project_root = kando_dir.parent().unwrap().to_path_buf();
+        return Ok(BoardContext {
+            kando_dir,
+            project_root,
+            mode: BoardMode::Local,
+        });
+    }
+
+    // 3. Check for kando branch in git repo (auto-bootstrap)
+    if let Some(git_root) = sync::find_git_root(start) {
+        if let Some(branch) = has_kando_branch(&git_root) {
+            if let Ok(remote_url) = sync::get_remote_url(&git_root) {
+                let shadow_root = sync::shadow_dir_for(&remote_url);
+                let kando_dir = shadow_root.join(".kando");
+                let project_root = git_root.clone();
+
+                // Write .kando.toml for future discovery
+                let kando_toml = KandoToml { branch: branch.clone() };
+                let toml_str = toml::to_string_pretty(&kando_toml).unwrap_or_else(|_| {
+                    format!("branch = \"{branch}\"\n")
+                });
+                let _ = fs::write(git_root.join(".kando.toml"), toml_str);
+
+                return Ok(BoardContext {
+                    kando_dir,
+                    project_root,
+                    mode: BoardMode::GitSync {
+                        shadow_root,
+                        branch,
+                    },
+                });
+            }
+        }
+    }
+
+    // 4. No board found
+    Err(StorageError::NotFound(start.to_path_buf()))
+}
+
+/// Default column definitions for a new board.
+fn default_columns() -> Vec<ColumnConfig> {
+    vec![
         ColumnConfig {
             slug: "backlog".into(),
             name: "Backlog".into(),
@@ -86,10 +255,17 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
             wip_limit: None,
             hidden: Some(true),
         },
-    ];
+    ]
+}
 
-    // Create column directories with _meta.toml
-    for col in &default_columns {
+/// Initialize a new .kando directory at a specific target path with default config and columns.
+pub fn init_board_at(kando_dir: &Path, name: &str, sync_branch: Option<&str>) -> Result<PathBuf, StorageError> {
+    fs::create_dir_all(kando_dir)?;
+
+    let columns_dir = kando_dir.join("columns");
+    let cols = default_columns();
+
+    for col in &cols {
         let col_dir = columns_dir.join(&col.slug);
         fs::create_dir_all(&col_dir)?;
 
@@ -97,7 +273,6 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
         fs::write(col_dir.join("_meta.toml"), meta_str)?;
     }
 
-    // Write config.toml
     let config = BoardConfig {
         board: BoardSection {
             name: name.to_string(),
@@ -107,15 +282,19 @@ pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<
             nerd_font: false,
             created_at: Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         },
-        columns: default_columns,
+        columns: cols,
     };
     let config_str = toml::to_string_pretty(&config)?;
     fs::write(kando_dir.join("config.toml"), config_str)?;
 
-    // Create default local.toml (gitignored, per-user preferences)
-    save_local_config(&kando_dir, &crate::config::LocalConfig::default())?;
+    save_local_config(kando_dir, &crate::config::LocalConfig::default())?;
 
-    Ok(kando_dir)
+    Ok(kando_dir.to_path_buf())
+}
+
+/// Initialize a new .kando directory with default config and columns.
+pub fn init_board(root: &Path, name: &str, sync_branch: Option<&str>) -> Result<PathBuf, StorageError> {
+    init_board_at(&root.join(".kando"), name, sync_branch)
 }
 
 /// Load the full board from a .kando directory.
@@ -2508,5 +2687,325 @@ mod tests {
         // templates directory does not exist — rename should fail gracefully.
         let result = rename_template(&kando_dir, "bug", "defect");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // find_kando_toml tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_kando_toml_at_start_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = \"kando\"\n").unwrap();
+        let result = find_kando_toml(dir.path());
+        assert_eq!(result, Some(dir.path().join(".kando.toml")));
+    }
+
+    #[test]
+    fn find_kando_toml_walks_up() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = \"kando\"\n").unwrap();
+        let nested = dir.path().join("src/deep/nested");
+        fs::create_dir_all(&nested).unwrap();
+        let result = find_kando_toml(&nested);
+        assert_eq!(result, Some(dir.path().join(".kando.toml")));
+    }
+
+    #[test]
+    fn find_kando_toml_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = find_kando_toml(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_kando_toml_is_directory_not_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".kando.toml")).unwrap();
+        let result = find_kando_toml(dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_kando_toml_prefers_nearest_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = \"outer\"\n").unwrap();
+        let inner = dir.path().join("sub");
+        fs::create_dir(&inner).unwrap();
+        fs::write(inner.join(".kando.toml"), "branch = \"inner\"\n").unwrap();
+        let child = inner.join("deep");
+        fs::create_dir(&child).unwrap();
+        let result = find_kando_toml(&child);
+        assert_eq!(result, Some(inner.join(".kando.toml")));
+    }
+
+    // -----------------------------------------------------------------------
+    // BoardContext tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn board_context_is_git_sync_true_for_gitsync() {
+        let ctx = BoardContext {
+            kando_dir: PathBuf::from("/tmp/shadow/.kando"),
+            project_root: PathBuf::from("/tmp/project"),
+            mode: BoardMode::GitSync {
+                shadow_root: PathBuf::from("/tmp/shadow"),
+                branch: "kando".to_string(),
+            },
+        };
+        assert!(ctx.is_git_sync());
+    }
+
+    #[test]
+    fn board_context_is_git_sync_false_for_local() {
+        let ctx = BoardContext {
+            kando_dir: PathBuf::from("/tmp/project/.kando"),
+            project_root: PathBuf::from("/tmp/project"),
+            mode: BoardMode::Local,
+        };
+        assert!(!ctx.is_git_sync());
+    }
+
+    // -----------------------------------------------------------------------
+    // init_board_at tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn init_board_at_creates_kando_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join("custom/.kando");
+        init_board_at(&kando_dir, "Test", None).unwrap();
+        assert!(kando_dir.is_dir());
+    }
+
+    #[test]
+    fn init_board_at_creates_default_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        init_board_at(&kando_dir, "Test", None).unwrap();
+        let columns = kando_dir.join("columns");
+        assert!(columns.join("backlog").is_dir());
+        assert!(columns.join("in-progress").is_dir());
+        assert!(columns.join("done").is_dir());
+        assert!(columns.join("archive").is_dir());
+    }
+
+    #[test]
+    fn init_board_at_creates_config_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        init_board_at(&kando_dir, "MyBoard", None).unwrap();
+        assert!(kando_dir.join("config.toml").is_file());
+        let content = fs::read_to_string(kando_dir.join("config.toml")).unwrap();
+        assert!(content.contains("MyBoard"));
+    }
+
+    #[test]
+    fn init_board_at_with_sync_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        init_board_at(&kando_dir, "Test", Some("kando")).unwrap();
+        let content = fs::read_to_string(kando_dir.join("config.toml")).unwrap();
+        assert!(content.contains("sync_branch = \"kando\""));
+    }
+
+    #[test]
+    fn init_board_at_without_sync_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        init_board_at(&kando_dir, "Test", None).unwrap();
+        let content = fs::read_to_string(kando_dir.join("config.toml")).unwrap();
+        assert!(!content.contains("sync_branch"));
+    }
+
+    #[test]
+    fn init_board_at_board_is_loadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        init_board_at(&kando_dir, "Test", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.name, "Test");
+        assert_eq!(board.columns.len(), 4);
+    }
+
+    #[test]
+    fn init_board_at_returns_correct_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let result = init_board_at(&kando_dir, "Test", None).unwrap();
+        assert_eq!(result, kando_dir);
+    }
+
+    #[test]
+    fn init_board_at_and_init_board_produce_equivalent_boards() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+
+        init_board(dir1.path(), "Test", None).unwrap();
+        init_board_at(&dir2.path().join(".kando"), "Test", None).unwrap();
+
+        let board1 = load_board(&dir1.path().join(".kando")).unwrap();
+        let board2 = load_board(&dir2.path().join(".kando")).unwrap();
+
+        assert_eq!(board1.name, board2.name);
+        assert_eq!(board1.next_card_id, board2.next_card_id);
+        assert_eq!(board1.nerd_font, board2.nerd_font);
+        assert_eq!(board1.sync_branch, board2.sync_branch);
+        assert_eq!(board1.columns.len(), board2.columns.len());
+        for (c1, c2) in board1.columns.iter().zip(board2.columns.iter()) {
+            assert_eq!(c1.slug, c2.slug);
+            assert_eq!(c1.name, c2.name);
+            assert_eq!(c1.order, c2.order);
+            assert_eq!(c1.wip_limit, c2.wip_limit);
+            assert_eq!(c1.hidden, c2.hidden);
+            assert_eq!(c1.cards.len(), c2.cards.len());
+        }
+    }
+
+    #[test]
+    fn init_board_at_double_init_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let kando_dir = dir.path().join(".kando");
+        init_board_at(&kando_dir, "First", None).unwrap();
+        init_board_at(&kando_dir, "Second", None).unwrap();
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.name, "Second");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_board tests (local mode only, GitSync requires git remote)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_board_local_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let ctx = resolve_board(dir.path()).unwrap();
+        assert!(!ctx.is_git_sync());
+        assert_eq!(ctx.kando_dir, dir.path().join(".kando"));
+        assert_eq!(ctx.project_root, dir.path());
+    }
+
+    #[test]
+    fn resolve_board_local_from_nested_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let nested = dir.path().join("src/deep/nested");
+        fs::create_dir_all(&nested).unwrap();
+        let ctx = resolve_board(&nested).unwrap();
+        assert_eq!(ctx.kando_dir, dir.path().join(".kando"));
+    }
+
+    #[test]
+    fn resolve_board_no_board_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_board(dir.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::NotFound(_) => {}
+            other => panic!("Expected NotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_board_broken_git_sync_no_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = \"kando\"\n").unwrap();
+        let result = resolve_board(dir.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::BrokenGitSync { toml_path, reason } => {
+                assert!(reason.contains("no git repository"), "reason: {reason}");
+                assert_eq!(toml_path, dir.path().join(".kando.toml"));
+            }
+            other => panic!("Expected BrokenGitSync, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_board_broken_git_sync_no_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        // Init a git repo with no remote
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = \"kando\"\n").unwrap();
+        let result = resolve_board(dir.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::BrokenGitSync { reason, .. } => {
+                assert!(reason.contains("no git remote"), "reason: {reason}");
+            }
+            other => panic!("Expected BrokenGitSync, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_board_malformed_kando_toml_returns_toml_error() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = !!!\n").unwrap();
+        let result = resolve_board(dir.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::TomlDe(_) => {}
+            other => panic!("Expected TomlDe, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_board_empty_kando_toml_uses_default_branch_then_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".kando.toml"), "").unwrap();
+        let result = resolve_board(dir.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::BrokenGitSync { reason, .. } => {
+                assert!(reason.contains("no git repository"), "reason: {reason}");
+            }
+            other => panic!("Expected BrokenGitSync, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_board_broken_git_sync_from_nested_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = \"kando\"\n").unwrap();
+        let nested = dir.path().join("src/deep/nested");
+        fs::create_dir_all(&nested).unwrap();
+        let result = resolve_board(&nested);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::BrokenGitSync { toml_path, reason } => {
+                assert!(reason.contains("no git repository"), "reason: {reason}");
+                assert_eq!(toml_path, dir.path().join(".kando.toml"));
+            }
+            other => panic!("Expected BrokenGitSync, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn broken_git_sync_error_display_is_actionable() {
+        let err = StorageError::BrokenGitSync {
+            toml_path: PathBuf::from("/project/.kando.toml"),
+            reason: "no git remote configured".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(".kando.toml"), "should mention toml file: {msg}");
+        assert!(msg.contains("no git remote"), "should mention reason: {msg}");
+    }
+
+    #[test]
+    fn resolve_board_prefers_kando_toml_over_kando_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        fs::write(dir.path().join(".kando.toml"), "branch = \"kando\"\n").unwrap();
+        let result = resolve_board(dir.path());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StorageError::BrokenGitSync { .. } => {}
+            other => panic!("Expected BrokenGitSync, got: {other:?}"),
+        }
     }
 }

@@ -11,7 +11,7 @@ use color_eyre::eyre::{bail, WrapErr};
 
 use clap::{Parser, Subcommand};
 
-use board::storage::{append_activity, find_kando_dir, init_board, load_board, save_board, trash_card, remove_column_dir, rename_column_dir};
+use board::storage::{append_activity, init_board, init_board_at, load_board, resolve_board, save_board, trash_card, remove_column_dir, rename_column_dir, BoardContext, BoardMode};
 use board::{Card, Priority, generate_slug, normalize_column_orders, slug_for_rename, slug_to_name};
 
 #[derive(Parser)]
@@ -36,9 +36,9 @@ enum Command {
         /// Board name (defaults to current directory name)
         #[arg(short, long)]
         name: Option<String>,
-        /// Git branch for team sync (enables git sync)
-        #[arg(short, long)]
-        branch: Option<String>,
+        /// Enable git sync (optionally specify branch name, defaults to "kando")
+        #[arg(long, num_args = 0..=1, default_missing_value = "kando")]
+        git: Option<String>,
     },
     /// Add a new card to the backlog
     Add {
@@ -187,6 +187,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<HooksAction>,
     },
+    /// Migrate a local git-synced board to shadow-primary storage
+    ///
+    /// Moves .kando/ data to the shadow clone and replaces it with a .kando.toml marker.
+    /// Only works on boards that already have git sync enabled (sync_branch set).
+    Migrate,
 }
 
 #[derive(Subcommand)]
@@ -559,14 +564,14 @@ fn main() {
     let json = cli.json;
 
     let result = match cli.command {
-        Some(Command::Init { name, branch }) => {
+        Some(Command::Init { name, git }) => {
             let name = name.unwrap_or_else(|| {
                 cwd.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("My Project")
                     .to_string()
             });
-            cmd_init(&cwd, &name, branch)
+            cmd_init(&cwd, &name, git)
         }
         Some(Command::Add {
             title,
@@ -633,6 +638,7 @@ fn main() {
         Some(Command::Col { action }) => cmd_col_cli(&cwd, action, json),
         Some(Command::Template { action }) => cmd_template_cli(&cwd, action, json),
         Some(Command::Hooks { action }) => cmd_hooks_cli(&cwd, action, json),
+        Some(Command::Migrate) => cmd_migrate(&cwd),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
 
@@ -677,6 +683,12 @@ fn print_user_error(error: &color_eyre::Report) {
                 eprintln!("error: could not read or write board files.");
                 eprintln!("  {e}");
             }
+            board::storage::StorageError::BrokenGitSync { toml_path, reason } => {
+                eprintln!("error: broken git-sync setup.");
+                eprintln!("  .kando.toml found at {}", toml_path.display());
+                eprintln!("  but {reason}.");
+                eprintln!("  Either fix the git repository or remove .kando.toml.");
+            }
         }
         return;
     }
@@ -685,7 +697,7 @@ fn print_user_error(error: &color_eyre::Report) {
         match sync_err {
             board::sync::SyncError::NotGitRepo => {
                 eprintln!("error: not a git repository.");
-                eprintln!("  Run `git init` first, then `kando init --branch <name>`.");
+                eprintln!("  Run `git init` first, then `kando init --git`.");
             }
             board::sync::SyncError::NoRemote => {
                 eprintln!("error: no git remote 'origin' configured.");
@@ -709,41 +721,89 @@ fn print_user_error(error: &color_eyre::Report) {
     eprintln!("error: {e:#}", e = error);
 }
 
-fn cmd_init(cwd: &Path, name: &str, branch: Option<String>) -> color_eyre::Result<()> {
-    // If board already exists, only allow --branch to enable/update sync
-    if cwd.join(".kando").exists() {
-        if let Some(ref branch) = branch {
-            let kando_dir = find_kando_dir(cwd)?;
+/// Resolve the board context and initialize sync for git-synced boards.
+/// Returns the context and an optional sync state (pulls latest on init).
+fn resolve_and_sync(cwd: &Path) -> color_eyre::Result<(BoardContext, Option<board::sync::SyncState>)> {
+    let ctx = resolve_board(cwd)?;
+    let sync_state = match &ctx.mode {
+        BoardMode::GitSync { branch, .. } => {
+            let mut ss = board::sync::init_shadow_for_gitsync(&ctx.project_root, branch)?;
+            board::sync::pull_shadow(&mut ss);
+            Some(ss)
+        }
+        BoardMode::Local => None,
+    };
+    Ok((ctx, sync_state))
+}
+
+fn cmd_init(cwd: &Path, name: &str, git_branch: Option<String>) -> color_eyre::Result<()> {
+    use board::sync;
+
+    // If board already exists (either mode), only allow --git to enable sync
+    if cwd.join(".kando").exists() || cwd.join(".kando.toml").exists() {
+        if let Some(ref branch) = git_branch {
+            let ctx = resolve_board(cwd)?;
+            let kando_dir = &ctx.kando_dir;
             let sync_branch = ensure_git_repo(cwd, branch)?;
             if let Some(branch) = sync_branch {
-                let mut board = load_board(&kando_dir)?;
+                let mut board = load_board(kando_dir)?;
                 board.sync_branch = Some(branch.to_string());
-                save_board(&kando_dir, &board)?;
+                save_board(kando_dir, &board)?;
                 println!("Git sync enabled on branch: {branch}");
             }
             return Ok(());
         }
-        bail!("Board already exists in this directory. To enable sync, run: kando init --branch <branch>");
+        bail!("Board already exists in this directory. To enable sync, run: kando init --git");
     }
 
-    // If --branch is provided, ensure we're in a git repo (or create one).
-    let sync_branch = if let Some(ref branch) = branch {
-        ensure_git_repo(cwd, branch)?
+    if let Some(ref branch) = git_branch {
+        // Git-synced board: create in shadow, write .kando.toml marker
+        let sync_branch = match ensure_git_repo(cwd, branch)? {
+            Some(b) => b.to_string(),
+            None => {
+                // User declined git init, fall back to local board
+                let kando_dir = init_board(cwd, name, None)?;
+                println!("Initialized local Kando board '{}' in {}", name, kando_dir.display());
+                println!("\nCreated columns: Backlog, In Progress, Done, Archive");
+                println!("Run `kando` to open the board, or `kando add \"Card title\"` to add cards.");
+                return Ok(());
+            }
+        };
+
+        // Initialize shadow clone
+        let mut sync_state = sync::init_shadow_for_gitsync(cwd, &sync_branch)
+            .wrap_err("Failed to initialize shadow clone")?;
+
+        // Create board in the shadow
+        let shadow_kando_dir = sync_state.shadow_path.join(".kando");
+        init_board_at(&shadow_kando_dir, name, Some(&sync_branch))?;
+
+        // Write .kando.toml marker in the working tree
+        let kando_toml = config::KandoToml { branch: sync_branch.clone() };
+        let toml_str = toml::to_string_pretty(&kando_toml)?;
+        std::fs::write(cwd.join(".kando.toml"), &toml_str)?;
+
+        // Push initial board to remote
+        sync::commit_and_push_shadow(&mut sync_state, &format!("Initialize board '{name}'"));
+
+        println!("Initialized Kando board '{name}' (git-synced)");
+        println!("\nCreated columns: Backlog, In Progress, Done, Archive");
+        println!("Git sync enabled on branch: {sync_branch}");
+        println!("Board data stored in shadow: {}", sync_state.shadow_path.display());
+        println!("\nOnly .kando.toml is in your working tree (commit it to share the board).");
+        println!("Run `kando` to open the board, or `kando add \"Card title\"` to add cards.");
     } else {
-        None
-    };
-
-    let kando_dir = init_board(cwd, name, sync_branch)?;
-    println!(
-        "Initialized Kando board '{}' in {}",
-        name,
-        kando_dir.display()
-    );
-    println!("\nCreated columns: Backlog, In Progress, Done, Archive");
-    if let Some(branch) = sync_branch {
-        println!("Git sync enabled on branch: {branch}");
+        // Local board: create .kando/ in working tree
+        let kando_dir = init_board(cwd, name, None)?;
+        println!(
+            "Initialized Kando board '{}' in {}",
+            name,
+            kando_dir.display()
+        );
+        println!("\nCreated columns: Backlog, In Progress, Done, Archive");
+        println!("Run `kando` to open the board, or `kando add \"Card title\"` to add cards.");
     }
-    println!("Run `kando` to open the board, or `kando add \"Card title\"` to add cards.");
+
     Ok(())
 }
 
@@ -792,8 +852,9 @@ fn cmd_add(
     template: Option<&str>,
     json: bool,
 ) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let id = board.next_card_id();
     let mut card = Card::new(id.clone(), title.to_string());
@@ -801,7 +862,7 @@ fn cmd_add(
     // Apply template if specified
     if let Some(tmpl_name) = template {
         use board::storage::find_template;
-        if let Some((_, tmpl)) = find_template(&kando_dir, tmpl_name) {
+        if let Some((_, tmpl)) = find_template(kando_dir, tmpl_name) {
             card.priority = tmpl.priority;
             card.tags = tmpl.tags.clone();
             card.assignees = tmpl.assignees.clone();
@@ -851,7 +912,11 @@ fn cmd_add(
         col.cards.push(card);
     }
 
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Add card #{id} \"{title}\""));
+    }
 
     if json {
         return print_json(&MutationResult {
@@ -865,8 +930,9 @@ fn cmd_add(
 }
 
 fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, overdue: bool, json: bool, csv: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
     let today = chrono::Utc::now().date_naive();
 
     // Collect filtered cards per column (shared by JSON, CSV, and human output).
@@ -963,8 +1029,9 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, overdue: bool, 
 }
 
 fn cmd_move(cwd: &Path, card_id: &str, target: &str, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let target_col = board
         .columns
@@ -990,9 +1057,13 @@ fn cmd_move(cwd: &Path, card_id: &str, target: &str, json: bool) -> color_eyre::
     }
 
     board.move_card(from_col, card_idx, target_col);
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
 
     let to_name = board.columns[target_col].name.clone();
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Move card #{card_id} to {to_name}"));
+    }
+
     if json {
         return print_json(&MutationResult {
             id: card_id.to_string(), title: String::new(),
@@ -1005,8 +1076,9 @@ fn cmd_move(cwd: &Path, card_id: &str, target: &str, json: bool) -> color_eyre::
 }
 
 fn cmd_tags(cwd: &Path, json: bool, csv: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
     let tags = board.all_tags();
 
     if json {
@@ -1042,8 +1114,35 @@ fn cmd_sync(cwd: &Path) -> color_eyre::Result<()> {
     use board::sync;
     use std::io::{self, Write};
 
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let ctx = resolve_board(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+
+    // For git-synced boards, use shadow sync directly
+    if let BoardMode::GitSync { ref branch, .. } = ctx.mode {
+        let mut sync_state = sync::init_shadow_for_gitsync(&ctx.project_root, branch)
+            .wrap_err("Failed to initialize sync")?;
+
+        println!("Pulling from remote...");
+        let status = sync::pull_shadow(&mut sync_state);
+        match status {
+            sync::SyncStatus::Updated => println!("Pulled changes from remote."),
+            sync::SyncStatus::AlreadyUpToDate => println!("Already up to date."),
+            sync::SyncStatus::Offline => println!("Could not reach remote (offline)."),
+        }
+
+        println!("Pushing to remote...");
+        sync::commit_and_push_shadow(&mut sync_state, "Manual sync");
+        if sync_state.online {
+            println!("Pushed to remote.");
+        } else {
+            println!("Push failed (offline). Changes saved locally.");
+        }
+
+        return Ok(());
+    }
+
+    // Local board — legacy sync path
+    let mut board = load_board(kando_dir)?;
 
     let branch = match board.sync_branch.as_deref() {
         Some(b) => b.to_string(),
@@ -1062,27 +1161,25 @@ fn cmd_sync(cwd: &Path) -> color_eyre::Result<()> {
                 None => return Ok(()),
             };
             board.sync_branch = Some(sync_branch.clone());
-            save_board(&kando_dir, &board)?;
+            save_board(kando_dir, &board)?;
             println!("Git sync enabled on branch: {sync_branch}");
             sync_branch
         }
     };
 
-    let mut sync_state = sync::init_shadow(&kando_dir, &branch)
+    let mut sync_state = sync::init_shadow(kando_dir, &branch)
         .wrap_err("Failed to initialize sync")?;
 
-    // Pull
     println!("Pulling from remote...");
-    let status = sync::pull(&mut sync_state, &kando_dir);
+    let status = sync::pull(&mut sync_state, kando_dir);
     match status {
         sync::SyncStatus::Updated => println!("Pulled changes from remote."),
         sync::SyncStatus::AlreadyUpToDate => println!("Already up to date."),
         sync::SyncStatus::Offline => println!("Could not reach remote (offline)."),
     }
 
-    // Push
     println!("Pushing to remote...");
-    sync::commit_and_push(&mut sync_state, &kando_dir, "Manual sync");
+    sync::commit_and_push(&mut sync_state, kando_dir, "Manual sync");
     if sync_state.online {
         println!("Pushed to remote.");
     } else {
@@ -1093,8 +1190,9 @@ fn cmd_sync(cwd: &Path) -> color_eyre::Result<()> {
 }
 
 fn cmd_config_wip(cwd: &Path, column: &str, limit: u32) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let col = board
         .columns
@@ -1102,21 +1200,26 @@ fn cmd_config_wip(cwd: &Path, column: &str, limit: u32) -> color_eyre::Result<()
         .find(|c| c.slug == column)
         .ok_or_else(|| color_eyre::eyre::eyre!("Column '{}' not found", column))?;
 
-    if limit == 0 {
+    let msg = if limit == 0 {
         col.wip_limit = None;
-        println!("Removed WIP limit from '{}'", col.name);
+        format!("Remove WIP limit from '{}'", col.name)
     } else {
         col.wip_limit = Some(limit);
-        println!("Set WIP limit for '{}' to {}", col.name, limit);
-    }
+        format!("Set WIP limit for '{}' to {}", col.name, limit)
+    };
 
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &msg);
+    }
+    println!("{msg}");
     Ok(())
 }
 
 fn cmd_delete(cwd: &Path, card_id: &str, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let (col_idx, card_idx) = board
         .find_card(card_id)
@@ -1126,11 +1229,14 @@ fn cmd_delete(cwd: &Path, card_id: &str, json: bool) -> color_eyre::Result<()> {
     let col_name = board.columns[col_idx].name.clone();
     let card_title = board.columns[col_idx].cards[card_idx].title.clone();
 
-    // Trash the file BEFORE removing from board (save_board deletes orphaned files)
-    trash_card(&kando_dir, &col_slug, card_id, &card_title)?;
+    trash_card(kando_dir, &col_slug, card_id, &card_title)?;
     board.columns[col_idx].cards.remove(card_idx);
-    save_board(&kando_dir, &board)?;
-    append_activity(&kando_dir, "delete", card_id, &card_title, &[("column", &col_name)]);
+    save_board(kando_dir, &board)?;
+    append_activity(kando_dir, "delete", card_id, &card_title, &[("column", &col_name)]);
+
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Delete card #{card_id} \"{card_title}\""));
+    }
 
     if json {
         return print_json(&MutationResult {
@@ -1159,8 +1265,9 @@ fn cmd_edit(
     due: Option<&str>,
     json: bool,
 ) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let has_flags = title.is_some()
         || priority.is_some()
@@ -1226,8 +1333,11 @@ fn cmd_edit(
         let card_title = card.title.clone();
         let col_name = board.columns[col_idx].name.clone();
         board.columns[col_idx].sort_cards();
-        save_board(&kando_dir, &board)?;
-        append_activity(&kando_dir, "edit", card_id, &card_title, &[("column", &col_name)]);
+        save_board(kando_dir, &board)?;
+        append_activity(kando_dir, "edit", card_id, &card_title, &[("column", &col_name)]);
+        if let Some(ref mut ss) = sync {
+            ctx.sync_push(ss, &format!("Edit card #{card_id}"));
+        }
         if json {
             return print_json(&MutationResult {
                 id: card_id.to_string(), title: card_title,
@@ -1263,20 +1373,19 @@ fn cmd_edit(
             .wrap_err("Failed to launch editor")?;
 
         // Reload to pick up changes made in editor, then touch and save
-        let mut board = load_board(&kando_dir)?;
+        let mut board = load_board(kando_dir)?;
         if let Some((ci, ki)) = board.find_card(card_id) {
             let card_title = board.columns[ci].cards[ki].title.clone();
             let col_name = board.columns[ci].name.clone();
             board.columns[ci].cards[ki].touch();
             board.columns[ci].sort_cards();
-            save_board(&kando_dir, &board)?;
-            append_activity(&kando_dir, "edit", card_id, &card_title, &[("column", &col_name)]);
+            save_board(kando_dir, &board)?;
+            append_activity(kando_dir, "edit", card_id, &card_title, &[("column", &col_name)]);
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Edit card #{card_id}"));
+            }
 
-            if json {
-                #[derive(Serialize)]
-                struct Edited { id: String, title: String }
-                return print_json(&Edited { id: card_id.to_string(), title: card_title });
-            } else if status.success() {
+            if status.success() {
                 println!("Updated {card_id}: {card_title}");
             } else {
                 eprintln!("warning: editor exited with {status}");
@@ -1290,10 +1399,14 @@ fn cmd_edit(
 }
 
 fn cmd_config_stale_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     board.policies.stale_days = days;
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Set stale_days to {days}"));
+    }
     if days == 0 {
         println!("Staleness indicators disabled.");
     } else {
@@ -1303,10 +1416,14 @@ fn cmd_config_stale_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
 }
 
 fn cmd_config_auto_close_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     board.policies.auto_close_days = days;
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Set auto_close_days to {days}"));
+    }
     if days == 0 {
         println!("Auto-close disabled.");
     } else {
@@ -1316,24 +1433,32 @@ fn cmd_config_auto_close_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
 }
 
 fn cmd_config_auto_close_target(cwd: &Path, column: &str) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     board
         .columns
         .iter()
         .find(|c| c.slug == column)
         .ok_or_else(|| color_eyre::eyre::eyre!("Column '{}' not found", column))?;
     board.policies.auto_close_target = column.to_string();
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Set auto_close_target to '{column}'"));
+    }
     println!("Auto-close target set to '{column}'.");
     Ok(())
 }
 
 fn cmd_config_trash_purge_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     board.policies.trash_purge_days = days;
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Set trash_purge_days to {days}"));
+    }
     if days == 0 {
         println!("Trash auto-purge disabled (trashed cards kept forever).");
     } else {
@@ -1343,10 +1468,14 @@ fn cmd_config_trash_purge_days(cwd: &Path, days: u32) -> color_eyre::Result<()> 
 }
 
 fn cmd_config_archive_after_days(cwd: &Path, days: u32) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     board.policies.archive_after_days = days;
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Set archive_after_days to {days}"));
+    }
     if days == 0 {
         println!("Auto-archive disabled.");
     } else {
@@ -1356,17 +1485,23 @@ fn cmd_config_archive_after_days(cwd: &Path, days: u32) -> color_eyre::Result<()
 }
 
 fn cmd_config_nerd_font(cwd: &Path, value: &str) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     board.nerd_font = value == "on";
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
+    let msg = format!("Set nerd_font to {}", if board.nerd_font { "on" } else { "off" });
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &msg);
+    }
     println!("Nerd Font icons {}.", if board.nerd_font { "enabled" } else { "disabled" });
     Ok(())
 }
 
 fn cmd_config_show(cwd: &Path, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
 
     if json {
         let wip_limits: std::collections::HashMap<String, u32> = board.columns.iter()
@@ -1431,8 +1566,9 @@ fn cmd_config_show(cwd: &Path, json: bool) -> color_eyre::Result<()> {
 fn cmd_sync_status(cwd: &Path, json: bool) -> color_eyre::Result<()> {
     use board::sync;
 
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let ctx = resolve_board(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
 
     if json {
         let mut status = SyncStatusJson {
@@ -1531,7 +1667,7 @@ fn cmd_sync_status(cwd: &Path, json: bool) -> color_eyre::Result<()> {
         }
         None => {
             println!("Sync not configured.");
-            println!("Run: kando init --branch <name> to enable");
+            println!("Run: kando init --git to enable");
         }
     }
     println!();
@@ -1788,11 +1924,11 @@ fn cmd_doctor(cwd: &Path, json: bool) -> color_eyre::Result<u32> {
             name: "sync".into(),
             passed: true,
             message: "Not configured".into(),
-            hint: Some("Run kando init --branch <name> to enable".into()),
+            hint: Some("Run kando init --git to enable".into()),
         });
         if !json {
             println!("\nGit Sync");
-            println!("  \u{2013} Not configured (run kando init --branch <name> to enable)");
+            println!("  \u{2013} Not configured (run kando init --git to enable)");
         }
     }
 
@@ -1817,12 +1953,13 @@ fn cmd_doctor(cwd: &Path, json: bool) -> color_eyre::Result<u32> {
 fn cmd_trash(cwd: &Path, action: Option<TrashAction>, json: bool, csv: bool) -> color_eyre::Result<()> {
     use board::storage::{load_trash, restore_card};
 
-    let kando_dir = find_kando_dir(cwd)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
 
     match action {
         None => {
             // List trashed cards
-            let entries = load_trash(&kando_dir);
+            let entries = load_trash(kando_dir);
 
             if json {
                 return print_json(&entries);
@@ -1852,18 +1989,21 @@ fn cmd_trash(cwd: &Path, action: Option<TrashAction>, json: bool, csv: bool) -> 
             println!();
         }
         Some(TrashAction::Restore { card_id }) => {
-            let entries = load_trash(&kando_dir);
+            let entries = load_trash(kando_dir);
             let entry = entries.iter().find(|e| e.id == card_id)
                 .ok_or_else(|| color_eyre::eyre::eyre!("Card '{}' not found in trash", card_id))?;
 
-            let board = load_board(&kando_dir)?;
+            let board = load_board(kando_dir)?;
             let target_col = board.columns.iter().position(|c| c.slug == entry.from_column)
                 .unwrap_or(0);
             let target_slug = &board.columns[target_col].slug;
             let title = entry.title.clone();
             let col_name = board.columns[target_col].name.clone();
 
-            restore_card(&kando_dir, &card_id, target_slug)?;
+            restore_card(kando_dir, &card_id, target_slug)?;
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Restore #{card_id} from trash to {col_name}"));
+            }
 
             if json {
                 return print_json(&MutationResult {
@@ -1875,7 +2015,7 @@ fn cmd_trash(cwd: &Path, action: Option<TrashAction>, json: bool, csv: bool) -> 
             println!("Restored {} ({}) to {}", card_id, title, col_name);
         }
         Some(TrashAction::Purge) => {
-            let entries = load_trash(&kando_dir);
+            let entries = load_trash(kando_dir);
             if entries.is_empty() {
                 if json {
                     #[derive(Serialize)]
@@ -1893,6 +2033,9 @@ fn cmd_trash(cwd: &Path, action: Option<TrashAction>, json: bool, csv: bool) -> 
             }
             // Clear the meta file
             let _ = std::fs::remove_file(trash_dir.join("_meta.toml"));
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Purge {count} cards from trash"));
+            }
 
             if json {
                 #[derive(Serialize)]
@@ -1908,8 +2051,9 @@ fn cmd_trash(cwd: &Path, action: Option<TrashAction>, json: bool, csv: bool) -> 
 }
 
 fn cmd_metrics(cwd: &Path, weeks: Option<u32>, csv: bool, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
     let since = weeks.map(|w| chrono::Utc::now() - chrono::TimeDelta::weeks(w as i64));
     let metrics = board::metrics::compute_metrics(&board, since);
 
@@ -1928,8 +2072,9 @@ fn cmd_metrics(cwd: &Path, weeks: Option<u32>, csv: bool, json: bool) -> color_e
 fn cmd_show(cwd: &Path, card_id: &str, json: bool) -> color_eyre::Result<()> {
     use std::io::{BufWriter, ErrorKind, Write};
 
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
 
     let (col_idx, card_idx) = board
         .find_card(card_id)
@@ -1981,8 +2126,9 @@ fn cmd_archive_list(cwd: &Path, json: bool, csv: bool) -> color_eyre::Result<()>
     use std::io::{BufWriter, ErrorKind, Write};
     use chrono::Utc;
 
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
 
     let archive_col = board.columns.iter()
         .find(|c| c.slug == "archive")
@@ -2047,8 +2193,9 @@ fn cmd_archive_search(cwd: &Path, query: &str, json: bool, csv: bool) -> color_e
     use std::io::{BufWriter, ErrorKind, Write};
     use chrono::Utc;
 
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
 
     let archive_col = board.columns.iter()
         .find(|c| c.slug == "archive")
@@ -2118,8 +2265,9 @@ fn cmd_archive_search(cwd: &Path, query: &str, json: bool, csv: bool) -> color_e
 }
 
 fn cmd_archive_restore(cwd: &Path, card_id: &str, column: &str, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let archive_idx = board.columns.iter().position(|c| c.slug == "archive")
         .ok_or_else(|| color_eyre::eyre::eyre!("No 'archive' column found"))?;
@@ -2151,8 +2299,11 @@ fn cmd_archive_restore(cwd: &Path, card_id: &str, column: &str, json: bool) -> c
     board.columns[archive_idx].sort_cards();
     board.columns[target_idx].sort_cards();
 
-    save_board(&kando_dir, &board)?;
-    append_activity(&kando_dir, "unarchive", card_id, &title, &[("to", &target_name)]);
+    save_board(kando_dir, &board)?;
+    append_activity(kando_dir, "unarchive", card_id, &title, &[("to", &target_name)]);
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Restore #{card_id} from archive to {target_name}"));
+    }
 
     if json {
         return print_json(&MutationResult {
@@ -2203,8 +2354,9 @@ fn cmd_col_cli(cwd: &Path, action: Option<ColAction>, json: bool) -> color_eyre:
 }
 
 fn cmd_col_list(cwd: &Path, json: bool, csv: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let board = load_board(&kando_dir)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let board = load_board(kando_dir)?;
 
     if json {
         let entries: Vec<ColumnEntry> = board.columns.iter().enumerate().map(|(i, col)| {
@@ -2272,8 +2424,9 @@ fn cmd_col_add(cwd: &Path, name: &str, after: Option<&str>, json: bool) -> color
         color_eyre::eyre::bail!("Column name cannot be empty");
     }
 
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let slug = generate_slug(name, &board.columns);
 
@@ -2310,8 +2463,11 @@ fn cmd_col_add(cwd: &Path, name: &str, after: Option<&str>, json: bool) -> color
     });
     normalize_column_orders(&mut board.columns);
 
-    save_board(&kando_dir, &board)?;
-    append_activity(&kando_dir, "col-add", &slug, &derived_name, &[]);
+    save_board(kando_dir, &board)?;
+    append_activity(kando_dir, "col-add", &slug, &derived_name, &[]);
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Add column '{derived_name}'"));
+    }
 
     if json {
         #[derive(Serialize)]
@@ -2324,8 +2480,9 @@ fn cmd_col_add(cwd: &Path, name: &str, after: Option<&str>, json: bool) -> color
 }
 
 fn cmd_col_remove(cwd: &Path, column: &str, move_to: Option<&str>, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let col_idx = resolve_col_cli(&board, column)?;
     let slug = board.columns[col_idx].slug.clone();
@@ -2371,9 +2528,12 @@ fn cmd_col_remove(cwd: &Path, column: &str, move_to: Option<&str>, json: bool) -
     // the column removed, then remove_column_dir deletes the slug directory.
     // If remove_column_dir is never reached (e.g. disk full after save), the
     // orphaned directory is benign — load_board ignores dirs not in config.toml.
-    save_board(&kando_dir, &board)?;
-    remove_column_dir(&kando_dir, &slug)?;
-    append_activity(&kando_dir, "col-remove", &slug, &name, &[]);
+    save_board(kando_dir, &board)?;
+    remove_column_dir(kando_dir, &slug)?;
+    append_activity(kando_dir, "col-remove", &slug, &name, &[]);
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Remove column '{name}'"));
+    }
 
     if json {
         #[derive(Serialize)]
@@ -2391,8 +2551,9 @@ fn cmd_col_rename(cwd: &Path, column: &str, new_name: &str, json: bool) -> color
         bail!("New column name cannot be empty");
     }
 
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let col_idx = resolve_col_cli(&board, column)?;
 
@@ -2424,13 +2585,16 @@ fn cmd_col_rename(cwd: &Path, column: &str, new_name: &str, json: bool) -> color
     // Rename the directory first so save_board writes card files into the
     // correct location. On save failure we attempt a best-effort rollback of
     // the directory rename to keep the filesystem consistent.
-    rename_column_dir(&kando_dir, &old_slug, &new_slug)
+    rename_column_dir(kando_dir, &old_slug, &new_slug)
         .wrap_err("Could not rename column directory")?;
-    save_board(&kando_dir, &board).inspect_err(|_| {
-        let _ = rename_column_dir(&kando_dir, &new_slug, &old_slug);
+    save_board(kando_dir, &board).inspect_err(|_| {
+        let _ = rename_column_dir(kando_dir, &new_slug, &old_slug);
     })?;
 
-    append_activity(&kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug)]);
+    append_activity(kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug)]);
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Rename column '{old_slug}' → '{new_slug}'"));
+    }
 
     if json {
         #[derive(Serialize)]
@@ -2443,8 +2607,9 @@ fn cmd_col_rename(cwd: &Path, column: &str, new_name: &str, json: bool) -> color
 }
 
 fn cmd_col_move(cwd: &Path, column: &str, position: &str, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
 
     let col_idx = resolve_col_cli(&board, column)?;
     let slug = board.columns[col_idx].slug.clone();
@@ -2492,14 +2657,17 @@ fn cmd_col_move(cwd: &Path, column: &str, position: &str, json: bool) -> color_e
     }
 
     let new_pos = target_idx + 1;
-    save_board(&kando_dir, &board)?;
+    save_board(kando_dir, &board)?;
     append_activity(
-        &kando_dir,
+        kando_dir,
         "col-move",
         &slug,
         &name,
         &[("to", &new_pos.to_string())],
     );
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Move column '{name}' to position {new_pos}"));
+    }
 
     if json {
         #[derive(Serialize)]
@@ -2512,14 +2680,18 @@ fn cmd_col_move(cwd: &Path, column: &str, position: &str, json: bool) -> color_e
 }
 
 fn cmd_col_hide_cli(cwd: &Path, column: &str, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     let col_idx = resolve_col_cli(&board, column)?;
     let slug = board.columns[col_idx].slug.clone();
     let name = board.columns[col_idx].name.clone();
     board.columns[col_idx].hidden = true;
-    save_board(&kando_dir, &board)?;
-    append_activity(&kando_dir, "col-hide", &slug, &name, &[]);
+    save_board(kando_dir, &board)?;
+    append_activity(kando_dir, "col-hide", &slug, &name, &[]);
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Hide column '{name}'"));
+    }
     if json {
         #[derive(Serialize)]
         struct ColHidden { name: String, slug: String, hidden: bool }
@@ -2530,14 +2702,18 @@ fn cmd_col_hide_cli(cwd: &Path, column: &str, json: bool) -> color_eyre::Result<
 }
 
 fn cmd_col_show_cli(cwd: &Path, column: &str, json: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(cwd)?;
-    let mut board = load_board(&kando_dir)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
+    let mut board = load_board(kando_dir)?;
     let col_idx = resolve_col_cli(&board, column)?;
     let slug = board.columns[col_idx].slug.clone();
     let name = board.columns[col_idx].name.clone();
     board.columns[col_idx].hidden = false;
-    save_board(&kando_dir, &board)?;
-    append_activity(&kando_dir, "col-show", &slug, &name, &[]);
+    save_board(kando_dir, &board)?;
+    append_activity(kando_dir, "col-show", &slug, &name, &[]);
+    if let Some(ref mut ss) = sync {
+        ctx.sync_push(ss, &format!("Show column '{name}'"));
+    }
     if json {
         #[derive(Serialize)]
         struct ColShown { name: String, slug: String, hidden: bool }
@@ -2666,7 +2842,8 @@ fn format_log_entry(entry: &serde_json::Value) -> String {
 fn cmd_log(cwd: &Path, stream: bool, json: bool, follow: bool) -> color_eyre::Result<()> {
     use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind, Seek, SeekFrom, Write};
 
-    let kando_dir = find_kando_dir(cwd)?;
+    let (ctx, _sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
     let log_path = kando_dir.join("activity.log");
 
     let mut file = match std::fs::File::open(&log_path) {
@@ -2880,12 +3057,13 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
     use board::storage::{load_templates, find_template, save_template, delete_template};
     use board::{generate_template_slug, slug_to_name, Template};
 
-    let kando_dir = find_kando_dir(cwd)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
 
     match action {
         None | Some(TemplateAction::List { .. }) => {
             let csv_mode = matches!(action, Some(TemplateAction::List { csv: true }));
-            let templates = load_templates(&kando_dir);
+            let templates = load_templates(kando_dir);
 
             if json {
                 #[derive(Serialize)]
@@ -2942,7 +3120,7 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
             Ok(())
         }
         Some(TemplateAction::Add { name }) => {
-            let templates = load_templates(&kando_dir);
+            let templates = load_templates(kando_dir);
             let existing_slugs: Vec<String> = templates.iter().map(|(s, _)| s.clone()).collect();
             let slug = generate_template_slug(&name, &existing_slugs);
             let tmpl = Template {
@@ -2953,9 +3131,12 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
                 due_offset_days: None,
                 body: String::new(),
             };
-            let path = save_template(&kando_dir, &slug, &tmpl)?;
+            let path = save_template(kando_dir, &slug, &tmpl)?;
 
             if json {
+                if let Some(ref mut ss) = sync {
+                    ctx.sync_push(ss, &format!("Add template '{slug}'"));
+                }
                 return print_json(&serde_json::json!({
                     "slug": slug,
                     "name": slug_to_name(&slug),
@@ -2979,10 +3160,13 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
                     eprintln!("Warning: editor exited with {status}");
                 }
             }
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Add template '{slug}'"));
+            }
             Ok(())
         }
         Some(TemplateAction::Edit { name }) => {
-            let (slug, _) = find_template(&kando_dir, &name)
+            let (slug, _) = find_template(kando_dir, &name)
                 .ok_or_else(|| color_eyre::eyre::eyre!("Template not found: {name}"))?;
             let path = kando_dir.join("templates").join(format!("{slug}.md"));
 
@@ -3000,12 +3184,18 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
             if !status.success() {
                 eprintln!("Warning: editor exited with {status}");
             }
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Edit template '{slug}'"));
+            }
             Ok(())
         }
         Some(TemplateAction::Remove { name }) => {
-            let (slug, _) = find_template(&kando_dir, &name)
+            let (slug, _) = find_template(kando_dir, &name)
                 .ok_or_else(|| color_eyre::eyre::eyre!("Template not found: {name}"))?;
-            delete_template(&kando_dir, &slug)?;
+            delete_template(kando_dir, &slug)?;
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Remove template '{slug}'"));
+            }
 
             if json {
                 return print_json(&serde_json::json!({
@@ -3023,11 +3213,12 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
 fn cmd_hooks_cli(cwd: &Path, action: Option<HooksAction>, json: bool) -> color_eyre::Result<()> {
     use board::hooks::{list_hooks, open_in_editor, scaffold_hook, validate_hook_name};
 
-    let kando_dir = find_kando_dir(cwd)?;
+    let (ctx, mut sync) = resolve_and_sync(cwd)?;
+    let kando_dir = &ctx.kando_dir;
 
     match action {
         None | Some(HooksAction::List) => {
-            let hooks = list_hooks(&kando_dir);
+            let hooks = list_hooks(kando_dir);
             let hooks_dir = kando_dir.join("hooks");
 
             if json {
@@ -3098,9 +3289,12 @@ fn cmd_hooks_cli(cwd: &Path, action: Option<HooksAction>, json: bool) -> color_e
                 bail!("Hook '{name}' already exists. Use `kando hooks edit {name}` to edit it.");
             }
 
-            let path = scaffold_hook(&kando_dir, &name)?;
+            let path = scaffold_hook(kando_dir, &name)?;
 
             if json {
+                if let Some(ref mut ss) = sync {
+                    ctx.sync_push(ss, &format!("Add hook '{name}'"));
+                }
                 return print_json(&serde_json::json!({
                     "name": name,
                     "path": path.display().to_string(),
@@ -3110,6 +3304,9 @@ fn cmd_hooks_cli(cwd: &Path, action: Option<HooksAction>, json: bool) -> color_e
 
             println!("Created hook: {name}");
             open_in_editor(&path)?;
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Add hook '{name}'"));
+            }
         }
         Some(HooksAction::Edit { name }) => {
             if json {
@@ -3125,6 +3322,9 @@ fn cmd_hooks_cli(cwd: &Path, action: Option<HooksAction>, json: bool) -> color_e
             }
 
             open_in_editor(&hook_path)?;
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Edit hook '{name}'"));
+            }
         }
         Some(HooksAction::Remove { name }) => {
             validate_hook_name(&name)
@@ -3136,6 +3336,9 @@ fn cmd_hooks_cli(cwd: &Path, action: Option<HooksAction>, json: bool) -> color_e
             }
 
             std::fs::remove_file(&hook_path)?;
+            if let Some(ref mut ss) = sync {
+                ctx.sync_push(ss, &format!("Remove hook '{name}'"));
+            }
 
             if json {
                 return print_json(&serde_json::json!({
@@ -3156,6 +3359,75 @@ fn cmd_tui(cwd: &Path, nerd_font_flag: bool) -> color_eyre::Result<()> {
     let result = app::run(&mut terminal, cwd, nerd_font_flag);
     ratatui::restore();
     result
+}
+
+fn cmd_migrate(cwd: &Path) -> color_eyre::Result<()> {
+    use board::sync;
+
+    // Step 1: Ensure there's a local .kando/ board
+    let local_kando_dir = cwd.join(".kando");
+    if !local_kando_dir.is_dir() {
+        bail!("No local .kando/ directory found. Nothing to migrate.");
+    }
+
+    if cwd.join(".kando.toml").exists() {
+        bail!("Board is already using shadow-primary storage (.kando.toml exists).");
+    }
+
+    // Step 2: Load board and confirm sync_branch is set
+    let board = load_board(&local_kando_dir)?;
+    let branch = match board.sync_branch.as_deref() {
+        Some(b) => b.to_string(),
+        None => bail!(
+            "Board has no sync_branch configured. Migration only applies to git-synced boards.\n\
+             To enable sync first, run: kando init --git"
+        ),
+    };
+
+    // Step 3: Initialize shadow clone
+    let mut sync_state = sync::init_shadow_for_gitsync(cwd, &branch)
+        .wrap_err("Failed to initialize shadow clone")?;
+
+    // Step 4: Copy .kando/ to shadow
+    let shadow_kando = sync_state.shadow_path.join(".kando");
+    if shadow_kando.exists() {
+        std::fs::remove_dir_all(&shadow_kando)?;
+    }
+    sync::copy_dir_contents_pub(&local_kando_dir, &shadow_kando)?;
+
+    // Step 5: Push shadow to remote
+    sync::commit_and_push_shadow(&mut sync_state, &format!("Migrate board '{}'", board.name));
+
+    // Verify push succeeded before proceeding with destructive operations
+    if !sync_state.online {
+        let err_msg = sync_state.last_error.as_deref().unwrap_or("unknown error");
+        bail!(
+            "Push to remote failed: {err_msg}\n\
+             Migration aborted — your local .kando/ directory is unchanged.\n\
+             Fix the network/remote issue and try again."
+        );
+    }
+
+    // Step 6: Write .kando.toml marker
+    let kando_toml = config::KandoToml { branch: branch.clone() };
+    let toml_str = toml::to_string_pretty(&kando_toml)?;
+    std::fs::write(cwd.join(".kando.toml"), &toml_str)?;
+
+    // Step 7: Remove local .kando/
+    std::fs::remove_dir_all(&local_kando_dir)?;
+
+    println!("Migration complete!");
+    println!();
+    println!("  .kando/      → removed (was local storage)");
+    println!("  .kando.toml  → created (marker for shadow-primary storage)");
+    println!("  Shadow clone → {}", sync_state.shadow_path.display());
+    println!("  Branch       → {branch}");
+    println!();
+    println!("Next steps:");
+    println!("  1. Add .kando.toml to git: git add .kando.toml && git commit -m 'Switch to shadow-primary kando storage'");
+    println!("  2. Verify board works: kando");
+
+    Ok(())
 }
 
 #[cfg(test)]

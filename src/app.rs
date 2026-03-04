@@ -7,7 +7,7 @@ use ratatui::DefaultTerminal;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::board::age::{run_auto_archive, run_auto_close};
-use crate::board::storage::{append_activity, find_kando_dir, load_board, load_local_config, load_trash, save_board, save_local_config, trash_card, restore_card, TrashEntry};
+use crate::board::storage::{append_activity, load_board, load_local_config, load_trash, resolve_board, save_board, save_local_config, trash_card, restore_card, BoardContext, TrashEntry};
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
@@ -542,8 +542,9 @@ fn jump_to_visible_card(board: &Board, state: &mut AppState, forward: bool) {
 fn handle_auto_close(
     board: &mut Board,
     state: &mut AppState,
-    kando_dir: &std::path::Path,
+    ctx: &BoardContext,
 ) -> color_eyre::Result<()> {
+    let kando_dir = &ctx.kando_dir;
     let mut messages = Vec::new();
     let now = Utc::now();
 
@@ -565,7 +566,7 @@ fn handle_auto_close(
         let n = closed.len();
         let sync_msg = format!("Auto-close {} stale card{}", n, if n == 1 { "" } else { "s" });
         if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, kando_dir, &sync_msg);
+            ctx.sync_push(sync_state, &sync_msg);
         }
         messages.push(format!(
             "{} card{} auto-closed",
@@ -593,7 +594,7 @@ fn handle_auto_close(
         let n = aa.len();
         let sync_msg = format!("Auto-archive {} completed card{}", n, if n == 1 { "" } else { "s" });
         if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, kando_dir, &sync_msg);
+            ctx.sync_push(sync_state, &sync_msg);
         }
         messages.push(format!(
             "{} card{} auto-archived",
@@ -682,9 +683,36 @@ fn try_move_card(
 
 /// Main TUI application loop.
 pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_font_flag: bool) -> color_eyre::Result<()> {
-    let kando_dir = find_kando_dir(start_dir)?;
-    let mut board = load_board(&kando_dir)?;
+    let ctx = resolve_board(start_dir)?;
+    let kando_dir = &ctx.kando_dir;
+
+    // Initialize sync based on board mode
+    let initial_sync_state = match &ctx.mode {
+        crate::board::storage::BoardMode::GitSync { branch, .. } => {
+            match sync::init_shadow_for_gitsync(&ctx.project_root, branch) {
+                Ok(mut ss) => {
+                    let status = sync::pull_shadow(&mut ss);
+                    let pulled = status == sync::SyncStatus::Updated;
+                    Some((ss, pulled))
+                }
+                Err(e) => {
+                    eprintln!("Sync init failed: {e}");
+                    None
+                }
+            }
+        }
+        crate::board::storage::BoardMode::Local => None,
+    };
+
+    let mut board = load_board(kando_dir)?;
     let mut state = AppState::new();
+
+    if let Some((ss, pulled)) = initial_sync_state {
+        state.sync_state = Some(ss);
+        if pulled {
+            state.notify("Synced from remote");
+        }
+    }
 
     // Set up hook notification channel
     let (hook_tx, hook_rx) = std::sync::mpsc::channel();
@@ -695,7 +723,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
     state.nerd_font = nerd_font_flag || board.nerd_font;
 
     // Load per-user local preferences.
-    match load_local_config(&kando_dir) {
+    match load_local_config(kando_dir) {
         Ok(local_cfg) => {
             state.tutorial_shown = local_cfg.tutorial_shown;
         }
@@ -704,26 +732,27 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
         }
     }
 
-    // Initialize git sync if configured
-    if let Some(ref branch) = board.sync_branch {
-        match sync::init_shadow(&kando_dir, branch) {
-            Ok(mut sync_state) => {
-                let status = sync::pull(&mut sync_state, &kando_dir);
-                if status == sync::SyncStatus::Updated {
-                    // Reload board after pulling
-                    board = load_board(&kando_dir)?;
-                    state.notify("Synced from remote");
+    // For local boards with sync_branch, initialize sync the legacy way
+    if !ctx.is_git_sync() {
+        if let Some(ref branch) = board.sync_branch {
+            match sync::init_shadow(kando_dir, branch) {
+                Ok(mut sync_state) => {
+                    let status = sync::pull(&mut sync_state, kando_dir);
+                    if status == sync::SyncStatus::Updated {
+                        board = load_board(kando_dir)?;
+                        state.notify("Synced from remote");
+                    }
+                    state.sync_state = Some(sync_state);
                 }
-                state.sync_state = Some(sync_state);
-            }
-            Err(e) => {
-                state.notify(format!("Sync init failed: {e}"));
+                Err(e) => {
+                    state.notify(format!("Sync init failed: {e}"));
+                }
             }
         }
     }
 
     // Run auto-close on startup
-    handle_auto_close(&mut board, &mut state, &kando_dir)?;
+    handle_auto_close(&mut board, &mut state, &ctx)?;
 
     // Warn at startup if the 'archive' column is missing (reserved for archiving).
     if !board.columns.iter().any(|c| c.slug == "archive") {
@@ -762,16 +791,16 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
         // Periodic auto-close
         if last_auto_close.elapsed() >= auto_close_interval {
-            handle_auto_close(&mut board, &mut state, &kando_dir)?;
+            handle_auto_close(&mut board, &mut state, &ctx)?;
             last_auto_close = Instant::now();
         }
 
         // Periodic sync pull
         if last_sync.elapsed() >= sync_interval {
             if let Some(ref mut sync_state) = state.sync_state {
-                let status = sync::pull(sync_state, &kando_dir);
+                let status = ctx.sync_pull(sync_state);
                 if status == sync::SyncStatus::Updated {
-                    if let Ok(new_board) = load_board(&kando_dir) {
+                    if let Ok(new_board) = load_board(kando_dir) {
                         board = new_board;
                         state.clamp_selection(&board);
                         state.notify("Synced from remote");
@@ -789,7 +818,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 let action = map_key(key, &state.mode);
-                process_action(&mut board, &mut state, action, terminal, &kando_dir)?;
+                process_action(&mut board, &mut state, action, terminal, &ctx)?;
 
                 if state.should_quit {
                     break;
@@ -808,8 +837,9 @@ fn process_action(
     state: &mut AppState,
     action: Action,
     terminal: &mut DefaultTerminal,
-    kando_dir: &std::path::Path,
+    ctx: &BoardContext,
 ) -> color_eyre::Result<()> {
+    let kando_dir = &ctx.kando_dir;
     let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::Column | Mode::ColMove | Mode::FilterMenu | Mode::Template);
     let mut sync_message: Option<String> = None;
 
@@ -1093,7 +1123,7 @@ fn process_action(
     // Sync to remote if any mutation was saved
     if let Some(msg) = sync_message {
         if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, kando_dir, &msg);
+            ctx.sync_push(sync_state, &msg);
         }
     }
 
@@ -1102,7 +1132,7 @@ fn process_action(
         launch_editor_for_template(board, state, terminal, kando_dir, &slug)?;
         // Sync template changes made in the editor
         if let Some(ref mut sync_state) = state.sync_state {
-            sync::commit_and_push(sync_state, kando_dir, &format!("Edit template \"{slug}\""));
+            ctx.sync_push(sync_state, &format!("Edit template \"{slug}\""));
         }
     }
 
