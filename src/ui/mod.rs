@@ -11,8 +11,15 @@ use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+
 use crate::app::AppState;
 use crate::board::Board;
+
+const MIN_WIDTH: u16 = 60;
+const MIN_HEIGHT: u16 = 10;
 
 /// Standard overlay rectangle used by Help, Tutorial, CardDetail, and Metrics.
 pub fn overlay_rect(area: Rect) -> Rect {
@@ -29,6 +36,16 @@ pub fn centered_rect(area: Rect, w_pct: u16, h_pct: u16, min_w: u16, min_h: u16)
 }
 
 pub fn render(f: &mut Frame, board: &Board, state: &mut AppState, now: DateTime<Utc>) {
+    let area = f.area();
+    if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+        let msg = format!("Terminal too small ({}x{}). Need at least {MIN_WIDTH}x{MIN_HEIGHT}.", area.width, area.height);
+        let line = Line::from(Span::styled(msg, Style::default().fg(Color::Yellow)));
+        let y = area.height / 2;
+        let paragraph = Paragraph::new(line).alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(paragraph, Rect::new(area.x, y, area.width, 1));
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
