@@ -161,6 +161,24 @@ fn build_center_zone<'a>(state: &'a AppState, avail_width: usize) -> Vec<Span<'a
         let pad_left = pad_total / 2;
         let pad_right = pad_total - pad_left;
 
+        // Hook notifications: prepend icon in DIM, then the message
+        if state.notification_is_hook {
+            let icons = theme::icons(state.nerd_font);
+            let prefix = format!("{}  ", icons.hook);
+            let prefix_width = prefix.width();
+            // Recalculate padding to account for the prefix
+            let full_width = prefix_width + notif_width;
+            let pad_total = avail_width.saturating_sub(full_width);
+            let pad_left = pad_total / 2;
+            let pad_right = pad_total - pad_left;
+            return vec![
+                Span::raw(" ".repeat(pad_left)),
+                Span::styled(prefix, Style::default().fg(Theme::DIM)),
+                Span::styled(notif.as_str(), Style::default().fg(color)),
+                Span::raw(" ".repeat(pad_right)),
+            ];
+        }
+
         vec![
             Span::raw(" ".repeat(pad_left)),
             Span::styled(notif.as_str(), Style::default().fg(color)),

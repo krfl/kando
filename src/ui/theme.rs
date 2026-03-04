@@ -17,6 +17,7 @@ pub struct Icons {
     pub overdue: &'static str,
     pub sync_online: &'static str,
     pub sync_offline: &'static str,
+    pub hook: &'static str,
 }
 
 pub const NERD_ICONS: Icons = Icons {
@@ -30,6 +31,7 @@ pub const NERD_ICONS: Icons = Icons {
     chevron: "\u{f054}",            // nf-fa-chevron_right
     sync_online: "\u{f021}",        // nf-fa-refresh
     sync_offline: "\u{f127}",       // nf-fa-chain_broken
+    hook: "\u{f013}",               // nf-fa-gear
 };
 
 pub const ASCII_ICONS: Icons = Icons {
@@ -43,6 +45,7 @@ pub const ASCII_ICONS: Icons = Icons {
     chevron: ">",
     sync_online: "*",
     sync_offline: "!",
+    hook: "hook",
 };
 
 /// Return the icon set for the given mode.
@@ -278,6 +281,7 @@ mod tests {
             assert!(!i.chevron.is_empty());
             assert!(!i.sync_online.is_empty());
             assert!(!i.sync_offline.is_empty());
+            assert!(!i.hook.is_empty());
         }
     }
 
@@ -306,6 +310,7 @@ mod tests {
             i.chevron,
             i.sync_online,
             i.sync_offline,
+            i.hook,
         ];
         let mut seen = std::collections::HashSet::new();
         for g in &glyphs {

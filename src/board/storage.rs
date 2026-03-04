@@ -638,6 +638,7 @@ pub fn append_activity(
     extras: &[(&str, &str)],
 ) {
     let _ = try_append_activity(kando_dir, action, card_id, card_title, extras);
+    super::hooks::fire_hook(kando_dir, action, card_id, card_title, extras);
 }
 
 fn try_append_activity(

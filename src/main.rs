@@ -182,6 +182,11 @@ enum Command {
         #[command(subcommand)]
         action: Option<TemplateAction>,
     },
+    /// Manage hooks
+    Hooks {
+        #[command(subcommand)]
+        action: Option<HooksAction>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -292,6 +297,27 @@ enum TemplateAction {
     /// Remove a template
     Remove {
         /// Template name or slug
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum HooksAction {
+    /// List all hooks and their status
+    List,
+    /// Create a new hook and open in $EDITOR
+    Add {
+        /// Hook name (e.g. post-create, post-move)
+        name: String,
+    },
+    /// Open an existing hook in $EDITOR
+    Edit {
+        /// Hook name (e.g. post-create, post-move)
+        name: String,
+    },
+    /// Remove a hook
+    Remove {
+        /// Hook name (e.g. post-create, post-move)
         name: String,
     },
 }
@@ -606,6 +632,7 @@ fn main() {
         Some(Command::Archive { action }) => cmd_archive(&cwd, action, json),
         Some(Command::Col { action }) => cmd_col_cli(&cwd, action, json),
         Some(Command::Template { action }) => cmd_template_cli(&cwd, action, json),
+        Some(Command::Hooks { action }) => cmd_hooks_cli(&cwd, action, json),
         None => cmd_tui(&cwd, cli.nerd_font),
     };
 
@@ -2991,6 +3018,137 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
             Ok(())
         }
     }
+}
+
+fn cmd_hooks_cli(cwd: &Path, action: Option<HooksAction>, json: bool) -> color_eyre::Result<()> {
+    use board::hooks::{list_hooks, open_in_editor, scaffold_hook, validate_hook_name};
+
+    let kando_dir = find_kando_dir(cwd)?;
+
+    match action {
+        None | Some(HooksAction::List) => {
+            let hooks = list_hooks(&kando_dir);
+            let hooks_dir = kando_dir.join("hooks");
+
+            if json {
+                #[derive(Serialize)]
+                struct HookEntry {
+                    name: String,
+                    status: String,
+                    path: Option<String>,
+                }
+                #[derive(Serialize)]
+                struct HooksOutput {
+                    hooks_dir: String,
+                    hooks: Vec<HookEntry>,
+                }
+
+                let entries: Vec<HookEntry> = hooks
+                    .iter()
+                    .map(|h| HookEntry {
+                        name: h.name.clone(),
+                        status: if !h.exists {
+                            "not_found".to_string()
+                        } else if h.executable {
+                            "executable".to_string()
+                        } else {
+                            "not_executable".to_string()
+                        },
+                        path: if h.exists {
+                            Some(h.path.display().to_string())
+                        } else {
+                            None
+                        },
+                    })
+                    .collect();
+
+                print_json(&HooksOutput {
+                    hooks_dir: hooks_dir.display().to_string(),
+                    hooks: entries,
+                })?;
+            } else {
+                println!("hooks  {}\n", hooks_dir.display());
+
+                let mut configured = 0u32;
+                let mut active = 0u32;
+
+                for h in &hooks {
+                    let status = if !h.exists {
+                        "not found".to_string()
+                    } else if h.executable {
+                        configured += 1;
+                        active += 1;
+                        "executable".to_string()
+                    } else {
+                        configured += 1;
+                        "not executable  (chmod +x to enable)".to_string()
+                    };
+                    println!("  {:<22}{}", h.name, status);
+                }
+
+                println!("\n{configured} hooks configured, {active} active");
+            }
+        }
+        Some(HooksAction::Add { name }) => {
+            validate_hook_name(&name)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+
+            let hook_path = kando_dir.join("hooks").join(&name);
+            if hook_path.exists() {
+                bail!("Hook '{name}' already exists. Use `kando hooks edit {name}` to edit it.");
+            }
+
+            let path = scaffold_hook(&kando_dir, &name)?;
+
+            if json {
+                return print_json(&serde_json::json!({
+                    "name": name,
+                    "path": path.display().to_string(),
+                    "status": "created",
+                }));
+            }
+
+            println!("Created hook: {name}");
+            open_in_editor(&path)?;
+        }
+        Some(HooksAction::Edit { name }) => {
+            if json {
+                bail!("--json is not supported with `hooks edit` (interactive command)");
+            }
+
+            validate_hook_name(&name)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+
+            let hook_path = kando_dir.join("hooks").join(&name);
+            if !hook_path.exists() {
+                bail!("Hook '{name}' not found. Use `kando hooks add {name}` to create it.");
+            }
+
+            open_in_editor(&hook_path)?;
+        }
+        Some(HooksAction::Remove { name }) => {
+            validate_hook_name(&name)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+
+            let hook_path = kando_dir.join("hooks").join(&name);
+            if !hook_path.exists() {
+                bail!("Hook '{name}' not found.");
+            }
+
+            std::fs::remove_file(&hook_path)?;
+
+            if json {
+                return print_json(&serde_json::json!({
+                    "name": name,
+                    "status": "removed",
+                }));
+            }
+
+            println!("Removed hook: {name}");
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_tui(cwd: &Path, nerd_font_flag: bool) -> color_eyre::Result<()> {

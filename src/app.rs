@@ -318,6 +318,10 @@ pub struct AppState {
     pub last_repeatable: Option<RepeatableAction>,
     /// Deferred template editing — slug to open in $EDITOR after handler returns.
     pub pending_editor_template: Option<String>,
+    /// Receiver for background hook notifications.
+    pub hook_rx: Option<std::sync::mpsc::Receiver<crate::board::hooks::HookNotification>>,
+    /// True when the current notification originated from a hook.
+    pub notification_is_hook: bool,
 }
 
 impl AppState {
@@ -345,6 +349,8 @@ impl AppState {
             tutorial_shown: false,
             last_repeatable: None,
             pending_editor_template: None,
+            hook_rx: None,
+            notification_is_hook: false,
         }
     }
 
@@ -369,6 +375,7 @@ impl AppState {
         self.notification = Some(msg.into());
         self.notification_level = NotificationLevel::Info;
         self.notification_expires = Some(Instant::now() + Duration::from_secs(3));
+        self.notification_is_hook = false;
     }
 
     /// Show a transient error notification (rendered in red).
@@ -376,6 +383,7 @@ impl AppState {
         self.notification = Some(msg.into());
         self.notification_level = NotificationLevel::Error;
         self.notification_expires = Some(Instant::now() + Duration::from_secs(3));
+        self.notification_is_hook = false;
     }
 
     /// Clear expired notifications.
@@ -385,6 +393,7 @@ impl AppState {
                 self.notification = None;
                 self.notification_level = NotificationLevel::Info;
                 self.notification_expires = None;
+                self.notification_is_hook = false;
             }
         }
     }
@@ -677,6 +686,11 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
     let mut board = load_board(&kando_dir)?;
     let mut state = AppState::new();
 
+    // Set up hook notification channel
+    let (hook_tx, hook_rx) = std::sync::mpsc::channel();
+    crate::board::hooks::register_hook_sender(hook_tx);
+    state.hook_rx = Some(hook_rx);
+
     // CLI --nerd-font flag overrides config; otherwise use board config value
     state.nerd_font = nerd_font_flag || board.nerd_font;
 
@@ -732,6 +746,20 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
         // Tick
         state.tick_notification();
 
+        // Drain hook results (only when no active notification)
+        if state.notification.is_none() {
+            if let Some(ref rx) = state.hook_rx {
+                if let Ok(notif) = rx.try_recv() {
+                    if notif.is_error {
+                        state.notify_error(notif.message);
+                    } else {
+                        state.notify(notif.message);
+                    }
+                    state.notification_is_hook = true;
+                }
+            }
+        }
+
         // Periodic auto-close
         if last_auto_close.elapsed() >= auto_close_interval {
             handle_auto_close(&mut board, &mut state, &kando_dir)?;
@@ -769,6 +797,8 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
             }
         }
     }
+
+    crate::board::hooks::deregister_hook_sender();
 
     Ok(())
 }
@@ -4546,6 +4576,45 @@ mod tests {
         state.notify("msg");
         state.tick_notification();
         assert!(state.notification.is_some());
+    }
+
+    #[test]
+    fn notify_clears_notification_is_hook_flag() {
+        let mut state = AppState::new();
+        state.notification_is_hook = true;
+        state.notify("regular");
+        assert!(!state.notification_is_hook);
+    }
+
+    #[test]
+    fn notify_error_clears_notification_is_hook_flag() {
+        let mut state = AppState::new();
+        state.notification_is_hook = true;
+        state.notify_error("bad");
+        assert!(!state.notification_is_hook);
+    }
+
+    #[test]
+    fn tick_notification_preserves_hook_flag_when_unexpired() {
+        let mut state = AppState::new();
+        state.notify("hook msg");
+        state.notification_is_hook = true;
+        state.tick_notification();
+        assert!(state.notification.is_some());
+        assert!(state.notification_is_hook);
+    }
+
+    #[test]
+    fn tick_notification_clears_hook_flag() {
+        let mut state = AppState::new();
+        state.notification = Some("hook msg".into());
+        state.notification_level = NotificationLevel::Error;
+        state.notification_is_hook = true;
+        state.notification_expires = Some(Instant::now() - Duration::from_secs(1));
+        state.tick_notification();
+        assert!(state.notification.is_none());
+        assert!(!state.notification_is_hook);
+        assert_eq!(state.notification_level, NotificationLevel::Info);
     }
 
     #[test]

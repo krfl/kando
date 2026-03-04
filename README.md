@@ -327,6 +327,48 @@ kando doctor
 
 This makes it easy to integrate Kando with git hooks, CI pipelines, or shell scripts.
 
+### Hooks
+
+Kando can run your own scripts whenever something happens on the board. Place executable scripts in `.kando/hooks/` named `post-<event>`, and Kando will fire them automatically after each action.
+
+**Supported events:** `create`, `move`, `delete`, `archive`, `restore`, `auto-close`, `edit`, `priority`, `tags`, `assignees`, `blocker`, `due`, `col-add`, `col-remove`, `col-rename`, `col-move`
+
+**Managing hooks:**
+
+```sh
+kando hooks add post-create      # create a hook and open in $EDITOR
+kando hooks edit post-create     # edit an existing hook in $EDITOR
+kando hooks remove post-create   # delete a hook
+kando hooks list                 # list all hooks and their status
+```
+
+**Example — announce new cards with `say` on macOS:**
+
+```sh
+kando hooks add post-create
+```
+
+Then in the editor that opens, write:
+
+```sh
+#!/bin/sh
+say "New card: $KANDO_CARD_TITLE"
+```
+
+Now every time a card is created (TUI or CLI), your Mac reads the title aloud.
+
+**Environment variables passed to hooks:**
+
+| Variable | Description |
+|----------|-------------|
+| `KANDO_EVENT` | The event name (e.g. `create`, `move`) |
+| `KANDO_CARD_ID` | Card identifier |
+| `KANDO_CARD_TITLE` | Card title |
+| `KANDO_BOARD_DIR` | Absolute path to the project root |
+| `KANDO_FROM`, `KANDO_TO`, etc. | Extra context depending on the event |
+
+Hooks run in background threads so they never block the TUI. The first line of stdout (or stderr) is shown as a notification in the status bar. Results are logged to `.kando/hooks.log`.
+
 ### JSON Output
 
 All commands produce human-readable output by default. Pass the global `--json` flag to get structured JSON instead — useful for scripting and automation:
