@@ -816,13 +816,17 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
         // Handle input
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                let action = map_key(key, &state.mode);
-                process_action(&mut board, &mut state, action, terminal, &ctx)?;
+            match event::read()? {
+                Event::Key(key) => {
+                    let action = map_key(key, &state.mode);
+                    process_action(&mut board, &mut state, action, terminal, &ctx)?;
 
-                if state.should_quit {
-                    break;
+                    if state.should_quit {
+                        break;
+                    }
                 }
+                Event::Resize(..) => continue, // redraw immediately
+                _ => {}
             }
         }
     }
