@@ -2401,6 +2401,19 @@ fn compute_completion_hint(state: &AppState, board: &Board) -> Option<Completion
         return None;
     }
 
+    // While tab-cycling, show the stored candidate list instead of refiltering
+    // from the buffer (which now contains the selected candidate as prefix).
+    // Candidates are already sorted alphabetically in cycle_input_completion().
+    if let Some(cs) = completion {
+        if cs.index < cs.candidates.len() {
+            return Some(CompletionHint {
+                title,
+                candidates: cs.candidates.clone(),
+                selected: Some(cs.index),
+            });
+        }
+    }
+
     let (token, _) = current_csv_token(&buf.input);
     let already = entered_values(&buf.input);
     let mut candidates = filtered_candidates(&all_candidates, token, &already);
@@ -2411,12 +2424,7 @@ fn compute_completion_hint(state: &AppState, board: &Board) -> Option<Completion
 
     candidates.sort_by_key(|c| c.to_lowercase());
 
-    let selected = completion.as_ref().and_then(|cs| {
-        let current = cs.candidates.get(cs.index)?;
-        candidates.iter().position(|c| c == current)
-    });
-
-    Some(CompletionHint { title, candidates, selected })
+    Some(CompletionHint { title, candidates, selected: None })
 }
 
 /// Compute ghost text: the suffix of the first matching candidate shown dimmed after cursor.
@@ -6098,9 +6106,9 @@ mod tests {
         };
 
         let hint = compute_completion_hint(&state, &board).unwrap();
-        // "bug" doesn't match prefix "bui", so fresh list is ["build"]
-        assert_eq!(hint.candidates, vec!["build"]);
-        assert_eq!(hint.selected, None); // "bug" not found in fresh list
+        // While cycling, stored candidates are shown regardless of prefix
+        assert_eq!(hint.candidates, vec!["bug", "build"]);
+        assert_eq!(hint.selected, Some(0)); // "bug" is at index 0 in sorted list
     }
 
     #[test]
