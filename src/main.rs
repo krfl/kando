@@ -15,7 +15,7 @@ use board::storage::{append_activity, init_board, init_board_at, load_board, res
 use board::{Card, Priority, generate_slug, normalize_column_orders, slug_for_rename, slug_to_name};
 
 #[derive(Parser)]
-#[command(name = "kando", about = "A keyboard-first Kanban TUI")]
+#[command(name = "kando", about = "A keyboard-first Kanban TUI", version)]
 struct Cli {
     /// Use Nerd Font glyphs instead of ASCII icons
     #[arg(long, visible_alias = "nf", global = true)]
