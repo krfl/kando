@@ -242,7 +242,7 @@ pub const SPACE_BINDINGS: &[Binding] = &[
     Binding { key: "a", description: "Edit assignees" },
     Binding { key: "p", description: "Set priority" },
     Binding { key: "m", description: "Move to column" },
-    Binding { key: "b", description: "Toggle blocker" },
+    Binding { key: "b", description: "Block / unblock" },
     Binding { key: "D", description: "Set due date" },
     Binding { key: "x", description: "Archive card" },
     Binding { key: "u", description: "Undo last delete" },

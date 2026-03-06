@@ -536,8 +536,8 @@ fn serialize_card(card: &Card) -> String {
         let assignees: Vec<String> = card.assignees.iter().map(|a| format!("{a:?}")).collect();
         fm.push_str(&format!("assignees = [{}]\n", assignees.join(", ")));
     }
-    if card.blocked {
-        fm.push_str("blocked = true\n");
+    if let Some(reason) = &card.blocked {
+        fm.push_str(&format!("blocked = {:?}\n", reason));
     }
     if let Some(due) = card.due {
         fm.push_str(&format!("due = \"{}\"\n", due.format("%Y-%m-%d")));
@@ -976,8 +976,8 @@ pub fn serialize_template(tmpl: &Template) -> String {
     } else {
         fm.push_str("assignees = []\n");
     }
-    if tmpl.blocked {
-        fm.push_str("blocked = true\n");
+    if let Some(reason) = &tmpl.blocked {
+        fm.push_str(&format!("blocked = {:?}\n", reason));
     }
     if let Some(offset) = tmpl.due_offset_days {
         fm.push_str(&format!("due_offset_days = {offset}\n"));
@@ -1634,13 +1634,31 @@ mod tests {
     #[test]
     fn serialize_card_blocked_roundtrip() {
         let mut card = Card::new("001".into(), "Blocked".into());
-        card.blocked = true;
+        card.blocked = Some(String::new());
         let text = serialize_card(&card);
-        assert!(text.contains("blocked = true"));
+        assert!(text.contains("blocked = "));
         // Roundtrip
         let (fm, _body) = parse_frontmatter(&text).unwrap();
         let loaded: Card = toml::from_str(&fm).unwrap();
-        assert!(loaded.blocked);
+        assert!(loaded.is_blocked());
+    }
+
+    #[test]
+    fn serialize_card_blocked_with_reason_roundtrip() {
+        let mut card = Card::new("001".into(), "Blocked".into());
+        card.blocked = Some("waiting on API".into());
+        let text = serialize_card(&card);
+        assert!(text.contains("blocked = \"waiting on API\""));
+        let (fm, _body) = parse_frontmatter(&text).unwrap();
+        let loaded: Card = toml::from_str(&fm).unwrap();
+        assert_eq!(loaded.blocked, Some("waiting on API".to_string()));
+    }
+
+    #[test]
+    fn serialize_card_blocked_none_omits_field() {
+        let card = Card::new("001".into(), "Normal card".into());
+        let text = serialize_card(&card);
+        assert!(!text.contains("blocked ="));
     }
 
     #[test]
@@ -1693,7 +1711,7 @@ mod tests {
         card.priority = Priority::Urgent;
         card.tags = vec!["bug".into(), "critical".into()];
         card.assignees = vec!["alice".into()];
-        card.blocked = true;
+        card.blocked = Some(String::new());
         card.started = Some(Utc.with_ymd_and_hms(2025, 5, 1, 0, 0, 0).unwrap());
         card.completed = Some(Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap());
         card.body = "Full description.\n\nMultiple paragraphs.".into();
@@ -1706,7 +1724,7 @@ mod tests {
         assert_eq!(loaded.priority, Priority::Urgent);
         assert_eq!(loaded.tags, vec!["bug", "critical"]);
         assert_eq!(loaded.assignees, vec!["alice"]);
-        assert!(loaded.blocked);
+        assert!(loaded.is_blocked());
         assert!(loaded.started.is_some());
         assert!(loaded.completed.is_some());
         assert_eq!(body, card.body);
@@ -2261,7 +2279,7 @@ mod tests {
             priority: Priority::Normal,
             tags: Vec::new(),
             assignees: Vec::new(),
-            blocked: false,
+            blocked: None,
             due_offset_days: None,
             body: String::new(),
         }
@@ -2273,7 +2291,7 @@ mod tests {
             priority: Priority::High,
             tags: vec!["bug".into(), "critical".into()],
             assignees: vec!["alice".into()],
-            blocked: true,
+            blocked: Some(String::new()),
             due_offset_days: Some(7),
             body: "## Steps\n\n1. Do X\n2. Do Y".to_string(),
         };
@@ -2285,7 +2303,7 @@ mod tests {
         assert_eq!(loaded.priority, Priority::High);
         assert_eq!(loaded.tags, vec!["bug", "critical"]);
         assert_eq!(loaded.assignees, vec!["alice"]);
-        assert!(loaded.blocked);
+        assert!(loaded.blocked.is_some());
         assert_eq!(loaded.due_offset_days, Some(7));
         assert_eq!(loaded.body, "## Steps\n\n1. Do X\n2. Do Y");
     }
@@ -2301,9 +2319,28 @@ mod tests {
         assert_eq!(loaded.priority, Priority::Normal);
         assert!(loaded.tags.is_empty());
         assert!(loaded.assignees.is_empty());
-        assert!(!loaded.blocked);
+        assert!(loaded.blocked.is_none());
         assert!(loaded.due_offset_days.is_none());
         assert!(loaded.body.is_empty());
+    }
+
+    #[test]
+    fn template_blocked_with_reason_roundtrip() {
+        let tmpl = Template {
+            priority: Priority::Normal,
+            tags: Vec::new(),
+            assignees: Vec::new(),
+            blocked: Some("needs design review".into()),
+            due_offset_days: None,
+            body: String::new(),
+        };
+        let text = serialize_template(&tmpl);
+        assert!(text.contains("blocked = \"needs design review\""));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.md");
+        fs::write(&path, &text).unwrap();
+        let loaded = load_template(&path).unwrap();
+        assert_eq!(loaded.blocked, Some("needs design review".to_string()));
     }
 
     #[test]
@@ -2335,7 +2372,7 @@ mod tests {
             priority: Priority::Low,
             tags: vec!["feat".into()],
             assignees: vec!["bob".into()],
-            blocked: false,
+            blocked: None,
             due_offset_days: Some(14),
             body: "Description here".to_string(),
         };
@@ -2497,7 +2534,7 @@ mod tests {
         assert_eq!(loaded.priority, Priority::Normal);
         assert!(loaded.tags.is_empty());
         assert!(loaded.assignees.is_empty());
-        assert!(!loaded.blocked);
+        assert!(loaded.blocked.is_none());
         assert!(loaded.due_offset_days.is_none());
         assert!(loaded.body.is_empty());
     }
@@ -2599,7 +2636,7 @@ mod tests {
         tmpl.priority = Priority::High;
         tmpl.tags = vec!["rust".into(), "tui".into()];
         tmpl.assignees = vec!["alice".into()];
-        tmpl.blocked = true;
+        tmpl.blocked = Some(String::new());
         tmpl.body = "Template body content".into();
         tmpl.due_offset_days = Some(7);
         save_template(&kando_dir, "bug", &tmpl).unwrap();
@@ -2608,7 +2645,7 @@ mod tests {
         assert_eq!(loaded.priority, Priority::High);
         assert_eq!(loaded.tags, vec!["rust", "tui"]);
         assert_eq!(loaded.assignees, vec!["alice"]);
-        assert!(loaded.blocked);
+        assert!(loaded.blocked.is_some());
         assert_eq!(loaded.body, "Template body content");
         assert_eq!(loaded.due_offset_days, Some(7));
     }

@@ -7,7 +7,24 @@ pub mod sync;
 use chrono::{DateTime, NaiveDate, Utc};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize `blocked` from either a TOML bool or a string.
+/// `true` → `Some("")`, `false` / absent → `None`, `"reason"` → `Some("reason")`.
+fn deserialize_blocked<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrString {
+        Bool(#[allow(dead_code)] bool),
+        Str(#[allow(dead_code)] String),
+    }
+    match Option::<BoolOrString>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(BoolOrString::Bool(true)) => Ok(Some(String::new())),
+        Some(BoolOrString::Bool(false)) => Ok(None),
+        Some(BoolOrString::Str(s)) => Ok(Some(s)),
+    }
+}
 
 /// The top-level board containing all columns and cards.
 #[derive(Debug, Clone)]
@@ -146,8 +163,8 @@ pub struct Card {
     pub tags: Vec<String>,
     #[serde(default)]
     pub assignees: Vec<String>,
-    #[serde(default)]
-    pub blocked: bool,
+    #[serde(default, deserialize_with = "deserialize_blocked", skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due: Option<NaiveDate>,
     /// When the card first moved past backlog (commitment point). `None` for cards still in backlog.
@@ -171,8 +188,8 @@ pub struct Template {
     pub tags: Vec<String>,
     #[serde(default)]
     pub assignees: Vec<String>,
-    #[serde(default)]
-    pub blocked: bool,
+    #[serde(default, deserialize_with = "deserialize_blocked", skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_offset_days: Option<u32>,
     #[serde(skip)]
@@ -210,12 +227,16 @@ impl Card {
             priority: Priority::default(),
             tags: Vec::new(),
             assignees: Vec::new(),
-            blocked: false,
+            blocked: None,
             due: None,
             started: None,
             completed: None,
             body: "<!-- add body content here -->".into(),
         }
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        self.blocked.is_some()
     }
 
     /// Whether this card is past its due date.
@@ -1119,7 +1140,7 @@ mod tests {
         assert_eq!(c.priority, Priority::Normal);
         assert!(c.tags.is_empty());
         assert!(c.assignees.is_empty());
-        assert!(!c.blocked);
+        assert!(!c.is_blocked());
         assert!(c.started.is_none());
         assert!(c.completed.is_none());
         assert_eq!(c.body, "<!-- add body content here -->");
@@ -1170,7 +1191,7 @@ mod tests {
         normal.priority = Priority::Normal;
         let mut blocked = Card::new("2".into(), "Blocked".into());
         blocked.priority = Priority::Normal;
-        blocked.blocked = true;
+        blocked.blocked = Some(String::new());
         col.cards = vec![normal, blocked];
         col.sort_cards();
         // Both Normal priority, but sort is by priority then updated — blocked doesn't affect sort
@@ -1607,5 +1628,91 @@ mod tests {
     fn generate_template_slug_template_already_exists() {
         let existing = vec!["template".to_string()];
         assert_eq!(generate_template_slug("", &existing), "template-2");
+    }
+
+    // ── deserialize_blocked tests ──
+
+    #[test]
+    fn deserialize_blocked_true_yields_some_empty() {
+        let toml_str = r#"
+id = "1"
+title = "T"
+created = "2025-01-01T00:00:00Z"
+updated = "2025-01-01T00:00:00Z"
+blocked = true
+"#;
+        let card: Card = toml::from_str(toml_str).unwrap();
+        assert_eq!(card.blocked, Some(String::new()));
+    }
+
+    #[test]
+    fn deserialize_blocked_false_yields_none() {
+        let toml_str = r#"
+id = "1"
+title = "T"
+created = "2025-01-01T00:00:00Z"
+updated = "2025-01-01T00:00:00Z"
+blocked = false
+"#;
+        let card: Card = toml::from_str(toml_str).unwrap();
+        assert!(card.blocked.is_none());
+    }
+
+    #[test]
+    fn deserialize_blocked_absent_yields_none() {
+        let toml_str = r#"
+id = "1"
+title = "T"
+created = "2025-01-01T00:00:00Z"
+updated = "2025-01-01T00:00:00Z"
+"#;
+        let card: Card = toml::from_str(toml_str).unwrap();
+        assert!(card.blocked.is_none());
+    }
+
+    #[test]
+    fn deserialize_blocked_string_yields_some_reason() {
+        let toml_str = r#"
+id = "1"
+title = "T"
+created = "2025-01-01T00:00:00Z"
+updated = "2025-01-01T00:00:00Z"
+blocked = "waiting on API"
+"#;
+        let card: Card = toml::from_str(toml_str).unwrap();
+        assert_eq!(card.blocked, Some("waiting on API".to_string()));
+    }
+
+    #[test]
+    fn deserialize_blocked_empty_string_yields_some_empty() {
+        let toml_str = r#"
+id = "1"
+title = "T"
+created = "2025-01-01T00:00:00Z"
+updated = "2025-01-01T00:00:00Z"
+blocked = ""
+"#;
+        let card: Card = toml::from_str(toml_str).unwrap();
+        assert_eq!(card.blocked, Some(String::new()));
+    }
+
+    #[test]
+    fn is_blocked_none_returns_false() {
+        let card = Card::new("1".into(), "T".into());
+        assert!(!card.is_blocked());
+    }
+
+    #[test]
+    fn is_blocked_some_empty_returns_true() {
+        let mut card = Card::new("1".into(), "T".into());
+        card.blocked = Some(String::new());
+        assert!(card.is_blocked());
+    }
+
+    #[test]
+    fn is_blocked_some_reason_returns_true() {
+        let mut card = Card::new("1".into(), "T".into());
+        card.blocked = Some("reason".into());
+        assert!(card.is_blocked());
     }
 }

@@ -289,7 +289,7 @@ fn render_card(
     let is_new = is_new_card(card.created, now);
     let is_overdue = card.is_overdue(now.date_naive());
 
-    let border_color = card_border_color(card.blocked, is_overdue, is_col_focused, stale, is_new);
+    let border_color = card_border_color(card.is_blocked(), is_overdue, is_col_focused, stale, is_new);
 
     let selected_mod = if is_selected { Modifier::BOLD } else { Modifier::empty() };
 
@@ -331,7 +331,7 @@ fn render_card(
     if is_overdue {
         candidates.push((icons.overdue, Style::default().fg(Theme::OVERDUE)));
     }
-    if card.blocked {
+    if card.is_blocked() {
         candidates.push((icons.blocker, Style::default().fg(Theme::BLOCKER)));
     }
 

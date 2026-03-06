@@ -155,11 +155,11 @@ fn build_concepts(lines: &mut Vec<Line<'static>>, key: Style, dim: Style) {
         dim,
     )));
     lines.push(Line::from(Span::styled(
-        "assignees, blocked flag, and due date. Sort by priority",
+        "assignees, blocker status (with optional reason), and",
         dim,
     )));
     lines.push(Line::from(Span::styled(
-        "then most recently updated.",
+        "due date. Sort by priority then most recently updated.",
         dim,
     )));
     lines.push(Line::from(""));

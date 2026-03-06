@@ -113,7 +113,7 @@ pub fn compute_metrics(board: &Board, since: Option<DateTime<Utc>>) -> BoardMetr
         .enumerate()
         .filter(|(idx, col)| *idx > 0 && col.slug != "done")
         .flat_map(|(_, col)| col.cards.iter())
-        .filter(|card| card.blocked)
+        .filter(|card| card.is_blocked())
         .count() as u32;
 
     let blocked_pct = if active_wip_total > 0 {
@@ -1004,9 +1004,9 @@ mod tests {
     #[test]
     fn blocked_count_only_active_columns() {
         let mut blocked_in_backlog = Card::new("1".into(), "A".into());
-        blocked_in_backlog.blocked = true;
+        blocked_in_backlog.blocked = Some(String::new());
         let mut blocked_in_progress = Card::new("2".into(), "B".into());
-        blocked_in_progress.blocked = true;
+        blocked_in_progress.blocked = Some(String::new());
         let not_blocked = Card::new("3".into(), "C".into());
 
         let board = make_board(vec![
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn blocked_pct_calculation() {
         let mut blocked = Card::new("1".into(), "A".into());
-        blocked.blocked = true;
+        blocked.blocked = Some(String::new());
 
         let board = make_board(vec![
             make_column("backlog", "Backlog", vec![]),

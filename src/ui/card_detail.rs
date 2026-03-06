@@ -22,7 +22,7 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
 
     let stale = staleness(card, policies, now);
     let is_overdue = card.is_overdue(now.date_naive());
-    let border_color = card_border_color(card.blocked, is_overdue, true, stale, false);
+    let border_color = card_border_color(card.is_blocked(), is_overdue, true, stale, false);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -73,14 +73,21 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
     };
     lines.push(Line::from(priority_spans));
 
-    if card.blocked {
-        lines.push(Line::from(vec![
+    if let Some(reason) = &card.blocked {
+        let mut spans = vec![
             Span::styled("Status:   ", Theme::dim_style()),
             Span::styled(
                 format!("{} BLOCKED", icons.blocker),
                 Style::default().fg(Theme::BLOCKER),
             ),
-        ]));
+        ];
+        if !reason.is_empty() {
+            spans.push(Span::styled(
+                format!(" — {reason}"),
+                Style::default().fg(Theme::BLOCKER),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
 
     // Due date

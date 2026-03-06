@@ -42,7 +42,7 @@ Your board consists of **columns** (like Backlog, In Progress, Done) that contai
 | **Tags** | Categorize cards with tags like `bug`, `feature`, `urgent` |
 | **Assignees** | Assign cards to team members by name |
 | **Priority** | Set priority level (low, normal, high, urgent). Cards auto-sort by priority |
-| **Blockers** | Mark a card as blocked when something is preventing progress |
+| **Blockers** | Mark a card as blocked with an optional reason explaining what's preventing progress |
 | **Age Tracking** | See how long a card has been sitting around |
 
 ### Navigating the Board
@@ -79,7 +79,7 @@ Kando uses "minor modes" (inspired by the Helix text editor) to keep commands di
 - `a` - Edit assignees
 - `p` - Change priority
 - `m` - Move card to a specific column
-- `b` - Toggle blocked status
+- `b` - Block (prompts for optional reason) / unblock
 - `x` - Archive card
 - `u` - Undo last delete
 
@@ -120,7 +120,7 @@ Press `.` to repeat the last mutation. The status bar shows what `.` will do (e.
 | Set tags | `tags: bug, ui` | Overwrites tags on selected card |
 | Set assignees | `assignees: alice` | Overwrites assignees on selected card |
 | Set due date | `due: 2026-03-15` | Sets or clears due date on selected card |
-| Toggle blocked | `block` / `unblock` | Sets or clears blocked flag |
+| Toggle blocked | `block` / `unblock` | Sets or clears blocked status (with reason) |
 | Archive | `archive` | Moves selected card to archive column |
 | Delete card | `delete` | Opens confirmation prompt before deleting |
 | Pipe command | `pipe: echo hi` | Re-runs stored command on selected card |
@@ -427,7 +427,7 @@ assignees = ["alice"]
 priority = "high"
 created = "2024-01-15T10:30:00Z"
 updated = "2024-01-16T14:22:00Z"
-blocked = false
+blocked = "waiting on API review"
 ---
 
 ## Notes
