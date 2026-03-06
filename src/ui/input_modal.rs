@@ -162,7 +162,7 @@ pub fn render_completion_popup(f: &mut Frame, area: Rect, hint: &CompletionHint)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(Theme::FG))
         .title(Span::styled(
-            " completions ",
+            hint.title,
             Style::default()
                 .fg(Theme::FG)
                 .add_modifier(Modifier::BOLD),

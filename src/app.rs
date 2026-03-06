@@ -103,6 +103,7 @@ pub struct CompletionState {
 /// Visible completion hint shown as a popup while editing tags/assignees.
 #[derive(Debug, Clone)]
 pub struct CompletionHint {
+    pub title: &'static str,
     pub candidates: Vec<String>,
     pub selected: Option<usize>,
 }
@@ -2000,6 +2001,8 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     on_confirm: InputTarget::EditTags,
                     completion: None,
                 };
+                update_completion_hint(state, board);
+                update_ghost_text(state, board);
             } else {
                 state.mode = Mode::Normal;
             }
@@ -2013,6 +2016,8 @@ fn handle_card_action<B: ratatui::backend::Backend>(
                     on_confirm: InputTarget::EditAssignees,
                     completion: None,
                 };
+                update_completion_hint(state, board);
+                update_ghost_text(state, board);
             } else {
                 state.mode = Mode::Normal;
             }
@@ -2383,9 +2388,11 @@ fn compute_completion_hint(state: &AppState, board: &Board) -> Option<Completion
         return None;
     };
 
-    if !matches!(on_confirm, InputTarget::EditTags | InputTarget::EditAssignees) {
-        return None;
-    }
+    let title = match on_confirm {
+        InputTarget::EditTags => " tags ",
+        InputTarget::EditAssignees => " assignees ",
+        _ => return None,
+    };
 
     let all_candidates = completion_candidates(on_confirm, board);
     if all_candidates.is_empty() {
@@ -2407,7 +2414,7 @@ fn compute_completion_hint(state: &AppState, board: &Board) -> Option<Completion
         candidates.iter().position(|c| c == current)
     });
 
-    Some(CompletionHint { candidates, selected })
+    Some(CompletionHint { title, candidates, selected })
 }
 
 /// Compute ghost text: the suffix of the first matching candidate shown dimmed after cursor.
@@ -6375,6 +6382,121 @@ mod tests {
 
         let hint = compute_completion_hint(&state, &board).unwrap();
         assert_eq!(hint.candidates, vec!["alpha", "zebra"]);
+    }
+
+    #[test]
+    fn completion_hint_title_is_tags_for_edit_tags() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].tags = vec!["bug".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Tags",
+            buf: TextBuffer::new("".into()),
+            on_confirm: InputTarget::EditTags,
+            completion: None,
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.title, " tags ");
+    }
+
+    #[test]
+    fn completion_hint_title_is_assignees_for_edit_assignees() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        board.columns[0].cards[0].assignees = vec!["alice".into()];
+
+        let mut state = AppState::new();
+        state.mode = Mode::Input {
+            prompt: "Assignees",
+            buf: TextBuffer::new("".into()),
+            on_confirm: InputTarget::EditAssignees,
+            completion: None,
+        };
+
+        let hint = compute_completion_hint(&state, &board).unwrap();
+        assert_eq!(hint.title, " assignees ");
+    }
+
+    #[test]
+    fn edit_tags_action_populates_completion_hint_immediately() {
+        let mut board = test_board(&[("Backlog", &["A", "B"])]);
+        // Tags on card B — selected card A has none, so buffer is empty
+        board.columns[0].cards[1].tags = vec!["bug".into(), "feature".into()];
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+
+        handle_card_action(&mut board, &mut state, Action::EditTags, &mut terminal, fake_dir(), false).unwrap();
+
+        assert!(state.completion_hint.is_some());
+        let hint = state.completion_hint.as_ref().unwrap();
+        assert_eq!(hint.title, " tags ");
+        assert_eq!(hint.candidates.len(), 2);
+    }
+
+    #[test]
+    fn edit_assignees_action_populates_completion_hint_immediately() {
+        let mut board = test_board(&[("Backlog", &["A", "B"])]);
+        // Assignees on card B — selected card A has none, so buffer is empty
+        board.columns[0].cards[1].assignees = vec!["alice".into(), "bob".into()];
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+
+        handle_card_action(&mut board, &mut state, Action::EditAssignees, &mut terminal, fake_dir(), false).unwrap();
+
+        assert!(state.completion_hint.is_some());
+        let hint = state.completion_hint.as_ref().unwrap();
+        assert_eq!(hint.title, " assignees ");
+        assert_eq!(hint.candidates.len(), 2);
+    }
+
+    #[test]
+    fn edit_tags_action_ghost_text_none_when_buffer_empty() {
+        // Ghost text requires a non-empty token, so it's None when the buffer is empty
+        let mut board = test_board(&[("Backlog", &["A", "B"])]);
+        board.columns[0].cards[1].tags = vec!["bug".into()];
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+
+        handle_card_action(&mut board, &mut state, Action::EditTags, &mut terminal, fake_dir(), false).unwrap();
+
+        assert!(state.ghost_text.is_none());
+    }
+
+    #[test]
+    fn edit_assignees_action_ghost_text_none_when_buffer_empty() {
+        let mut board = test_board(&[("Backlog", &["A", "B"])]);
+        board.columns[0].cards[1].assignees = vec!["alice".into()];
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+
+        handle_card_action(&mut board, &mut state, Action::EditAssignees, &mut terminal, fake_dir(), false).unwrap();
+
+        assert!(state.ghost_text.is_none());
+    }
+
+    #[test]
+    fn edit_tags_no_tags_on_board_completion_hint_is_none() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+
+        handle_card_action(&mut board, &mut state, Action::EditTags, &mut terminal, fake_dir(), false).unwrap();
+
+        assert!(state.completion_hint.is_none());
+        assert!(state.ghost_text.is_none());
+    }
+
+    #[test]
+    fn edit_assignees_no_assignees_on_board_completion_hint_is_none() {
+        let mut board = test_board(&[("Backlog", &["A"])]);
+        let mut state = AppState::new();
+        let mut terminal = test_terminal();
+
+        handle_card_action(&mut board, &mut state, Action::EditAssignees, &mut terminal, fake_dir(), false).unwrap();
+
+        assert!(state.completion_hint.is_none());
+        assert!(state.ghost_text.is_none());
     }
 
     #[test]
