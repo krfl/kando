@@ -2340,7 +2340,9 @@ fn cycle_input_completion(state: &mut AppState, board: &Board, forward: bool) {
     } else {
         let (token, start) = current_csv_token(&buf.input);
         let already = entered_values(&buf.input);
-        (filtered_candidates(&all_candidates, token, &already), start)
+        let mut filtered = filtered_candidates(&all_candidates, token, &already);
+        filtered.sort_by_key(|c| c.to_lowercase());
+        (filtered, start)
     };
 
     if candidates.is_empty() {
