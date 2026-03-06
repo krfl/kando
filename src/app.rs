@@ -8,6 +8,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::board::age::{run_auto_archive, run_auto_close};
 use crate::board::storage::{append_activity, load_board, load_local_config, load_trash, resolve_board, save_board, save_local_config, trash_card, restore_card, BoardContext, TrashEntry};
+use crate::config::LocalConfig;
 use crate::board::sync::{self, SyncState};
 use crate::board::{Board, Card, Column};
 use crate::input::action::Action;
@@ -106,6 +107,13 @@ pub struct CompletionHint {
     pub selected: Option<usize>,
 }
 
+/// Which page of the help panel is visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpPage {
+    Keybindings,
+    Concepts,
+}
+
 /// Current interaction mode.
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -141,11 +149,9 @@ pub enum Mode {
     Metrics {
         scroll: u16,
     },
-    Tutorial {
-        scroll: u16,
-    },
     Help {
         scroll: u16,
+        page: HelpPage,
     },
 }
 
@@ -312,8 +318,8 @@ pub struct AppState {
     pub completion_hint: Option<CompletionHint>,
     /// Use Nerd Font glyphs instead of ASCII icons.
     pub nerd_font: bool,
-    /// Whether the first-launch tutorial has been shown (from local.toml).
-    pub tutorial_shown: bool,
+    /// Whether the first-launch help hint has been shown (from local.toml).
+    pub help_hint_shown: bool,
     /// Last repeatable card mutation for `.` (repeat last action).
     pub last_repeatable: Option<RepeatableAction>,
     /// Deferred template editing — slug to open in $EDITOR after handler returns.
@@ -346,7 +352,7 @@ impl AppState {
             ghost_text: None,
             completion_hint: None,
             nerd_font: false,
-            tutorial_shown: false,
+            help_hint_shown: false,
             last_repeatable: None,
             pending_editor_template: None,
             hook_rx: None,
@@ -723,14 +729,16 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
     state.nerd_font = nerd_font_flag || board.nerd_font;
 
     // Load per-user local preferences.
-    match load_local_config(kando_dir) {
-        Ok(local_cfg) => {
-            state.tutorial_shown = local_cfg.tutorial_shown;
+    let mut local_cfg = match load_local_config(kando_dir) {
+        Ok(cfg) => {
+            state.help_hint_shown = cfg.help_hint_shown;
+            cfg
         }
         Err(e) => {
             state.notify_error(format!("local.toml: {e}"));
+            LocalConfig::default()
         }
-    }
+    };
 
     // For local boards with sync_branch, initialize sync the legacy way
     if !ctx.is_git_sync() {
@@ -761,9 +769,12 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
     state.clamp_selection(&board);
 
-    // Show tutorial on first launch
-    if !state.tutorial_shown {
-        state.mode = Mode::Tutorial { scroll: 0 };
+    // Show help hint on first launch
+    if !state.help_hint_shown {
+        state.notify("Press ? for help");
+        state.help_hint_shown = true;
+        local_cfg.help_hint_shown = true;
+        let _ = save_local_config(kando_dir, &local_cfg);
     }
 
     let mut last_auto_close = Instant::now();
@@ -1097,15 +1108,17 @@ fn process_action(
             state.clamp_selection_filtered(board);
             state.notify("Board reloaded");
         }
-        Action::ShowHelp => state.mode = Mode::Help { scroll: 0 },
-        Action::ShowMetrics => state.mode = Mode::Metrics { scroll: 0 },
-        Action::DismissTutorial => {
-            state.mode = Mode::Normal;
-            state.tutorial_shown = true;
-            let mut local_cfg = load_local_config(kando_dir).unwrap_or_default();
-            local_cfg.tutorial_shown = true;
-            save_local_config(kando_dir, &local_cfg)?;
+        Action::ShowHelp => state.mode = Mode::Help { scroll: 0, page: HelpPage::Keybindings },
+        Action::ToggleHelpPage => {
+            if let Mode::Help { scroll, page } = &mut state.mode {
+                *scroll = 0;
+                *page = match page {
+                    HelpPage::Keybindings => HelpPage::Concepts,
+                    HelpPage::Concepts => HelpPage::Keybindings,
+                };
+            }
         }
+        Action::ShowMetrics => state.mode = Mode::Metrics { scroll: 0 },
         Action::Quit => {
             match &state.mode {
                 Mode::Normal => state.should_quit = true,
@@ -2014,7 +2027,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailScrollDown => {
             match &mut state.mode {
-                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } | Mode::Tutorial { scroll } => {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll, .. } => {
                     *scroll = scroll.saturating_add(1);
                 }
                 _ => {}
@@ -2022,7 +2035,7 @@ fn handle_card_action<B: ratatui::backend::Backend>(
         }
         Action::DetailScrollUp => {
             match &mut state.mode {
-                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll } | Mode::Tutorial { scroll } => {
+                Mode::CardDetail { scroll } | Mode::Metrics { scroll } | Mode::Help { scroll, .. } => {
                     *scroll = scroll.saturating_sub(1);
                 }
                 _ => {}
@@ -4277,43 +4290,75 @@ mod tests {
     fn test_help_scroll() {
         let mut board = test_board(&[("A", &["c1"])]);
         let mut state = AppState::new();
-        state.mode = Mode::Help { scroll: 0 };
+        state.mode = Mode::Help { scroll: 0, page: HelpPage::Keybindings };
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let kando_dir = std::path::Path::new("/tmp/fake");
         handle_card_action(&mut board, &mut state, Action::DetailScrollDown, &mut terminal, kando_dir, false).unwrap();
-        if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 1); } else { panic!("expected Mode::Help"); }
+        if let Mode::Help { scroll, .. } = state.mode { assert_eq!(scroll, 1); } else { panic!("expected Mode::Help"); }
         handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
-        if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
+        if let Mode::Help { scroll, .. } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
         handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
-        if let Mode::Help { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
-    }
-
-    #[test]
-    fn test_tutorial_scroll() {
-        let mut board = test_board(&[("A", &["c1"])]);
-        let mut state = AppState::new();
-        state.mode = Mode::Tutorial { scroll: 0 };
-        let backend = ratatui::backend::TestBackend::new(80, 24);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let kando_dir = std::path::Path::new("/tmp/fake");
-        handle_card_action(&mut board, &mut state, Action::DetailScrollDown, &mut terminal, kando_dir, false).unwrap();
-        if let Mode::Tutorial { scroll } = state.mode { assert_eq!(scroll, 1); } else { panic!("expected Mode::Tutorial"); }
-        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
-        if let Mode::Tutorial { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Tutorial"); }
-        handle_card_action(&mut board, &mut state, Action::DetailScrollUp, &mut terminal, kando_dir, false).unwrap();
-        if let Mode::Tutorial { scroll } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Tutorial"); }
+        if let Mode::Help { scroll, .. } = state.mode { assert_eq!(scroll, 0); } else { panic!("expected Mode::Help"); }
     }
 
     #[test]
     fn test_close_help_panel() {
         let mut board = test_board(&[("A", &["c1"])]);
         let mut state = AppState::new();
-        state.mode = Mode::Help { scroll: 3 };
+        state.mode = Mode::Help { scroll: 3, page: HelpPage::Keybindings };
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let kando_dir = std::path::Path::new("/tmp/fake");
         handle_card_action(&mut board, &mut state, Action::ClosePanel, &mut terminal, kando_dir, false).unwrap();
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn test_show_help_defaults_to_keybindings_page() {
+        let mut state = AppState::new();
+        state.mode = Mode::Help { scroll: 0, page: HelpPage::Keybindings };
+        assert!(matches!(state.mode, Mode::Help { page: HelpPage::Keybindings, .. }));
+    }
+
+    #[test]
+    fn test_toggle_help_page_switches_and_resets_scroll() {
+        let mut state = AppState::new();
+        state.mode = Mode::Help { scroll: 5, page: HelpPage::Keybindings };
+        // Simulate ToggleHelpPage
+        if let Mode::Help { scroll, page } = &mut state.mode {
+            *scroll = 0;
+            *page = match page {
+                HelpPage::Keybindings => HelpPage::Concepts,
+                HelpPage::Concepts => HelpPage::Keybindings,
+            };
+        }
+        assert!(matches!(state.mode, Mode::Help { scroll: 0, page: HelpPage::Concepts }));
+        // Toggle back
+        if let Mode::Help { scroll, .. } = &mut state.mode {
+            *scroll = 7; // simulate scrolling
+        }
+        if let Mode::Help { scroll, page } = &mut state.mode {
+            *scroll = 0;
+            *page = match page {
+                HelpPage::Keybindings => HelpPage::Concepts,
+                HelpPage::Concepts => HelpPage::Keybindings,
+            };
+        }
+        assert!(matches!(state.mode, Mode::Help { scroll: 0, page: HelpPage::Keybindings }));
+    }
+
+    #[test]
+    fn test_toggle_help_page_noop_outside_help() {
+        let mut state = AppState::new();
+        // mode is Normal — toggle should have no effect
+        if let Mode::Help { scroll, page } = &mut state.mode {
+            *scroll = 0;
+            *page = match page {
+                HelpPage::Keybindings => HelpPage::Concepts,
+                HelpPage::Concepts => HelpPage::Keybindings,
+            };
+        }
         assert!(matches!(state.mode, Mode::Normal));
     }
 

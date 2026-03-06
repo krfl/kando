@@ -71,8 +71,8 @@ pub enum Action {
     // Board
     ReloadBoard,
     ShowHelp,
+    ToggleHelpPage,
     ShowMetrics,
-    DismissTutorial,
     Quit,
 
     // Template actions

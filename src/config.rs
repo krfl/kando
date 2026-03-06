@@ -25,9 +25,9 @@ fn default_kando_branch() -> String {
 /// Defaults to all-off so missing fields are handled gracefully.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LocalConfig {
-    /// Whether the first-launch tutorial has been shown.
-    #[serde(default)]
-    pub tutorial_shown: bool,
+    /// Whether the first-launch help hint has been shown.
+    #[serde(default, alias = "tutorial_shown")]
+    pub help_hint_shown: bool,
 }
 
 #[cfg(test)]
@@ -58,22 +58,44 @@ mod tests {
     }
 
     #[test]
-    fn local_config_default_tutorial_shown_is_false() {
-        assert!(!LocalConfig::default().tutorial_shown);
+    fn local_config_default_help_hint_shown_is_false() {
+        assert!(!LocalConfig::default().help_hint_shown);
     }
 
     #[test]
-    fn local_config_tutorial_shown_true_roundtrip() {
-        let original = LocalConfig { tutorial_shown: true };
+    fn local_config_help_hint_shown_true_roundtrip() {
+        let original = LocalConfig { help_hint_shown: true };
         let serialized = toml::to_string_pretty(&original).unwrap();
         let loaded: LocalConfig = toml::from_str(&serialized).unwrap();
-        assert!(loaded.tutorial_shown);
+        assert!(loaded.help_hint_shown);
     }
 
     #[test]
-    fn local_config_missing_tutorial_shown_defaults_to_false() {
+    fn local_config_missing_help_hint_shown_defaults_to_false() {
         let loaded: LocalConfig = toml::from_str("").unwrap();
-        assert!(!loaded.tutorial_shown);
+        assert!(!loaded.help_hint_shown);
+    }
+
+    #[test]
+    fn local_config_legacy_tutorial_shown_deserializes_as_help_hint_shown() {
+        let loaded: LocalConfig = toml::from_str("tutorial_shown = true\n").unwrap();
+        assert!(loaded.help_hint_shown);
+    }
+
+    #[test]
+    fn local_config_serializes_with_new_field_name_not_alias() {
+        let cfg = LocalConfig { help_hint_shown: true };
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        assert!(serialized.contains("help_hint_shown"));
+        assert!(!serialized.contains("tutorial_shown"));
+    }
+
+    #[test]
+    fn local_config_both_keys_present_is_rejected() {
+        let result = toml::from_str::<LocalConfig>(
+            "tutorial_shown = false\nhelp_hint_shown = true\n",
+        );
+        assert!(result.is_err(), "duplicate field must be rejected");
     }
 
     // ---- KandoToml tests ----

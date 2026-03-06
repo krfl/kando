@@ -49,7 +49,6 @@ fn build_left_zone(state: &AppState) -> Vec<Span<'_>> {
         Mode::FilterMenu => "FILTER",
         Mode::CardDetail { .. } => "DETAIL",
         Mode::Metrics { .. } => "METRICS",
-        Mode::Tutorial { .. } => "TUTORIAL",
         Mode::Help { .. } => "HELP",
         Mode::Template => "TEMPLATE",
         Mode::Picker { .. } => "PICKER",

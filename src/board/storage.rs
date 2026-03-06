@@ -1875,12 +1875,12 @@ mod tests {
     }
 
     #[test]
-    fn test_init_board_local_toml_has_default_tutorial_shown() {
+    fn test_init_board_local_toml_has_default_help_hint_shown() {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         let cfg = load_local_config(&kando_dir).unwrap();
-        assert!(!cfg.tutorial_shown);
+        assert!(!cfg.help_hint_shown);
     }
 
     #[test]
@@ -1913,14 +1913,24 @@ mod tests {
     }
 
     #[test]
-    fn save_local_config_tutorial_shown_true_roundtrip() {
+    fn save_local_config_help_hint_shown_true_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        let cfg = crate::config::LocalConfig { tutorial_shown: true };
+        let cfg = crate::config::LocalConfig { help_hint_shown: true };
         save_local_config(&kando_dir, &cfg).unwrap();
         let loaded = load_local_config(&kando_dir).unwrap();
-        assert!(loaded.tutorial_shown);
+        assert!(loaded.help_hint_shown);
+    }
+
+    #[test]
+    fn load_local_config_legacy_tutorial_shown_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        fs::write(kando_dir.join("local.toml"), "tutorial_shown = true\n").unwrap();
+        let cfg = load_local_config(&kando_dir).unwrap();
+        assert!(cfg.help_hint_shown);
     }
 
     // ── json_escape tests ──

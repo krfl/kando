@@ -5,7 +5,7 @@ pub mod input_modal;
 pub mod metrics;
 pub mod status_bar;
 pub mod theme;
-pub mod tutorial;
+
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -21,7 +21,7 @@ use crate::board::Board;
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 10;
 
-/// Standard overlay rectangle used by Help, Tutorial, CardDetail, and Metrics.
+/// Standard overlay rectangle used by Help, CardDetail, and Metrics.
 pub fn overlay_rect(area: Rect) -> Rect {
     centered_rect(area, 70, 85, 60, 24)
 }
@@ -74,11 +74,8 @@ pub fn render(f: &mut Frame, board: &Board, state: &mut AppState, now: DateTime<
                 card_detail::render_card_detail(f, f.area(), card, &board.policies, scroll, now, icons);
             }
         }
-        crate::app::Mode::Tutorial { scroll } => {
-            tutorial::render_tutorial(f, f.area(), scroll);
-        }
-        crate::app::Mode::Help { scroll } => {
-            help::render_help(f, f.area(), scroll);
+        crate::app::Mode::Help { scroll, page } => {
+            help::render_help(f, f.area(), scroll, page);
         }
         crate::app::Mode::Metrics { scroll } => {
             metrics::render_metrics(f, f.area(), board, scroll, now);

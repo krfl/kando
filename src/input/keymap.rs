@@ -17,14 +17,9 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
         Mode::Confirm { .. } => map_confirm(key),
         Mode::Filter { .. } => map_input(key),
         Mode::Picker { .. } => map_picker(key),
-        Mode::Tutorial { .. } => match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => Action::DismissTutorial,
-            KeyCode::Char('j') | KeyCode::Down => Action::DetailScrollDown,
-            KeyCode::Char('k') | KeyCode::Up => Action::DetailScrollUp,
-            _ => Action::None,
-        },
         Mode::Help { .. } => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::ClosePanel,
+            KeyCode::Char('?') | KeyCode::Tab => Action::ToggleHelpPage,
             KeyCode::Char('j') | KeyCode::Down => Action::DetailScrollDown,
             KeyCode::Char('k') | KeyCode::Up => Action::DetailScrollUp,
             _ => Action::None,
@@ -330,6 +325,7 @@ pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::HelpPage;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -394,44 +390,56 @@ mod tests {
 
     #[test]
     fn help_mode_esc_closes() {
-        let action = map_key(key(KeyCode::Esc), &Mode::Help { scroll: 5 });
+        let action = map_key(key(KeyCode::Esc), &Mode::Help { scroll: 5, page: HelpPage::Keybindings });
         assert_eq!(action, Action::ClosePanel);
     }
 
     #[test]
     fn help_mode_q_closes() {
-        let action = map_key(key(KeyCode::Char('q')), &Mode::Help { scroll: 0 });
+        let action = map_key(key(KeyCode::Char('q')), &Mode::Help { scroll: 0, page: HelpPage::Keybindings });
         assert_eq!(action, Action::ClosePanel);
     }
 
     #[test]
     fn help_mode_j_scrolls_down() {
-        let action = map_key(key(KeyCode::Char('j')), &Mode::Help { scroll: 0 });
+        let action = map_key(key(KeyCode::Char('j')), &Mode::Help { scroll: 0, page: HelpPage::Keybindings });
         assert_eq!(action, Action::DetailScrollDown);
     }
 
     #[test]
     fn help_mode_k_scrolls_up() {
-        let action = map_key(key(KeyCode::Char('k')), &Mode::Help { scroll: 3 });
+        let action = map_key(key(KeyCode::Char('k')), &Mode::Help { scroll: 3, page: HelpPage::Keybindings });
         assert_eq!(action, Action::DetailScrollUp);
     }
 
     #[test]
     fn help_mode_down_arrow_scrolls_down() {
-        let action = map_key(key(KeyCode::Down), &Mode::Help { scroll: 0 });
+        let action = map_key(key(KeyCode::Down), &Mode::Help { scroll: 0, page: HelpPage::Keybindings });
         assert_eq!(action, Action::DetailScrollDown);
     }
 
     #[test]
     fn help_mode_up_arrow_scrolls_up() {
-        let action = map_key(key(KeyCode::Up), &Mode::Help { scroll: 3 });
+        let action = map_key(key(KeyCode::Up), &Mode::Help { scroll: 3, page: HelpPage::Keybindings });
         assert_eq!(action, Action::DetailScrollUp);
     }
 
     #[test]
     fn help_mode_other_key_is_noop() {
-        let action = map_key(key(KeyCode::Char('x')), &Mode::Help { scroll: 0 });
+        let action = map_key(key(KeyCode::Char('x')), &Mode::Help { scroll: 0, page: HelpPage::Keybindings });
         assert_eq!(action, Action::None);
+    }
+
+    #[test]
+    fn help_mode_question_mark_toggles_page() {
+        let action = map_key(key(KeyCode::Char('?')), &Mode::Help { scroll: 0, page: HelpPage::Keybindings });
+        assert_eq!(action, Action::ToggleHelpPage);
+    }
+
+    #[test]
+    fn help_mode_tab_toggles_page() {
+        let action = map_key(key(KeyCode::Tab), &Mode::Help { scroll: 0, page: HelpPage::Keybindings });
+        assert_eq!(action, Action::ToggleHelpPage);
     }
 
     // ── Normal mode bindings ──
@@ -832,51 +840,18 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('b')), &mode), Action::None);
     }
 
-    // ── Tutorial mode bindings ──
-
-    #[test]
-    fn tutorial_j_scrolls_down() {
-        let mode = Mode::Tutorial { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Char('j')), &mode), Action::DetailScrollDown);
-    }
-
-    #[test]
-    fn tutorial_k_scrolls_up() {
-        let mode = Mode::Tutorial { scroll: 3 };
-        assert_eq!(map_key(key(KeyCode::Char('k')), &mode), Action::DetailScrollUp);
-    }
-
-    #[test]
-    fn tutorial_esc_dismisses() {
-        let mode = Mode::Tutorial { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Esc), &mode), Action::DismissTutorial);
-    }
-
-    #[test]
-    fn tutorial_q_dismisses() {
-        let mode = Mode::Tutorial { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Char('q')), &mode), Action::DismissTutorial);
-    }
-
-    #[test]
-    fn tutorial_down_arrow_scrolls_down() {
-        let mode = Mode::Tutorial { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Down), &mode), Action::DetailScrollDown);
-    }
-
-    #[test]
-    fn tutorial_up_arrow_scrolls_up() {
-        let mode = Mode::Tutorial { scroll: 3 };
-        assert_eq!(map_key(key(KeyCode::Up), &mode), Action::DetailScrollUp);
-    }
-
-    #[test]
-    fn tutorial_other_key_is_noop() {
-        let mode = Mode::Tutorial { scroll: 0 };
-        assert_eq!(map_key(key(KeyCode::Char('x')), &mode), Action::None);
-    }
-
     // ── Binding registry tests ──
+
+    #[test]
+    fn help_groups_all_have_at_least_one_binding() {
+        for group in HELP_GROUPS {
+            assert!(
+                !group.bindings.is_empty(),
+                "group '{}' has no bindings",
+                group.name
+            );
+        }
+    }
 
     #[test]
     fn normal_bindings_contains_question_mark() {
