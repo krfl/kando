@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use chrono::{DateTime, Datelike, IsoWeek, NaiveDate, Utc};
 use serde::Serialize;
@@ -32,6 +33,8 @@ pub struct BoardMetrics {
     pub since: DateTime<Utc>,
     /// Work item age for in-progress cards.
     pub work_item_age: Option<WorkItemAgeStats>,
+    /// Per-stage cycle time statistics from activity log.
+    pub stage_times: Option<StageTimeStats>,
 }
 
 /// Per-column WIP entry with limit and active status.
@@ -78,8 +81,34 @@ pub struct AgingCard {
     pub age_days: f64,
 }
 
+/// Per-stage cycle time statistics computed from the activity log.
+#[derive(Debug, Serialize)]
+pub struct StageTimeStats {
+    pub columns: Vec<StageTimeEntry>,
+    pub card_count: usize,
+}
+
+/// Cycle time entry for a single column/stage.
+#[derive(Debug, Serialize)]
+pub struct StageTimeEntry {
+    pub name: String,
+    pub avg_days: f64,
+    pub median_days: f64,
+    pub p85_days: f64,
+    pub sample_count: usize,
+    pub is_active: bool,
+}
+
+/// A move event parsed from the activity log.
+struct MoveEvent {
+    ts: DateTime<Utc>,
+    card_id: String,
+    from: String,
+    to: String,
+}
+
 /// Compute board metrics, optionally filtered to cards completed after `since`.
-pub fn compute_metrics(board: &Board, since: Option<DateTime<Utc>>) -> BoardMetrics {
+pub fn compute_metrics(board: &Board, since: Option<DateTime<Utc>>, kando_dir: Option<&Path>) -> BoardMetrics {
     let now = Utc::now();
 
     // 1. WIP per column with limits and active status
@@ -276,6 +305,8 @@ pub fn compute_metrics(board: &Board, since: Option<DateTime<Utc>>) -> BoardMetr
         })
     };
 
+    let stage_times = kando_dir.and_then(|dir| compute_stage_times(board, dir));
+
     BoardMetrics {
         wip_per_column,
         active_wip_total,
@@ -289,10 +320,166 @@ pub fn compute_metrics(board: &Board, since: Option<DateTime<Utc>>) -> BoardMetr
         total_completed,
         since: effective_since,
         work_item_age,
+        stage_times,
     }
 }
 
+// ── Stage time helpers ──
+
+/// Parse move events from the activity log (JSONL format).
+fn parse_move_events(kando_dir: &Path) -> Vec<MoveEvent> {
+    let log_path = kando_dir.join("activity.log");
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut events = Vec::new();
+    for line in content.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("action").and_then(|a| a.as_str()) != Some("move") {
+            continue;
+        }
+        let Some(ts_str) = v.get("ts").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let Ok(ts) = ts_str.parse::<DateTime<Utc>>() else {
+            continue;
+        };
+        let Some(card_id) = v.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        let Some(from) = v.get("from").and_then(|f| f.as_str()) else {
+            continue;
+        };
+        let Some(to) = v.get("to").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        events.push(MoveEvent {
+            ts,
+            card_id: card_id.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+        });
+    }
+    events.sort_by_key(|e| e.ts);
+    events
+}
+
+/// Compute per-stage cycle time statistics from the activity log.
+fn compute_stage_times(board: &Board, kando_dir: &Path) -> Option<StageTimeStats> {
+    let events = parse_move_events(kando_dir);
+    if events.is_empty() {
+        return None;
+    }
+
+    // Group move events by card ID (borrow keys to avoid cloning)
+    let mut events_by_card: HashMap<&str, Vec<&MoveEvent>> = HashMap::new();
+    for event in &events {
+        events_by_card
+            .entry(&event.card_id)
+            .or_default()
+            .push(event);
+    }
+
+    // Collect all completed cards across the board (keyed by id)
+    let mut completed_cards: HashMap<&str, (&super::Card, DateTime<Utc>)> = HashMap::new();
+    for col in &board.columns {
+        for card in &col.cards {
+            if let Some(completed) = card.completed {
+                completed_cards.insert(&card.id, (card, completed));
+            }
+        }
+    }
+
+    // Accumulate durations per column name
+    let mut durations: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut card_count = 0usize;
+
+    for (card_id, moves) in &events_by_card {
+        let Some(&(card, completed)) = completed_cards.get(card_id) else {
+            continue;
+        };
+
+        card_count += 1;
+
+        // First segment: card.created → first move's ts, column = first move's `from`
+        let first_move = moves[0];
+        let dt = (first_move.ts - card.created).num_seconds().max(0) as f64 / 86400.0;
+        durations
+            .entry(first_move.from.clone())
+            .or_default()
+            .push(dt);
+
+        // Middle segments: between consecutive moves
+        for pair in moves.windows(2) {
+            let dt = (pair[1].ts - pair[0].ts).num_seconds().max(0) as f64 / 86400.0;
+            durations.entry(pair[0].to.clone()).or_default().push(dt);
+        }
+
+        // Final segment: last move's ts → card.completed, column = last move's `to`
+        let last_move = moves.last().unwrap();
+        let dt = (completed - last_move.ts).num_seconds().max(0) as f64 / 86400.0;
+        durations
+            .entry(last_move.to.clone())
+            .or_default()
+            .push(dt);
+    }
+
+    if card_count == 0 {
+        return None;
+    }
+
+    // Determine active columns (same logic as WIP)
+    let done_col_idx = board.columns.iter().position(|c| c.slug == "done");
+
+    // Order by current board columns first, then append any historical columns
+    let mut entries: Vec<StageTimeEntry> = Vec::new();
+
+    for (idx, col) in board.columns.iter().enumerate() {
+        if let Some(mut sorted) = durations.remove(&col.name) {
+            sort_f64(&mut sorted);
+            let is_active = idx > 0 && done_col_idx.is_none_or(|d| idx < d);
+            entries.push(StageTimeEntry {
+                name: col.name.clone(),
+                avg_days: avg(&sorted),
+                median_days: median(&sorted),
+                p85_days: percentile(&sorted, 85),
+                sample_count: sorted.len(),
+                is_active,
+            });
+        }
+    }
+
+    // Append remaining (historical) columns not on current board, sorted by name
+    let mut historical: Vec<(String, Vec<f64>)> = durations.into_iter().collect();
+    historical.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (name, mut sorted) in historical {
+        sort_f64(&mut sorted);
+        entries.push(StageTimeEntry {
+            name,
+            avg_days: avg(&sorted),
+            median_days: median(&sorted),
+            p85_days: percentile(&sorted, 85),
+            sample_count: sorted.len(),
+            is_active: false,
+        });
+    }
+
+    Some(StageTimeStats {
+        columns: entries,
+        card_count,
+    })
+}
+
 // ── Math helpers ──
+
+fn sort_f64(values: &mut [f64]) {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+}
 
 fn avg(values: &[f64]) -> f64 {
     if values.is_empty() {
@@ -390,6 +577,29 @@ pub fn format_text(metrics: &BoardMetrics) -> String {
         out.push_str(&format!("  P85:     {:.1} days\n", ts.cycle_p85_days));
         out.push_str(&format!("  Min:     {:.1} days\n", ts.cycle_min_days));
         out.push_str(&format!("  Max:     {:.1} days\n", ts.cycle_max_days));
+        out.push('\n');
+    }
+
+    // Stage time
+    if let Some(ref st) = metrics.stage_times {
+        out.push_str(&format!("Stage Time ({} cards with move data)\n", st.card_count));
+        let max_name = st.columns.iter().map(|e| e.name.len()).max().unwrap_or(0).max(10);
+        out.push_str(&format!(
+            "  {:<width$} {:>6}  {:>6}  {:>6}\n",
+            "", "Avg", "Median", "P85",
+            width = max_name,
+        ));
+        for entry in &st.columns {
+            out.push_str(&format!(
+                "  {:<nw$} {:>5.1}d  {:>5.1}d  {:>5.1}d  (n={})\n",
+                entry.name,
+                entry.avg_days,
+                entry.median_days,
+                entry.p85_days,
+                entry.sample_count,
+                nw = max_name,
+            ));
+        }
         out.push('\n');
     }
 
@@ -503,6 +713,23 @@ pub fn format_csv(metrics: &BoardMetrics) -> String {
         out.push_str(&format!("{},{},{},{}\n", entry.name, entry.count, limit, entry.is_active));
     }
 
+    // Stage time
+    if let Some(ref st) = metrics.stage_times {
+        out.push('\n');
+        out.push_str("stage_column,avg_days,median_days,p85_days,samples,is_active\n");
+        for entry in &st.columns {
+            out.push_str(&format!(
+                "{},{:.1},{:.1},{:.1},{},{}\n",
+                entry.name,
+                entry.avg_days,
+                entry.median_days,
+                entry.p85_days,
+                entry.sample_count,
+                entry.is_active,
+            ));
+        }
+    }
+
     out
 }
 
@@ -571,7 +798,7 @@ mod tests {
             make_column("backlog", "Backlog", vec![]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.total_completed, 0);
         assert!(metrics.time_stats.is_none());
         assert!(metrics.throughput_per_week.is_empty());
@@ -590,7 +817,7 @@ mod tests {
             ]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.wip_per_column[0].count, 2);
         assert_eq!(metrics.wip_per_column[1].count, 1);
         assert_eq!(metrics.wip_per_column[2].count, 0);
@@ -609,7 +836,7 @@ mod tests {
                 card_completed_at("2", three_days_ago - chrono::TimeDelta::days(1), three_days_ago),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.total_completed, 2);
     }
 
@@ -623,7 +850,7 @@ mod tests {
                 card_completed_at("1", created, now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         assert!((ts.lead_avg_days - 5.0).abs() < 0.1, "expected ~5.0, got {}", ts.lead_avg_days);
         assert!((ts.lead_median_days - 5.0).abs() < 0.1);
@@ -639,7 +866,7 @@ mod tests {
         let board = make_board(vec![
             make_column("done", "Done", vec![card]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.total_completed, 0);
         assert!(metrics.time_stats.is_none());
     }
@@ -658,7 +885,7 @@ mod tests {
         ]);
 
         let since = now - chrono::TimeDelta::weeks(3);
-        let metrics = compute_metrics(&board, Some(since));
+        let metrics = compute_metrics(&board, Some(since), None);
         assert_eq!(metrics.total_completed, 1);
     }
 
@@ -676,7 +903,7 @@ mod tests {
         let board = make_board(vec![
             make_column("done", "Done", vec![high_card, urgent_card, normal_card]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
 
         assert_eq!(metrics.total_completed, 3);
         let breakdown: std::collections::HashMap<Priority, u32> =
@@ -698,7 +925,7 @@ mod tests {
             ]),
         ]);
 
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert!(
             metrics.throughput_per_week.len() >= 3,
             "expected >= 3 weeks, got {}",
@@ -717,7 +944,7 @@ mod tests {
             make_column("backlog", "Backlog", vec![Card::new("1".into(), "A".into())]),
             make_column("done", "Done", vec![card_completed_at("2", created, now)]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let text = format_text(&metrics);
 
         assert!(text.contains("Board Metrics"));
@@ -732,7 +959,7 @@ mod tests {
         let board = make_board(vec![
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let csv = format_csv(&metrics);
 
         assert!(csv.contains("week,completed,arrived"));
@@ -751,7 +978,7 @@ mod tests {
                 card_completed_at("4", now - chrono::TimeDelta::days(8), now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         assert!((ts.lead_avg_days - 5.0).abs() < 0.1);
         assert!((ts.lead_median_days - 5.0).abs() < 0.1);
@@ -774,7 +1001,7 @@ mod tests {
         ]);
         board.created_at = Some(created_at);
 
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.total_completed, 1);
     }
 
@@ -788,7 +1015,7 @@ mod tests {
                 card_completed_at("3", now - chrono::TimeDelta::days(1), now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.total_completed, 3);
         assert_eq!(metrics.throughput_per_week.len(), 1);
         assert_eq!(metrics.throughput_per_week[0].1, 3);
@@ -804,7 +1031,7 @@ mod tests {
             make_column("backlog", "Backlog", vec![rogue_card]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.total_completed, 0);
     }
 
@@ -816,7 +1043,7 @@ mod tests {
         let board = make_board(vec![
             make_column("done", "Done", vec![card_completed_at("1", created, now)]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let csv = format_csv(&metrics);
 
         assert!(csv.contains("lead_avg_days,"));
@@ -831,7 +1058,7 @@ mod tests {
             make_column("backlog", "Backlog", vec![Card::new("1".into(), "A".into())]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let text = format_text(&metrics);
 
         assert!(text.contains("Total completed: 0"));
@@ -851,7 +1078,7 @@ mod tests {
                 card_started_completed("1", created, started, now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         assert!((ts.lead_avg_days - 10.0).abs() < 0.1, "lead time should use created, got {}", ts.lead_avg_days);
     }
@@ -867,7 +1094,7 @@ mod tests {
                 card_started_completed("1", created, started, now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         assert!((ts.cycle_avg_days - 5.0).abs() < 0.1, "cycle time should use started, got {}", ts.cycle_avg_days);
     }
@@ -883,7 +1110,7 @@ mod tests {
                 card_completed_at("1", created, now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         // cycle time should fall back to lead time
         assert!((ts.cycle_avg_days - ts.lead_avg_days).abs() < 0.01);
@@ -900,7 +1127,7 @@ mod tests {
                 card_started_completed("1", created, started, now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         assert!((ts.lead_avg_days - 10.0).abs() < 0.1);
         assert!((ts.cycle_avg_days - 3.0).abs() < 0.1);
@@ -918,7 +1145,7 @@ mod tests {
         }).collect();
 
         let board = make_board(vec![make_column("done", "Done", cards)]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         // sorted: [1, 2, ..., 20]. p85 index = (20 * 85 / 100).min(19) = 17 → value = 18
         assert!((ts.lead_p85_days - 18.0).abs() < 0.2, "p85 expected ~18, got {}", ts.lead_p85_days);
@@ -932,7 +1159,7 @@ mod tests {
         let board = make_board(vec![
             make_column("done", "Done", vec![card_completed_at("1", created, now)]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let ts = metrics.time_stats.unwrap();
         assert!((ts.lead_p85_days - 5.0).abs() < 0.1);
     }
@@ -957,7 +1184,7 @@ mod tests {
                 Card::new("6".into(), "F".into()),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         // Active = in-progress (1) + review (2) = 3
         assert_eq!(metrics.active_wip_total, 3);
         assert!(!metrics.wip_per_column[0].is_active); // backlog
@@ -975,7 +1202,7 @@ mod tests {
             ], 3),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.wip_per_column[1].wip_limit, Some(3));
         assert_eq!(metrics.wip_per_column[1].count, 1);
     }
@@ -992,7 +1219,7 @@ mod tests {
             ], 3),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let entry = &metrics.wip_per_column[1];
         assert_eq!(entry.count, 4);
         assert_eq!(entry.wip_limit, Some(3));
@@ -1014,7 +1241,7 @@ mod tests {
             make_column("in-progress", "In Progress", vec![blocked_in_progress, not_blocked]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         // Only the one in in-progress counts (backlog excluded)
         assert_eq!(metrics.blocked_count, 1);
     }
@@ -1035,7 +1262,7 @@ mod tests {
             ]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.blocked_count, 1);
         assert!((metrics.blocked_pct - 20.0).abs() < 0.1, "expected 20%, got {}", metrics.blocked_pct);
     }
@@ -1046,7 +1273,7 @@ mod tests {
             make_column("backlog", "Backlog", vec![Card::new("1".into(), "A".into())]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert_eq!(metrics.blocked_count, 0);
         assert!((metrics.blocked_pct - 0.0).abs() < 0.01);
     }
@@ -1065,7 +1292,7 @@ mod tests {
             make_column("in-progress", "In Progress", vec![card]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let wia = metrics.work_item_age.unwrap();
         assert_eq!(wia.count, 1);
         assert!((wia.avg_age_days - 5.0).abs() < 0.2, "age should use started, got {}", wia.avg_age_days);
@@ -1083,7 +1310,7 @@ mod tests {
             make_column("in-progress", "In Progress", vec![card]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let wia = metrics.work_item_age.unwrap();
         assert!((wia.avg_age_days - 7.0).abs() < 0.2, "age should fall back to created, got {}", wia.avg_age_days);
     }
@@ -1110,7 +1337,7 @@ mod tests {
             make_column("in-progress", "In Progress", vec![old_card]),
             make_column("done", "Done", done_cards),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let wia = metrics.work_item_age.unwrap();
         assert_eq!(wia.aging_cards.len(), 1);
         assert_eq!(wia.aging_cards[0].id, "99");
@@ -1127,7 +1354,7 @@ mod tests {
             make_column("in-progress", "In Progress", vec![card]),
             make_column("done", "Done", vec![]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         let wia = metrics.work_item_age.unwrap();
         assert!(wia.aging_cards.is_empty(), "no aging without p85 threshold");
     }
@@ -1150,7 +1377,7 @@ mod tests {
             make_column("in-progress", "In Progress", vec![card_ip]),
             make_column("done", "Done", vec![card_done]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         // All 3 cards created in the same week
         let total_arrived: u32 = metrics.arrival_per_week.iter().map(|(_, c)| *c).sum();
         assert_eq!(total_arrived, 3);
@@ -1169,7 +1396,7 @@ mod tests {
             make_column("done", "Done", vec![]),
         ]);
         let since = now - chrono::TimeDelta::weeks(2);
-        let metrics = compute_metrics(&board, Some(since));
+        let metrics = compute_metrics(&board, Some(since), None);
         let total_arrived: u32 = metrics.arrival_per_week.iter().map(|(_, c)| *c).sum();
         assert_eq!(total_arrived, 1, "only cards after since should be counted");
     }
@@ -1193,7 +1420,7 @@ mod tests {
                 card_completed_at("6", week2 - chrono::TimeDelta::days(1), week2),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert!(metrics.throughput_stddev.is_some());
     }
 
@@ -1205,7 +1432,7 @@ mod tests {
                 card_completed_at("1", now - chrono::TimeDelta::days(1), now),
             ]),
         ]);
-        let metrics = compute_metrics(&board, None);
+        let metrics = compute_metrics(&board, None, None);
         assert!(metrics.throughput_stddev.is_none());
     }
 
@@ -1296,5 +1523,465 @@ mod tests {
     fn oldest_card_created_empty_board() {
         let board = make_board(vec![make_column("backlog", "Backlog", vec![])]);
         assert!(oldest_card_created(&board).is_none());
+    }
+
+    // ── Stage time tests ──
+
+    /// Write JSONL move events to a temp `.kando/activity.log`.
+    fn write_activity_log(kando_dir: &std::path::Path, events: &[(&str, &str, &str, &str)]) {
+        // events: (ts, card_id, from, to)
+        let mut content = String::new();
+        for (ts, id, from, to) in events {
+            content.push_str(&format!(
+                r#"{{"ts":"{ts}","action":"move","id":"{id}","title":"Card {id}","from":"{from}","to":"{to}"}}"#,
+            ));
+            content.push('\n');
+        }
+        std::fs::write(kando_dir.join("activity.log"), content).unwrap();
+    }
+
+    fn setup_kando_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".kando")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn stage_times_none_when_no_activity_log() {
+        let dir = setup_kando_dir();
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![]),
+        ]);
+        let result = compute_stage_times(&board, &dir.path().join(".kando"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn stage_times_none_when_no_move_events() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+        // Write a non-move event
+        std::fs::write(
+            kando_dir.join("activity.log"),
+            r#"{"ts":"2025-06-01T10:00:00Z","action":"create","id":"1","title":"Card 1"}"#,
+        ).unwrap();
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![]),
+        ]);
+        let result = compute_stage_times(&board, &kando_dir);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn stage_times_single_card_linear_flow() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        // Card created at T=0, moved Backlog→InProgress at T+1d, InProgress→Done at T+3d, completed at T+4d
+        let created = Utc::now() - chrono::TimeDelta::days(10);
+        let move1_ts = created + chrono::TimeDelta::days(1);
+        let move2_ts = created + chrono::TimeDelta::days(3);
+        let completed = created + chrono::TimeDelta::days(4);
+
+        write_activity_log(&kando_dir, &[
+            (&move1_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "In Progress"),
+            (&move2_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "In Progress", "Done"),
+        ]);
+
+        let mut card = card_completed_at("1", created, completed);
+        card.started = Some(move1_ts);
+
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("in-progress", "In Progress", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        assert_eq!(result.card_count, 1);
+        assert_eq!(result.columns.len(), 3);
+
+        // Backlog: 1 day (created → move1)
+        assert_eq!(result.columns[0].name, "Backlog");
+        assert!((result.columns[0].avg_days - 1.0).abs() < 0.1);
+
+        // In Progress: 2 days (move1 → move2)
+        assert_eq!(result.columns[1].name, "In Progress");
+        assert!((result.columns[1].avg_days - 2.0).abs() < 0.1);
+
+        // Done: 1 day (move2 → completed)
+        assert_eq!(result.columns[2].name, "Done");
+        assert!((result.columns[2].avg_days - 1.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn stage_times_ignores_incomplete_cards() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let now = Utc::now();
+        let ts = now - chrono::TimeDelta::days(1);
+
+        write_activity_log(&kando_dir, &[
+            (&ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "In Progress"),
+        ]);
+
+        // Card is NOT completed — still in-progress
+        let mut card = Card::new("1".into(), "Card 1".into());
+        card.created = now - chrono::TimeDelta::days(3);
+
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("in-progress", "In Progress", vec![card]),
+            make_column("done", "Done", vec![]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir);
+        assert!(result.is_none(), "incomplete cards should be excluded");
+    }
+
+    #[test]
+    fn stage_times_is_active_flags_correct() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(6);
+        let m1 = created + chrono::TimeDelta::days(1);
+        let m2 = created + chrono::TimeDelta::days(3);
+        let m3 = created + chrono::TimeDelta::days(5);
+        let completed = created + chrono::TimeDelta::days(6);
+
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Dev"),
+            (&m2.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Dev", "Review"),
+            (&m3.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Review", "Done"),
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("dev", "Dev", vec![]),
+            make_column("review", "Review", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        assert!(!result.columns[0].is_active, "Backlog should not be active");
+        assert!(result.columns[1].is_active, "Dev should be active");
+        assert!(result.columns[2].is_active, "Review should be active");
+        assert!(!result.columns[3].is_active, "Done should not be active");
+    }
+
+    #[test]
+    fn stage_times_historical_column_appended() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(5);
+        let m1 = created + chrono::TimeDelta::days(1);
+        let m2 = created + chrono::TimeDelta::days(2);
+        let m3 = created + chrono::TimeDelta::days(4);
+        let completed = created + chrono::TimeDelta::days(5);
+
+        // Card went through a "QA" column that no longer exists
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "QA"),
+            (&m2.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "QA", "In Progress"),
+            (&m3.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "In Progress", "Done"),
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("in-progress", "In Progress", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        // Board columns first, then historical
+        let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Backlog", "In Progress", "Done", "QA"]);
+        // Historical column should not be active
+        assert!(!result.columns[3].is_active);
+    }
+
+    #[test]
+    fn stage_times_skips_malformed_log_lines() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(3);
+        let m1 = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        let mut content = String::new();
+        content.push_str("not json at all\n");
+        content.push_str(&format!(
+            r#"{{"ts":"{}","action":"move","id":"1","title":"Card 1","from":"Backlog","to":"Done"}}"#,
+            m1.format("%Y-%m-%dT%H:%M:%SZ"),
+        ));
+        content.push('\n');
+        content.push_str(r#"{"ts":"bad-date","action":"move","id":"2","title":"Card 2","from":"A","to":"B"}"#);
+        content.push('\n');
+        std::fs::write(kando_dir.join("activity.log"), content).unwrap();
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        assert_eq!(result.card_count, 1);
+    }
+
+    #[test]
+    fn stage_times_card_skips_column() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        // Card goes directly Backlog → Done, skipping In Progress
+        let created = Utc::now() - chrono::TimeDelta::days(3);
+        let m1 = created + chrono::TimeDelta::days(2);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Done"),
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("in-progress", "In Progress", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
+        // In Progress should NOT appear since card never went there
+        assert_eq!(names, vec!["Backlog", "Done"]);
+    }
+
+    #[test]
+    fn stage_times_card_moves_backward() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        // Card: Backlog→IP→Backlog→IP→Done
+        let created = Utc::now() - chrono::TimeDelta::days(10);
+        let m1 = created + chrono::TimeDelta::days(1);
+        let m2 = created + chrono::TimeDelta::days(3);
+        let m3 = created + chrono::TimeDelta::days(4);
+        let m4 = created + chrono::TimeDelta::days(8);
+        let completed = created + chrono::TimeDelta::days(10);
+
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "In Progress"),
+            (&m2.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "In Progress", "Backlog"),
+            (&m3.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "In Progress"),
+            (&m4.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "In Progress", "Done"),
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("in-progress", "In Progress", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+
+        // Backlog: 1d (created→m1) + 1d (m2→m3) = two samples: [1.0, 1.0]
+        let backlog = result.columns.iter().find(|e| e.name == "Backlog").unwrap();
+        assert_eq!(backlog.sample_count, 2);
+        assert!((backlog.avg_days - 1.0).abs() < 0.1);
+
+        // In Progress: 2d (m1→m2) + 4d (m3→m4) = two samples: [2.0, 4.0]
+        let ip = result.columns.iter().find(|e| e.name == "In Progress").unwrap();
+        assert_eq!(ip.sample_count, 2);
+        assert!((ip.avg_days - 3.0).abs() < 0.1);
+
+        // Done: 2d (m4→completed) = one sample: [2.0]
+        let done = result.columns.iter().find(|e| e.name == "Done").unwrap();
+        assert_eq!(done.sample_count, 1);
+        assert!((done.avg_days - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn stage_times_multiple_cards_averages() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let now = Utc::now();
+        let c1 = now - chrono::TimeDelta::days(10);
+        let c2 = now - chrono::TimeDelta::days(8);
+        let m1 = c1 + chrono::TimeDelta::days(2); // card1: 2d in Backlog
+        let m2 = c2 + chrono::TimeDelta::days(4); // card2: 4d in Backlog
+        let comp1 = c1 + chrono::TimeDelta::days(3);
+        let comp2 = c2 + chrono::TimeDelta::days(5);
+
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Done"),
+            (&m2.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "2", "Backlog", "Done"),
+        ]);
+
+        let card1 = card_completed_at("1", c1, comp1);
+        let card2 = card_completed_at("2", c2, comp2);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![card1, card2]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        assert_eq!(result.card_count, 2);
+
+        let backlog = result.columns.iter().find(|e| e.name == "Backlog").unwrap();
+        assert_eq!(backlog.sample_count, 2);
+        // avg of [2.0, 4.0] = 3.0
+        assert!((backlog.avg_days - 3.0).abs() < 0.1);
+        // median of [2.0, 4.0] = 3.0
+        assert!((backlog.median_days - 3.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn stage_times_zero_duration_no_panic() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        // Card created, moved, and completed at the same instant
+        let t = Utc::now();
+        write_activity_log(&kando_dir, &[
+            (&t.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Done"),
+        ]);
+
+        let card = card_completed_at("1", t, t);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        assert_eq!(result.card_count, 1);
+        for col in &result.columns {
+            assert!((col.avg_days - 0.0).abs() < 0.01, "{}: expected ~0, got {}", col.name, col.avg_days);
+            assert!((col.median_days - 0.0).abs() < 0.01);
+            assert!((col.p85_days - 0.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn format_text_includes_stage_time() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(4);
+        let m1 = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(4);
+
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Done"),
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+        let metrics = compute_metrics(&board, None, Some(&kando_dir));
+        let text = format_text(&metrics);
+
+        assert!(text.contains("Stage Time"), "should contain Stage Time section");
+        assert!(text.contains("1 cards with move data"), "should show card count");
+        assert!(text.contains("Backlog"), "should list Backlog column");
+    }
+
+    #[test]
+    fn format_text_omits_stage_time_when_none() {
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![]),
+        ]);
+        let metrics = compute_metrics(&board, None, None);
+        let text = format_text(&metrics);
+        assert!(!text.contains("Stage Time"), "should not contain Stage Time when kando_dir is None");
+    }
+
+    #[test]
+    fn format_csv_includes_stage_time() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(3);
+        let m1 = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Done"),
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+        let metrics = compute_metrics(&board, None, Some(&kando_dir));
+        let csv = format_csv(&metrics);
+
+        assert!(csv.contains("stage_column,avg_days,median_days,p85_days,samples,is_active"));
+        assert!(csv.contains("Backlog,"));
+        assert!(csv.contains("Done,"));
+    }
+
+    #[test]
+    fn format_csv_omits_stage_time_when_none() {
+        let board = make_board(vec![
+            make_column("done", "Done", vec![]),
+        ]);
+        let metrics = compute_metrics(&board, None, None);
+        let csv = format_csv(&metrics);
+        assert!(!csv.contains("stage_column"), "should not contain stage_column header");
+    }
+
+    #[test]
+    fn stage_times_column_ordering_follows_board() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(5);
+        let m1 = created + chrono::TimeDelta::days(1);
+        let m2 = created + chrono::TimeDelta::days(2);
+        let m3 = created + chrono::TimeDelta::days(3);
+        let completed = created + chrono::TimeDelta::days(5);
+
+        write_activity_log(&kando_dir, &[
+            (&m1.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Dev"),
+            (&m2.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Dev", "Review"),
+            (&m3.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Review", "Done"),
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("dev", "Dev", vec![]),
+            make_column("review", "Review", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Backlog", "Dev", "Review", "Done"]);
+    }
+
+    #[test]
+    fn compute_metrics_kando_dir_none_gives_no_stage_times() {
+        let now = Utc::now();
+        let created = now - chrono::TimeDelta::days(3);
+        let board = make_board(vec![
+            make_column("done", "Done", vec![card_completed_at("1", created, now)]),
+        ]);
+        let metrics = compute_metrics(&board, None, None);
+        assert!(metrics.stage_times.is_none());
     }
 }

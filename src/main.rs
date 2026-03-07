@@ -2056,7 +2056,7 @@ fn cmd_metrics(cwd: &Path, weeks: Option<u32>, csv: bool, json: bool) -> color_e
     let kando_dir = &ctx.kando_dir;
     let board = load_board(kando_dir)?;
     let since = weeks.map(|w| chrono::Utc::now() - chrono::TimeDelta::weeks(w as i64));
-    let metrics = board::metrics::compute_metrics(&board, since);
+    let metrics = board::metrics::compute_metrics(&board, since, Some(kando_dir));
 
     if json {
         return print_json(&metrics);

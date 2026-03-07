@@ -9,7 +9,7 @@ use super::theme::Theme;
 use crate::board::metrics::compute_metrics;
 use crate::board::Board;
 
-pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16, _now: DateTime<Utc>) {
+pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16, _now: DateTime<Utc>, kando_dir: &std::path::Path) {
     let panel_area = super::overlay_rect(area);
 
     f.render_widget(Clear, panel_area);
@@ -33,7 +33,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
         return;
     }
 
-    let metrics = compute_metrics(board, None);
+    let metrics = compute_metrics(board, None, Some(kando_dir));
 
     let heading = Style::default()
         .fg(Theme::FG)
@@ -91,22 +91,23 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
     lines.push(Line::from(""));
 
     let max_wip = metrics.wip_per_column.iter().map(|w| w.count).max().unwrap_or(1).max(1);
-    let max_name_len = metrics
+    let wip_name_len = metrics
         .wip_per_column
         .iter()
         .map(|w| w.name.len())
         .max()
         .unwrap_or(0)
         .max(10);
-    let bar_max = (inner.width as usize).saturating_sub(max_name_len + 19).min(40);
+    let wip_bar_max = (inner.width as usize).saturating_sub(wip_name_len + 19).min(40);
     for entry in &metrics.wip_per_column {
         let bar_len = if entry.count > 0 {
-            (entry.count * bar_max) / max_wip
+            (entry.count * wip_bar_max) / max_wip
         } else {
             0
         }
         .max(if entry.count > 0 { 1 } else { 0 });
         let bar: String = "\u{2588}".repeat(bar_len);
+        let bar_pad = format!("{:<width$}", bar, width = wip_bar_max);
 
         let over_limit = entry
             .wip_limit
@@ -125,11 +126,11 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
             format!(" {}", entry.count)
         };
 
-        let name_label = format!("  {:<width$} ", entry.name, width = max_name_len);
+        let name_label = format!("  {:<width$} ", entry.name, width = wip_name_len);
 
         lines.push(Line::from(vec![
             Span::styled(name_label, label),
-            Span::styled(bar, Style::default().fg(color)),
+            Span::styled(bar_pad, Style::default().fg(color)),
             Span::styled(count_str, if over_limit {
                 Style::default().fg(Theme::WIP_OVER).add_modifier(Modifier::BOLD)
             } else {
@@ -160,6 +161,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
             }
             .max(if *count > 0 { 1 } else { 0 });
             let bar: String = "\u{2588}".repeat(bar_len);
+            let bar_pad = format!("{:<width$}", bar, width = tp_bar_max);
             let color = if *count == 0 {
                 Theme::DIM
             } else {
@@ -167,9 +169,9 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
             };
             let arrival = metrics.arrival_per_week.get(i).map_or(0, |(_, c)| *c);
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<10}", week_label), label),
-                Span::styled(bar, Style::default().fg(color)),
-                Span::styled(format!(" {count}"), value),
+                Span::styled(format!("  {:<10} ", week_label), label),
+                Span::styled(bar_pad, Style::default().fg(color)),
+                Span::styled(format!(" {:>2}", count), value),
                 Span::styled(format!("  ({arrival} arrived)"), dim),
             ]));
         }
@@ -188,23 +190,23 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  Average: ", label),
-            Span::styled(format!("{:.1} days", ts.lead_avg_days), value),
+            Span::styled(format!("{:>6.1} days", ts.lead_avg_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  Median:  ", label),
-            Span::styled(format!("{:.1} days", ts.lead_median_days), value),
+            Span::styled(format!("{:>6.1} days", ts.lead_median_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  P85:     ", label),
-            Span::styled(format!("{:.1} days", ts.lead_p85_days), value),
+            Span::styled(format!("{:>6.1} days", ts.lead_p85_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  Min:     ", label),
-            Span::styled(format!("{:.1} days", ts.lead_min_days), value),
+            Span::styled(format!("{:>6.1} days", ts.lead_min_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  Max:     ", label),
-            Span::styled(format!("{:.1} days", ts.lead_max_days), value),
+            Span::styled(format!("{:>6.1} days", ts.lead_max_days), value),
         ]));
         lines.push(Line::from(""));
 
@@ -213,24 +215,102 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  Average: ", label),
-            Span::styled(format!("{:.1} days", ts.cycle_avg_days), value),
+            Span::styled(format!("{:>6.1} days", ts.cycle_avg_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  Median:  ", label),
-            Span::styled(format!("{:.1} days", ts.cycle_median_days), value),
+            Span::styled(format!("{:>6.1} days", ts.cycle_median_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  P85:     ", label),
-            Span::styled(format!("{:.1} days", ts.cycle_p85_days), value),
+            Span::styled(format!("{:>6.1} days", ts.cycle_p85_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  Min:     ", label),
-            Span::styled(format!("{:.1} days", ts.cycle_min_days), value),
+            Span::styled(format!("{:>6.1} days", ts.cycle_min_days), value),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  Max:     ", label),
-            Span::styled(format!("{:.1} days", ts.cycle_max_days), value),
+            Span::styled(format!("{:>6.1} days", ts.cycle_max_days), value),
         ]));
+        lines.push(Line::from(""));
+    }
+
+    // ── Stage Time ──
+    if let Some(ref st) = metrics.stage_times {
+        lines.push(Line::from(Span::styled(
+            format!("Stage Time ({} cards with move data)", st.card_count),
+            heading,
+        )));
+        lines.push(Line::from(""));
+
+        let max_name_len = st
+            .columns
+            .iter()
+            .map(|e| e.name.len())
+            .max()
+            .unwrap_or(0)
+            .max(10);
+
+        // Find the bottleneck (highest median among active columns)
+        let max_active_median = st
+            .columns
+            .iter()
+            .filter(|e| e.is_active)
+            .map(|e| e.median_days)
+            .fold(0.0f64, f64::max);
+
+        let max_median = st
+            .columns
+            .iter()
+            .map(|e| e.median_days)
+            .fold(0.0f64, f64::max);
+        let bar_max = (inner.width as usize).saturating_sub(max_name_len + 46).clamp(4, 30);
+
+        // Column header — each data field is " %6.1fd" (8 chars), separated by "  "
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {:<nw$} {:<bw$} {:>8}  {:>8}  {:>8}",
+                "", "", "Avg", "Median", "P85",
+                nw = max_name_len, bw = bar_max,
+            ),
+            dim,
+        )));
+
+        for entry in &st.columns {
+            let bar_len = if max_median > 0.0 {
+                ((entry.median_days / max_median) * bar_max as f64).round() as usize
+            } else {
+                0
+            }
+            .max(if entry.median_days > 0.0 { 1 } else { 0 });
+            let bar: String = "\u{2588}".repeat(bar_len);
+            let bar_pad = format!("{:<width$}", bar, width = bar_max);
+
+            let is_bottleneck =
+                entry.is_active && entry.median_days > 0.0 && entry.median_days >= max_active_median;
+            let color = if is_bottleneck {
+                Theme::STALE
+            } else if !entry.is_active {
+                Theme::DIM
+            } else {
+                Theme::WIP_OK
+            };
+
+            let name_label = format!("  {:<width$} ", entry.name, width = max_name_len);
+            let stats_str = format!(
+                " {:>6.1}d  {:>6.1}d  {:>6.1}d  (n={})",
+                entry.avg_days, entry.median_days, entry.p85_days, entry.sample_count,
+            );
+
+            let entry_style = if !entry.is_active { dim } else { value };
+
+            lines.push(Line::from(vec![
+                Span::styled(name_label, if !entry.is_active { dim } else { label }),
+                Span::styled(bar_pad, Style::default().fg(color)),
+                Span::styled(stats_str, entry_style),
+            ]));
+        }
         lines.push(Line::from(""));
     }
 

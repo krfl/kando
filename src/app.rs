@@ -825,7 +825,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
         // Render
         let now = Utc::now();
-        terminal.draw(|f| crate::ui::render(f, &board, &mut state, now))?;
+        terminal.draw(|f| crate::ui::render(f, &board, &mut state, now, kando_dir))?;
 
         // Handle input
         if event::poll(Duration::from_millis(100))? {
@@ -4521,7 +4521,7 @@ mod tests {
         assert!(done_cards[0].completed.is_some(), "card moved to done should have completed timestamp");
 
         // Compute metrics — should find 1 completed card
-        let metrics = crate::board::metrics::compute_metrics(&reloaded, None);
+        let metrics = crate::board::metrics::compute_metrics(&reloaded, None, None);
         assert_eq!(metrics.total_completed, 1);
         assert!(metrics.time_stats.is_some());
     }

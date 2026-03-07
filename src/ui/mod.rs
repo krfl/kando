@@ -35,7 +35,7 @@ pub fn centered_rect(area: Rect, w_pct: u16, h_pct: u16, min_w: u16, min_h: u16)
     Rect::new(x, y, width, height)
 }
 
-pub fn render(f: &mut Frame, board: &Board, state: &mut AppState, now: DateTime<Utc>) {
+pub fn render(f: &mut Frame, board: &Board, state: &mut AppState, now: DateTime<Utc>, kando_dir: &std::path::Path) {
     let area = f.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let msg = format!("Terminal too small ({}x{}). Need at least {MIN_WIDTH}x{MIN_HEIGHT}.", area.width, area.height);
@@ -78,7 +78,7 @@ pub fn render(f: &mut Frame, board: &Board, state: &mut AppState, now: DateTime<
             help::render_help(f, f.area(), scroll, page);
         }
         crate::app::Mode::Metrics { scroll } => {
-            metrics::render_metrics(f, f.area(), board, scroll, now);
+            metrics::render_metrics(f, f.area(), board, scroll, now, kando_dir);
         }
         _ => {}
     }
