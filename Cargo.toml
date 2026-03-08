@@ -1,8 +1,13 @@
 [package]
 name = "kando"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "A keyboard-first Kanban TUI for your terminal"
+license = "Apache-2.0"
+repository = "https://github.com/krfl/kando"
+rust-version = "1.86"
+keywords = ["kanban", "tui", "terminal", "productivity", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
