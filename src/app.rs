@@ -1724,7 +1724,10 @@ fn handle_card_action<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     kando_dir: &std::path::Path,
     was_minor_mode: bool,
-) -> color_eyre::Result<Option<String>> {
+) -> color_eyre::Result<Option<String>>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut sync_message = None;
 
     // Clear undo state on any card-mutating action (except delete itself, which sets it).
@@ -3412,7 +3415,10 @@ fn launch_editor_for_template<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     kando_dir: &std::path::Path,
     slug: &str,
-) -> color_eyre::Result<()> {
+) -> color_eyre::Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     let template_path = kando_dir.join("templates").join(format!("{slug}.md"));
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
