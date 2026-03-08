@@ -28,7 +28,7 @@ kando init
 kando
 ```
 
-When you first open Kando, you'll see a scrollable tutorial (`j`/`k` to scroll, `Esc` to dismiss). You can also have Kando handle syncing your board to git. See the section on [Team Collaboration](#team-collaboration) for more details.
+Press `?` to open the help panel — it has two pages: keybinding reference and concepts. You can also have Kando handle syncing your board to git. See the section on [Team Collaboration](#team-collaboration) for more details.
 
 ## The Board
 
@@ -42,6 +42,7 @@ Your board consists of **columns** (like Backlog, In Progress, Done) that contai
 | **Tags** | Categorize cards with tags like `bug`, `feature`, `urgent` |
 | **Assignees** | Assign cards to team members by name |
 | **Priority** | Set priority level (low, normal, high, urgent). Cards auto-sort by priority |
+| **Due Dates** | Set a due date on a card. Overdue cards get a visual warning |
 | **Blockers** | Mark a card as blocked with an optional reason explaining what's preventing progress |
 | **Age Tracking** | See how long a card has been sitting around |
 
@@ -87,6 +88,8 @@ Kando uses "minor modes" (inspired by the Helix text editor) to keep commands di
 - `1`-`9` - Jump to column 1-9
 - `g` - Jump to first card in column
 - `e` - Jump to last card in column
+- `b` - Jump to Backlog
+- `d` - Jump to Done
 
 **Press `c` to manage columns:**
 - `h` - Toggle focused column hidden
@@ -104,6 +107,7 @@ Kando uses "minor modes" (inspired by the Helix text editor) to keep commands di
 - `n` - Create a new template (opens in $EDITOR)
 - `e` - Edit an existing template
 - `d` - Delete a template
+- `r` - Rename a template
 - `a` - Create a new card from a template
 
 ### Repeat Last Action
@@ -142,6 +146,7 @@ The hint is color-coded by risk: destructive actions (delete, remove column) app
 - `t` - Filter by tag
 - `a` - Filter by assignee
 - `s` - Filter by staleness
+- `d` - Filter by overdue
 - `Esc` - Clear filters
 
 Filters can be combined. For example, you can filter to show only cards tagged `bug` assigned to `alice`.
@@ -297,7 +302,7 @@ kando trash purge            # permanently delete trash
 
 ### Metrics and activity
 ```sh
-kando metrics                # cycle time, throughput, WIP
+kando metrics                # cycle time, throughput, WIP, per-stage time
 kando metrics --weeks 8
 kando log                    # human-readable activity feed
 kando log -f                 # live-tail new activity (like tail -f)
