@@ -8,6 +8,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use serde::{Deserialize, Deserializer, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 /// Deserialize `blocked` from either a TOML bool or a string.
 /// `true` → `Some("")`, `false` / absent → `None`, `"reason"` → `Some("reason")`.
@@ -199,7 +200,7 @@ pub struct Template {
 /// Generate a filesystem-safe slug for a template name, unique among `existing_slugs`.
 pub fn generate_template_slug(name: &str, existing_slugs: &[String]) -> String {
     let base = slug_from_name(name);
-    let base = if base == "col" && !name.chars().any(|c| c.is_ascii_alphanumeric()) {
+    let base = if base == "col" && !name.chars().any(|c| c.is_alphanumeric()) {
         "template".to_string()
     } else {
         base
@@ -430,9 +431,11 @@ pub fn card_matches_filter(card: &Card, filter: &str, matcher: &SkimMatcherV2) -
 /// guarantee should use [`slug_for_rename`] or [`generate_slug`].
 pub fn slug_from_name(name: &str) -> String {
     let base: String = name
+        .nfc()
+        .collect::<String>()
         .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .nfc()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
     // After split/filter/join the result is guaranteed to start with an
     // alphanumeric char (or be empty), so only the empty check is needed.
@@ -489,7 +492,7 @@ pub fn generate_slug(name: &str, existing: &[Column]) -> String {
 /// # Invariants
 ///
 /// Assumes the slug was produced by [`generate_slug`] or [`slug_from_name`]
-/// (no leading/trailing hyphens, all ASCII alphanumeric + hyphens).
+/// (no leading/trailing hyphens, lowercase alphanumeric + hyphens).
 /// Degenerate input such as `"-"` produces degenerate output (`" "`) without
 /// panicking, but callers should rely on [`validate_slug`] to prevent such
 /// input from reaching this function.
@@ -1320,13 +1323,38 @@ mod tests {
     }
 
     #[test]
-    fn slug_from_name_unicode_non_ascii_falls_back_to_col() {
-        assert_eq!(slug_from_name("日本語"), "col");
+    fn slug_from_name_unicode_preserved() {
+        assert_eq!(slug_from_name("日本語"), "日本語");
     }
 
     #[test]
-    fn slug_from_name_mixed_ascii_unicode_keeps_ascii_part() {
-        assert_eq!(slug_from_name("hello 世界"), "hello");
+    fn slug_from_name_mixed_ascii_unicode_preserves_all() {
+        assert_eq!(slug_from_name("hello 世界"), "hello-世界");
+    }
+
+    #[test]
+    fn slug_from_name_non_alphanumeric_unicode_falls_back() {
+        // Purely symbolic/punctuation Unicode falls back to "col"
+        assert_eq!(slug_from_name("→ ← ↑"), "col");
+    }
+
+    #[test]
+    fn slug_from_name_nordic_characters_preserved() {
+        assert_eq!(slug_from_name("Kamelåså"), "kamelåså");
+    }
+
+    #[test]
+    fn slug_from_name_nfc_normalization_consistency() {
+        // Composed (NFC) and decomposed (NFD) representations of "å" must produce the same slug
+        let nfc = "Kamelåså"; // å as U+00E5
+        let nfd = "Kamela\u{030A}sa\u{030A}"; // a + combining ring above
+        assert_eq!(slug_from_name(nfc), slug_from_name(nfd));
+    }
+
+    #[test]
+    fn slug_from_name_unicode_symbols_replaced() {
+        assert_eq!(slug_from_name("hello·world"), "hello-world");
+        assert_eq!(slug_from_name("test™"), "test");
     }
 
     #[test]
@@ -1391,18 +1419,16 @@ mod tests {
     }
 
     #[test]
-    fn generate_slug_unicode_name_produces_valid_ascii() {
-        // All CJK chars are non-ASCII-alphanumeric → stripped → empty base → fallback "col".
+    fn generate_slug_unicode_name_preserves_characters() {
         let slug = generate_slug("日本語", &[]);
-        assert!(slug.chars().all(|c| c.is_ascii()), "slug must be ASCII");
-        assert_eq!(slug, "col", "non-ASCII-only name should fall back to 'col'");
+        assert_eq!(slug, "日本語");
     }
 
     #[test]
     fn generate_slug_leading_special_chars_stripped() {
         // Name starts with special chars that map to hyphens; leading hyphens removed.
         let slug = generate_slug("---hello", &[]);
-        assert!(slug.starts_with(|c: char| c.is_ascii_alphanumeric()));
+        assert!(slug.starts_with(|c: char| c.is_alphanumeric()));
     }
 
     // ── normalize_column_orders ──
@@ -1620,8 +1646,8 @@ mod tests {
     }
 
     #[test]
-    fn generate_template_slug_unicode_only_returns_template() {
-        assert_eq!(generate_template_slug("日本語", &[]), "template");
+    fn generate_template_slug_unicode_preserves_characters() {
+        assert_eq!(generate_template_slug("日本語", &[]), "日本語");
     }
 
     #[test]

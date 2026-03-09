@@ -66,17 +66,20 @@ pub enum StorageError {
     BrokenGitSync { toml_path: PathBuf, reason: String },
     #[error("invalid card file {path}: {reason}")]
     InvalidCard { path: PathBuf, reason: String },
-    #[error("invalid slug: {0:?} (must match [a-z0-9-]+)")]
+    #[error("invalid slug: {0:?} (must be lowercase alphanumeric and hyphens)")]
     InvalidSlug(String),
 }
 
 /// Validate that a slug is safe for use as a directory name.
-/// Must start with a letter or digit, then only lowercase alphanumeric and hyphens.
+/// Must start with an alphanumeric character, then only lowercase alphanumeric and hyphens.
+/// Supports Unicode letters (e.g. å, ö, ñ) — not just ASCII.
 fn validate_slug(slug: &str) -> Result<(), StorageError> {
-    let first = slug.as_bytes().first().copied().unwrap_or(0);
-    if slug.is_empty()
-        || !(first.is_ascii_lowercase() || first.is_ascii_digit())
-        || !slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    let first = match slug.chars().next() {
+        None => return Err(StorageError::InvalidSlug(slug.to_string())),
+        Some(c) => c,
+    };
+    if !first.is_alphanumeric()
+        || slug.chars().any(|c| (!c.is_alphanumeric() && c != '-') || c.is_uppercase())
     {
         return Err(StorageError::InvalidSlug(slug.to_string()));
     }
@@ -1594,6 +1597,20 @@ mod tests {
     #[test]
     fn validate_slug_underscore_returns_err() {
         assert!(validate_slug("my_col").is_err());
+    }
+
+    #[test]
+    fn validate_slug_unicode_letters_accepted() {
+        assert!(validate_slug("kamelåså").is_ok());
+        assert!(validate_slug("日本語").is_ok());
+        assert!(validate_slug("hello-世界").is_ok());
+    }
+
+    #[test]
+    fn validate_slug_unicode_uppercase_returns_err() {
+        assert!(validate_slug("Kamelåså").is_err());
+        assert!(validate_slug("ÅNGSTRÖM").is_err());
+        assert!(validate_slug("naïVé").is_err());
     }
 
     // ── parse_frontmatter edge cases ──

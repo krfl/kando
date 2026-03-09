@@ -669,7 +669,7 @@ fn print_user_error(error: &color_eyre::Report) {
             }
             board::storage::StorageError::InvalidSlug(slug) => {
                 eprintln!("error: invalid column slug: {slug:?}");
-                eprintln!("  Column slugs must match [a-z0-9][a-z0-9-]*");
+                eprintln!("  Column slugs must be lowercase alphanumeric (including Unicode) and hyphens");
             }
             board::storage::StorageError::TomlDe(e) => {
                 eprintln!("error: config file has invalid TOML syntax.");
@@ -2395,9 +2395,9 @@ fn cmd_col_list(cwd: &Path, json: bool, csv: bool) -> color_eyre::Result<()> {
     for (i, col) in board.columns.iter().enumerate() {
         let wip = col.wip_limit.map_or("-".to_string(), |n| n.to_string());
         let hidden_tag = if col.hidden { "  [hidden]" } else { "" };
-        // Slugs are ASCII-only (enforced by validate_slug), so byte-indexing is safe.
-        let slug_display = if col.slug.len() > 16 {
-            format!("{}…", &col.slug[..15])
+        let slug_display = if col.slug.chars().count() > 16 {
+            let truncated: String = col.slug.chars().take(15).collect();
+            format!("{truncated}…")
         } else {
             col.slug.clone()
         };
