@@ -369,6 +369,54 @@ fn parse_move_events(kando_dir: &Path) -> Vec<MoveEvent> {
     events
 }
 
+/// Build a mapping from old column display names to their current display names
+/// by parsing col-rename events from the activity log. Chains are resolved so
+/// that if A→B and B→C both occurred, A maps directly to C.
+fn build_name_rename_map(kando_dir: &Path) -> HashMap<String, String> {
+    let log_path = kando_dir.join("activity.log");
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    // Collect raw renames in chronological order.
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for line in content.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("action").and_then(|a| a.as_str()) != Some("col-rename") {
+            continue;
+        }
+        let Some(from_name) = v.get("from_name").and_then(|f| f.as_str()) else {
+            continue; // pre-upgrade entry without from_name — skip
+        };
+        let Some(to_name) = v.get("title").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        renames.push((from_name.to_string(), to_name.to_string()));
+    }
+
+    // Build forward map and resolve chains.
+    let mut map: HashMap<String, String> = HashMap::new();
+    for (old, new) in renames {
+        // Update any existing entries that pointed to old → make them point to new.
+        for val in map.values_mut() {
+            if *val == old {
+                *val = new.clone();
+            }
+        }
+        // Don't create a self-mapping.
+        if old != new {
+            map.insert(old, new);
+        }
+    }
+    // Clean up self-mappings created by rename-back sequences (e.g. A→B→A).
+    map.retain(|k, v| k != v);
+    map
+}
+
 /// Compute per-stage cycle time statistics from the activity log.
 fn compute_stage_times(board: &Board, kando_dir: &Path) -> Option<StageTimeStats> {
     let events = parse_move_events(kando_dir);
@@ -431,6 +479,17 @@ fn compute_stage_times(board: &Board, kando_dir: &Path) -> Option<StageTimeStats
 
     if card_count == 0 {
         return None;
+    }
+
+    // Remap old column names to current names using col-rename history.
+    let rename_map = build_name_rename_map(kando_dir);
+    if !rename_map.is_empty() {
+        let mut remapped: HashMap<String, Vec<f64>> = HashMap::new();
+        for (name, values) in durations {
+            let current_name = rename_map.get(&name).cloned().unwrap_or(name);
+            remapped.entry(current_name).or_default().extend(values);
+        }
+        durations = remapped;
     }
 
     // Determine active columns (same logic as WIP)
@@ -1972,6 +2031,285 @@ mod tests {
         let result = compute_stage_times(&board, &kando_dir).unwrap();
         let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["Backlog", "Dev", "Review", "Done"]);
+    }
+
+    // ── Rename map tests ──
+
+    /// Append raw JSON lines to `.kando/activity.log`.
+    fn append_activity_lines(kando_dir: &std::path::Path, lines: &[&str]) {
+        use std::io::Write;
+        let path = kando_dir.join("activity.log");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+    }
+
+    #[test]
+    fn rename_map_simple_rename() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(5);
+        let move_ts = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        write_activity_log(&kando_dir, &[
+            (&move_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Review", "Done"),
+        ]);
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"code-review","title":"Code Review","from":"review","from_name":"Review"}"#,
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("code-review", "Code Review", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let cr_entry = result.columns.iter().find(|e| e.name == "Code Review");
+        assert!(cr_entry.is_some(), "old 'Review' should map to 'Code Review'");
+        assert_eq!(cr_entry.unwrap().sample_count, 1);
+        assert!(!result.columns.iter().any(|e| e.name == "Review"), "'Review' should not appear as historical");
+    }
+
+    #[test]
+    fn rename_map_chained_renames() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(5);
+        let move_ts = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        write_activity_log(&kando_dir, &[
+            (&move_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Alpha", "Done"),
+        ]);
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"beta","title":"Beta","from":"alpha","from_name":"Alpha"}"#,
+            r#"{"ts":"2025-07-02T10:00:00Z","action":"col-rename","id":"gamma","title":"Gamma","from":"beta","from_name":"Beta"}"#,
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("gamma", "Gamma", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let gamma_entry = result.columns.iter().find(|e| e.name == "Gamma");
+        assert!(gamma_entry.is_some(), "chained rename should resolve Alpha→Gamma");
+        assert_eq!(gamma_entry.unwrap().sample_count, 1);
+        assert!(!result.columns.iter().any(|e| e.name == "Alpha"), "'Alpha' should not appear");
+        assert!(!result.columns.iter().any(|e| e.name == "Beta"), "'Beta' should not appear");
+    }
+
+    #[test]
+    fn rename_map_skips_entries_without_from_name() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(5);
+        let move_ts = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        write_activity_log(&kando_dir, &[
+            (&move_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "OldName", "Done"),
+        ]);
+        // Legacy entry without from_name — should be skipped
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"new-slug","title":"NewName","from":"old-slug"}"#,
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("new-slug", "NewName", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
+        // "OldName" should appear as historical since the legacy entry was skipped
+        assert!(names.contains(&"OldName"), "legacy entry skipped, OldName should be historical: {names:?}");
+    }
+
+    #[test]
+    fn rename_map_self_rename_ignored() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(5);
+        let move_ts = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        write_activity_log(&kando_dir, &[
+            (&move_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Review", "Done"),
+        ]);
+        // Self-rename: same name
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"review","title":"Review","from":"review","from_name":"Review"}"#,
+        ]);
+
+        let card = card_completed_at("1", created, completed);
+        let board = make_board(vec![
+            make_column("review", "Review", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"Review"), "self-rename should not break normal attribution: {names:?}");
+    }
+
+    #[test]
+    fn rename_map_cycle_a_b_a() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created1 = Utc::now() - chrono::TimeDelta::days(10);
+        let move1_ts = created1 + chrono::TimeDelta::days(1);
+        let completed1 = created1 + chrono::TimeDelta::days(3);
+
+        let created2 = Utc::now() - chrono::TimeDelta::days(5);
+        let move2_ts = created2 + chrono::TimeDelta::days(1);
+        let completed2 = created2 + chrono::TimeDelta::days(3);
+
+        // Card1 moved through "Alpha" (before any rename), card2 through "Beta" (after first rename)
+        write_activity_log(&kando_dir, &[
+            (&move1_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Alpha", "Done"),
+            (&move2_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "2", "Beta", "Done"),
+        ]);
+        // Rename A→B, then B→A (cycle)
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"beta","title":"Beta","from":"alpha","from_name":"Alpha"}"#,
+            r#"{"ts":"2025-07-02T10:00:00Z","action":"col-rename","id":"alpha","title":"Alpha","from":"beta","from_name":"Beta"}"#,
+        ]);
+
+        let card1 = card_completed_at("1", created1, completed1);
+        let card2 = card_completed_at("2", created2, completed2);
+        let board = make_board(vec![
+            make_column("alpha", "Alpha", vec![]),
+            make_column("done", "Done", vec![card1, card2]),
+        ]);
+
+        // Should not panic; both cards' durations should resolve to current "Alpha"
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let alpha_entry = result.columns.iter().find(|e| e.name == "Alpha");
+        assert!(alpha_entry.is_some(), "cycle should resolve both to Alpha");
+        assert_eq!(alpha_entry.unwrap().sample_count, 2, "both cards consolidated under Alpha");
+        assert!(!result.columns.iter().any(|e| e.name == "Beta"), "'Beta' should not appear");
+    }
+
+    #[test]
+    fn rename_map_consolidates_old_and_new_durations() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created1 = Utc::now() - chrono::TimeDelta::days(10);
+        let move1_ts = created1 + chrono::TimeDelta::days(1);
+        let completed1 = created1 + chrono::TimeDelta::days(3);
+
+        let created2 = Utc::now() - chrono::TimeDelta::days(5);
+        let move2_ts = created2 + chrono::TimeDelta::days(1);
+        let completed2 = created2 + chrono::TimeDelta::days(3);
+
+        // Card1 moved through old name "Dev", card2 through new name "Development"
+        write_activity_log(&kando_dir, &[
+            (&move1_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Dev", "Done"),
+            (&move2_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "2", "Development", "Done"),
+        ]);
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"development","title":"Development","from":"dev","from_name":"Dev"}"#,
+        ]);
+
+        let card1 = card_completed_at("1", created1, completed1);
+        let card2 = card_completed_at("2", created2, completed2);
+        let board = make_board(vec![
+            make_column("development", "Development", vec![]),
+            make_column("done", "Done", vec![card1, card2]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        assert_eq!(result.card_count, 2);
+        let dev_entry = result.columns.iter().find(|e| e.name == "Development");
+        assert!(dev_entry.is_some(), "should have consolidated 'Development' entry");
+        assert_eq!(dev_entry.unwrap().sample_count, 2, "both cards' samples merged");
+        assert!(!result.columns.iter().any(|e| e.name == "Dev"), "'Dev' should not appear separately");
+    }
+
+    #[test]
+    fn rename_map_preserves_board_column_ordering() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(10);
+        let move1_ts = created + chrono::TimeDelta::days(1);
+        let move2_ts = created + chrono::TimeDelta::days(2);
+        let move3_ts = created + chrono::TimeDelta::days(3);
+        let completed = created + chrono::TimeDelta::days(4);
+
+        write_activity_log(&kando_dir, &[
+            (&move1_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "Dev"),
+            (&move2_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Dev", "Review"),
+            (&move3_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Review", "Done"),
+        ]);
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"development","title":"Development","from":"dev","from_name":"Dev"}"#,
+        ]);
+
+        let mut card = card_completed_at("1", created, completed);
+        card.started = Some(move1_ts);
+        let board = make_board(vec![
+            make_column("backlog", "Backlog", vec![]),
+            make_column("development", "Development", vec![]),
+            make_column("review", "Review", vec![]),
+            make_column("done", "Done", vec![card]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Backlog", "Development", "Review", "Done"],
+            "renamed column should appear at board position, not as historical");
+    }
+
+    #[test]
+    fn rename_map_divergent_renames() {
+        let dir = setup_kando_dir();
+        let kando_dir = dir.path().join(".kando");
+
+        let created = Utc::now() - chrono::TimeDelta::days(5);
+        let move_ts = created + chrono::TimeDelta::days(1);
+        let completed = created + chrono::TimeDelta::days(3);
+
+        // Two cards moved through different old-named columns
+        write_activity_log(&kando_dir, &[
+            (&move_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "ColA", "Done"),
+            (&move_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "2", "ColB", "Done"),
+        ]);
+        append_activity_lines(&kando_dir, &[
+            r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"col-a2","title":"ColA2","from":"col-a","from_name":"ColA"}"#,
+            r#"{"ts":"2025-07-02T10:00:00Z","action":"col-rename","id":"col-b2","title":"ColB2","from":"col-b","from_name":"ColB"}"#,
+        ]);
+
+        let card1 = card_completed_at("1", created, completed);
+        let card2 = card_completed_at("2", created, completed);
+        let board = make_board(vec![
+            make_column("col-a2", "ColA2", vec![]),
+            make_column("col-b2", "ColB2", vec![]),
+            make_column("done", "Done", vec![card1, card2]),
+        ]);
+
+        let result = compute_stage_times(&board, &kando_dir).unwrap();
+        let names: Vec<&str> = result.columns.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"ColA2"), "ColA should map to ColA2: {names:?}");
+        assert!(names.contains(&"ColB2"), "ColB should map to ColB2: {names:?}");
+        assert!(!names.contains(&"ColA"), "ColA should not appear: {names:?}");
+        assert!(!names.contains(&"ColB"), "ColB should not appear: {names:?}");
     }
 
     #[test]

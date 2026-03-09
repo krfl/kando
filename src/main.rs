@@ -2592,7 +2592,7 @@ fn cmd_col_rename(cwd: &Path, column: &str, new_name: &str, json: bool) -> color
         let _ = rename_column_dir(kando_dir, &new_slug, &old_slug);
     })?;
 
-    append_activity(kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug)]);
+    append_activity(kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug), ("from_name", &old_name)]);
     if let Some(ref mut ss) = sync {
         ctx.sync_push(ss, &format!("Rename column '{old_slug}' → '{new_slug}'"));
     }
@@ -2822,10 +2822,11 @@ fn format_log_entry(entry: &serde_json::Value) -> String {
         "unarchive" => format!("Unarchived \"{title}\" to {}", extra_str(entry, "to")),
         "col-add" => format!("Added column \"{title}\""),
         "col-remove" => format!("Removed column \"{title}\""),
-        "col-rename" => format!(
-            "Renamed column {} \u{2192} \"{title}\"",
-            extra_str(entry, "from")
-        ),
+        "col-rename" => {
+            let old = extra_str(entry, "from_name");
+            let display = if old.is_empty() { extra_str(entry, "from") } else { old };
+            format!("Renamed column \"{display}\" \u{2192} \"{title}\"")
+        }
         "col-move" => format!(
             "Moved column \"{title}\" to position {}",
             extra_str(entry, "to")
@@ -3842,8 +3843,16 @@ mod tests {
 
     #[test]
     fn format_log_entry_col_rename() {
+        // With from_name: shows display name
+        let entry: serde_json::Value = serde_json::json!({"action": "col-rename", "title": "Code Review", "from": "review", "from_name": "Review"});
+        assert_eq!(format_log_entry(&entry), "Renamed column \"Review\" \u{2192} \"Code Review\"");
+    }
+
+    #[test]
+    fn format_log_entry_col_rename_legacy() {
+        // Without from_name: falls back to slug
         let entry: serde_json::Value = serde_json::json!({"action": "col-rename", "title": "Code Review", "from": "review"});
-        assert_eq!(format_log_entry(&entry), "Renamed column review \u{2192} \"Code Review\"");
+        assert_eq!(format_log_entry(&entry), "Renamed column \"review\" \u{2192} \"Code Review\"");
     }
 
     #[test]

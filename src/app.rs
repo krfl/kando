@@ -2913,7 +2913,7 @@ fn handle_input_confirm(
                         board.policies.auto_close_target = old_auto_close;
                         return Err(e.into());
                     }
-                    append_activity(kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug)]);
+                    append_activity(kando_dir, "col-rename", &new_slug, &derived_name, &[("from", &old_slug), ("from_name", &old_name)]);
                     state.notify(format!("Renamed: {old_name} → {derived_name}"));
                     sync_message = Some(format!("Rename column \"{old_name}\" to \"{derived_name}\""));
                 }
