@@ -331,6 +331,8 @@ pub struct AppState {
     pub hook_rx: Option<std::sync::mpsc::Receiver<crate::board::hooks::HookNotification>>,
     /// True when the current notification originated from a hook.
     pub notification_is_hook: bool,
+    /// Board reload deferred because a hook completed while not in Normal mode.
+    pub pending_hook_reload: bool,
 }
 
 impl AppState {
@@ -360,6 +362,7 @@ impl AppState {
             pending_editor_template: None,
             hook_rx: None,
             notification_is_hook: false,
+            pending_hook_reload: false,
         }
     }
 
@@ -863,10 +866,28 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
         // Tick
         state.tick_notification();
 
+        // Perform deferred hook reload once we return to Normal mode.
+        if state.pending_hook_reload && matches!(state.mode, Mode::Normal) {
+            if let Ok(new_board) = load_board(kando_dir) {
+                board = new_board;
+                state.clamp_selection_filtered(&board);
+            }
+            state.pending_hook_reload = false;
+        }
+
         // Drain hook results (only when no active notification)
         if state.notification.is_none() {
             if let Some(ref rx) = state.hook_rx {
                 if let Ok(notif) = rx.try_recv() {
+                    // Reload board in case the hook modified card files on disk.
+                    if matches!(state.mode, Mode::Normal) {
+                        if let Ok(new_board) = load_board(kando_dir) {
+                            board = new_board;
+                            state.clamp_selection_filtered(&board);
+                        }
+                    } else {
+                        state.pending_hook_reload = true;
+                    }
                     if notif.is_error {
                         state.notify_error(notif.message);
                     } else {
