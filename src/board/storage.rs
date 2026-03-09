@@ -271,9 +271,6 @@ pub fn init_board_at(kando_dir: &Path, name: &str, sync_branch: Option<&str>) ->
     for col in &cols {
         let col_dir = columns_dir.join(&col.slug);
         fs::create_dir_all(&col_dir)?;
-
-        let meta_str = toml::to_string_pretty(col)?;
-        fs::write(col_dir.join("_meta.toml"), meta_str)?;
     }
 
     let config = BoardConfig {
@@ -312,13 +309,6 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
     for col_config in &config.columns {
         validate_slug(&col_config.slug)?;
         let col_dir = columns_dir.join(&col_config.slug);
-        let meta = if col_dir.join("_meta.toml").exists() {
-            let meta_str = fs::read_to_string(col_dir.join("_meta.toml"))?;
-            toml::from_str::<ColumnConfig>(&meta_str)?
-        } else {
-            col_config.clone()
-        };
-
         // Load cards
         let mut cards = Vec::new();
         if col_dir.exists() {
@@ -339,9 +329,9 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
         let mut col = Column {
             slug: col_config.slug.clone(),
             name: slug_to_name(&col_config.slug),
-            order: meta.order,
-            wip_limit: meta.wip_limit,
-            hidden: meta.hidden.unwrap_or(false),
+            order: col_config.order,
+            wip_limit: col_config.wip_limit,
+            hidden: col_config.hidden.unwrap_or(false),
             cards,
         };
         col.sort_cards();
@@ -407,17 +397,6 @@ pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
     for col in &board.columns {
         let col_dir = columns_dir.join(&col.slug);
         fs::create_dir_all(&col_dir)?;
-
-        // Write _meta.toml
-        let meta = ColumnConfig {
-            slug: col.slug.clone(),
-            name: col.name.clone(),
-            order: col.order,
-            wip_limit: col.wip_limit,
-            hidden: if col.hidden { Some(true) } else { None },
-        };
-        let meta_str = toml::to_string_pretty(&meta)?;
-        fs::write(col_dir.join("_meta.toml"), meta_str)?;
 
         // Remove card files that no longer exist in this column
         if col_dir.exists() {
@@ -613,15 +592,15 @@ pub struct BoardSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnConfig {
-    // `#[serde(default)]` lets boards whose `_meta.toml` lacks a `slug` field
-    // still parse; the resulting empty string is caught immediately by
-    // `validate_slug` in `load_board`, so no silent bad state persists.
+    // `#[serde(default)]` allows forward-compatible parsing; the resulting
+    // empty string is caught immediately by `validate_slug` in `load_board`,
+    // so no silent bad state persists.
     #[serde(default)]
     pub slug: String,
-    /// Legacy field: previously stored in `_meta.toml` but now always derived
-    /// from the slug via [`slug_to_name`] at load time. Kept only for
-    /// backwards-compatible deserialization of existing boards; never written
-    /// back to disk (`skip_serializing`).
+    /// Legacy field: column names are always derived from the slug via
+    /// [`slug_to_name`] at load time. Kept only for backwards-compatible
+    /// deserialization of existing `config.toml` files; never written back
+    /// to disk (`skip_serializing`).
     #[serde(default, skip_serializing)]
     #[allow(dead_code)]
     pub name: String,
@@ -1121,10 +1100,10 @@ mod tests {
         let kando_dir = dir.path().join(".kando");
         assert!(kando_dir.exists());
         assert!(kando_dir.join("config.toml").exists());
-        assert!(kando_dir.join("columns/backlog/_meta.toml").exists());
-        assert!(kando_dir.join("columns/in-progress/_meta.toml").exists());
-        assert!(kando_dir.join("columns/done/_meta.toml").exists());
-        assert!(kando_dir.join("columns/archive/_meta.toml").exists());
+        assert!(kando_dir.join("columns/backlog").is_dir());
+        assert!(kando_dir.join("columns/in-progress").is_dir());
+        assert!(kando_dir.join("columns/done").is_dir());
+        assert!(kando_dir.join("columns/archive").is_dir());
 
         let board = load_board(&kando_dir).unwrap();
         assert_eq!(board.name, "Test Project");
@@ -2237,7 +2216,7 @@ mod tests {
     // ── ColumnConfig: name not written to disk ──
 
     #[test]
-    fn column_config_name_not_written_to_disk() {
+    fn column_config_name_not_written_to_config() {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -2245,28 +2224,86 @@ mod tests {
         let board = load_board(&kando_dir).unwrap();
         save_board(&kando_dir, &board).unwrap();
 
-        let meta_content = fs::read_to_string(kando_dir.join("columns/backlog/_meta.toml")).unwrap();
-        assert!(
-            !meta_content.contains("name ="),
-            "`name` field should not be written to _meta.toml, got:\n{meta_content}"
-        );
+        let config_content = fs::read_to_string(kando_dir.join("config.toml")).unwrap();
+        // The `name` field on ColumnConfig has skip_serializing, so it should
+        // not appear inside [[columns]] sections. (It *does* appear as
+        // `name = "Test"` in [board], so we search specifically in column blocks.)
+        for section in config_content.split("[[columns]]").skip(1) {
+            assert!(
+                !section.contains("name ="),
+                "`name` field should not be written to [[columns]], got:\n{section}"
+            );
+        }
     }
 
     #[test]
-    fn column_name_derived_from_slug_not_stored_name() {
+    fn init_board_does_not_create_meta_toml() {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
-        // Inject a wrong name into the meta file.
-        let meta_path = kando_dir.join("columns/in-progress/_meta.toml");
-        let original = fs::read_to_string(&meta_path).unwrap();
-        let with_wrong_name = format!("name = \"WRONG_NAME\"\n{original}");
-        fs::write(&meta_path, with_wrong_name).unwrap();
+        for slug in &["backlog", "in-progress", "done", "archive"] {
+            let meta_path = kando_dir.join("columns").join(slug).join("_meta.toml");
+            assert!(!meta_path.exists(), "_meta.toml should not be created in '{slug}'");
+        }
+    }
+
+    #[test]
+    fn save_board_does_not_create_meta_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        let id = board.next_card_id();
+        board.columns[0].cards.push(Card::new(id, "Task".into()));
+        save_board(&kando_dir, &board).unwrap();
+
+        for col in &board.columns {
+            let meta_path = kando_dir.join("columns").join(&col.slug).join("_meta.toml");
+            assert!(!meta_path.exists(), "_meta.toml should not exist in '{}'", col.slug);
+        }
+    }
+
+    #[test]
+    fn load_board_ignores_leftover_meta_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        // Simulate legacy _meta.toml files left on disk
+        for slug in &["backlog", "in-progress", "done", "archive"] {
+            let meta_path = kando_dir.join("columns").join(slug).join("_meta.toml");
+            fs::write(&meta_path, format!("slug = \"{slug}\"\norder = 0\n")).unwrap();
+        }
 
         let board = load_board(&kando_dir).unwrap();
-        let col = board.columns.iter().find(|c| c.slug == "in-progress").unwrap();
-        assert_eq!(col.name, "In Progress", "name should be derived from slug, not the stored value");
+        assert_eq!(board.columns.len(), 4);
+        for col in &board.columns {
+            assert!(col.cards.is_empty(), "{} should have no cards from _meta.toml", col.slug);
+        }
+    }
+
+    #[test]
+    fn round_trip_column_metadata_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        init_board(dir.path(), "Test", None).unwrap();
+        let kando_dir = dir.path().join(".kando");
+
+        let mut board = load_board(&kando_dir).unwrap();
+        board.columns[0].wip_limit = Some(5);
+        board.columns[1].wip_limit = None;
+        board.columns[2].hidden = true;
+        board.columns[3].hidden = false;
+        save_board(&kando_dir, &board).unwrap();
+
+        let reloaded = load_board(&kando_dir).unwrap();
+        assert_eq!(reloaded.columns[0].wip_limit, Some(5));
+        assert_eq!(reloaded.columns[1].wip_limit, None);
+        assert_eq!(reloaded.columns[2].hidden, true);
+        assert_eq!(reloaded.columns[3].hidden, false);
+        assert_eq!(reloaded.columns[0].name, "Backlog");
+        assert_eq!(reloaded.columns[1].name, "In Progress");
     }
 
     #[test]
