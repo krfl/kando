@@ -43,6 +43,7 @@ fn build_left_zone(state: &AppState) -> Vec<Span<'_>> {
     let mode_str = match &state.mode {
         Mode::Normal => "NORMAL",
         Mode::Goto => "GOTO",
+        Mode::GotoColumn => "GOTO COL",
         Mode::Space => "SPACE",
         Mode::Column => "COLUMN",
         Mode::ColMove => "MOVE COL",

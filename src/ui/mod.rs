@@ -59,8 +59,8 @@ pub fn render(f: &mut Frame, board: &Board, state: &mut AppState, now: DateTime<
 
     // Overlays
     match &mut state.mode {
-        crate::app::Mode::Goto | crate::app::Mode::Space | crate::app::Mode::Column | crate::app::Mode::ColMove | crate::app::Mode::FilterMenu | crate::app::Mode::Template => {
-            input_modal::render_hint_popup(f, chunks[0], &state.mode);
+        crate::app::Mode::Goto | crate::app::Mode::GotoColumn | crate::app::Mode::Space | crate::app::Mode::Column | crate::app::Mode::ColMove | crate::app::Mode::FilterMenu | crate::app::Mode::Template => {
+            input_modal::render_hint_popup(f, chunks[0], &state.mode, board);
         }
         crate::app::Mode::Picker { title, items, selected, .. } => {
             input_modal::render_picker(f, chunks[0], title, items, *selected);

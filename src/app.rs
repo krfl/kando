@@ -120,6 +120,7 @@ pub enum HelpPage {
 pub enum Mode {
     Normal,
     Goto,
+    GotoColumn,
     Space,
     Column,
     ColMove,
@@ -472,6 +473,80 @@ fn visible_card_indices(col: &Column, state: &AppState, board: &Board) -> Vec<us
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Iterator over visible (non-hidden or show_hidden) columns with their board indices.
+fn visible_columns(
+    board: &Board,
+    show_hidden: bool,
+) -> impl DoubleEndedIterator<Item = (usize, &Column)> {
+    board
+        .columns
+        .iter()
+        .enumerate()
+        .filter(move |(_, c)| !c.hidden || show_hidden)
+}
+
+/// Assign a unique lowercase letter to each column for goto-column navigation.
+///
+/// Algorithm:
+/// 1. Reserve `g` and `e` (used for first/last column).
+/// 2. If an archive column exists, assign it `a` (even if hidden — archive is always accessible).
+/// 3. For each remaining visible column (in board order), try its first character (lowercased).
+///    If taken, walk through the name's characters. If all exhausted, try remaining a-z.
+pub fn assign_column_letters(board: &Board, show_hidden: bool) -> Vec<(usize, char)> {
+    let reserved = ['g', 'e'];
+    let mut used: Vec<char> = reserved.to_vec();
+    let mut result: Vec<(usize, char)> = Vec::new();
+
+    // Collect column indices: visible columns + archive (always included)
+    let indices: Vec<usize> = board
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.hidden || show_hidden || c.slug == "archive")
+        .map(|(i, _)| i)
+        .collect();
+
+    // Archive always gets 'a' priority
+    let archive_idx = indices
+        .iter()
+        .find(|&&i| board.columns[i].slug == "archive");
+    if let Some(&idx) = archive_idx {
+        result.push((idx, 'a'));
+        used.push('a');
+    }
+
+    // Assign letters to remaining columns
+    for &col_idx in &indices {
+        if Some(&col_idx) == archive_idx {
+            continue; // already assigned
+        }
+        let name = &board.columns[col_idx].name;
+        let letter = name
+            .chars()
+            .filter_map(|c| {
+                let lower = c.to_ascii_lowercase();
+                if lower.is_ascii_lowercase() && !used.contains(&lower) {
+                    Some(lower)
+                } else {
+                    None
+                }
+            })
+            .next()
+            .or_else(|| {
+                // Fallback: find any unused letter
+                (b'a'..=b'z')
+                    .map(|b| b as char)
+                    .find(|c| !used.contains(c))
+            });
+        if let Some(ch) = letter {
+            result.push((col_idx, ch));
+            used.push(ch);
+        }
+    }
+
+    result
 }
 
 /// Sync `active_filter` from the current filter buffer.
@@ -857,7 +932,7 @@ fn process_action(
     ctx: &BoardContext,
 ) -> color_eyre::Result<()> {
     let kando_dir = &ctx.kando_dir;
-    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::Space | Mode::Column | Mode::ColMove | Mode::FilterMenu | Mode::Template);
+    let was_minor_mode = matches!(state.mode, Mode::Goto | Mode::GotoColumn | Mode::Space | Mode::Column | Mode::ColMove | Mode::FilterMenu | Mode::Template);
     let mut sync_message: Option<String> = None;
 
     match action {
@@ -878,11 +953,13 @@ fn process_action(
         }
 
         // Goto / Jump
-        Action::JumpToColumn(_)
-        | Action::JumpToFirstCard
+        Action::JumpToFirstCard
         | Action::JumpToLastCard
-        | Action::JumpToBacklog
-        | Action::JumpToDone => {
+        | Action::JumpToFirstCardGlobal
+        | Action::JumpToLastCardGlobal
+        | Action::JumpToFirstColumn
+        | Action::JumpToLastColumn
+        | Action::JumpToColumnByLetter(_) => {
             handle_goto(board, state, action);
         }
 
@@ -1090,6 +1167,7 @@ fn process_action(
 
         // Mode entry
         Action::EnterGotoMode => state.mode = Mode::Goto,
+        Action::EnterGotoColumnMode => state.mode = Mode::GotoColumn,
         Action::EnterSpaceMode => state.mode = Mode::Space,
         Action::EnterColumnMode => state.mode = Mode::Column,
         Action::EnterFilterMode => state.mode = Mode::FilterMenu,
@@ -1656,19 +1734,6 @@ fn handle_navigation(board: &Board, state: &mut AppState, action: Action, was_mi
 fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
     state.mode = Mode::Normal;
     match action {
-        Action::JumpToColumn(idx) => {
-            let visible: Vec<usize> = board
-                .columns
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| !c.hidden || state.show_hidden_columns)
-                .map(|(i, _)| i)
-                .collect();
-            if idx < visible.len() {
-                state.focused_column = visible[idx];
-                state.clamp_selection_filtered(board);
-            }
-        }
         Action::JumpToFirstCard => {
             if let Some(col) = board.columns.get(state.focused_column) {
                 let visible = visible_card_indices(col, state, board);
@@ -1689,24 +1754,60 @@ fn handle_goto(board: &Board, state: &mut AppState, action: Action) {
                 }
             }
         }
-        Action::JumpToBacklog => {
-            if let Some(idx) = board.columns.iter().position(|c| {
-                c.slug == "backlog" && (state.show_hidden_columns || !c.hidden)
-            }) {
-                state.focused_column = idx;
-                state.clamp_selection_filtered(board);
+        Action::JumpToFirstCardGlobal => {
+            let show_hidden = state.show_hidden_columns;
+            // Find first visible column with visible cards
+            let target = visible_columns(board, show_hidden)
+                .find_map(|(col_idx, col)| {
+                    let vis = visible_card_indices(col, state, board);
+                    vis.first().map(|&card_idx| (col_idx, card_idx))
+                });
+            if let Some((col_idx, card_idx)) = target {
+                state.focused_column = col_idx;
+                state.selected_card = card_idx;
             } else {
-                state.notify("No 'backlog' column");
+                state.notify("No visible cards");
             }
         }
-        Action::JumpToDone => {
-            if let Some(idx) = board.columns.iter().position(|c| {
-                c.slug == "done" && (state.show_hidden_columns || !c.hidden)
-            }) {
+        Action::JumpToLastCardGlobal => {
+            let show_hidden = state.show_hidden_columns;
+            // Find last visible column (right-to-left) with visible cards
+            let target = visible_columns(board, show_hidden)
+                .rev()
+                .find_map(|(col_idx, col)| {
+                    let vis = visible_card_indices(col, state, board);
+                    vis.last().map(|&card_idx| (col_idx, card_idx))
+                });
+            if let Some((col_idx, card_idx)) = target {
+                state.focused_column = col_idx;
+                state.selected_card = card_idx;
+            } else {
+                state.notify("No visible cards");
+            }
+        }
+        Action::JumpToFirstColumn => {
+            let show_hidden = state.show_hidden_columns;
+            if let Some((idx, _)) = visible_columns(board, show_hidden).next() {
                 state.focused_column = idx;
                 state.clamp_selection_filtered(board);
-            } else {
-                state.notify("No 'done' column");
+            }
+        }
+        Action::JumpToLastColumn => {
+            let show_hidden = state.show_hidden_columns;
+            if let Some((idx, _)) = visible_columns(board, show_hidden).next_back() {
+                state.focused_column = idx;
+                state.clamp_selection_filtered(board);
+            }
+        }
+        Action::JumpToColumnByLetter(c) => {
+            let letters = assign_column_letters(board, state.show_hidden_columns);
+            if let Some(&(col_idx, _)) = letters.iter().find(|(_, ch)| *ch == c) {
+                // Auto-show hidden columns if jumping to a hidden column (e.g. archive)
+                if board.columns[col_idx].hidden && !state.show_hidden_columns {
+                    state.show_hidden_columns = true;
+                }
+                state.focused_column = col_idx;
+                state.clamp_selection_filtered(board);
             }
         }
         _ => unreachable!(),
@@ -3722,26 +3823,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_jump_to_column() {
-        let board = test_board(&[("A", &["c1"]), ("B", &["c2"]), ("C", &["c3"])]);
-        let mut state = AppState::new();
-        handle_goto(&board, &mut state, Action::JumpToColumn(2));
-        assert_eq!(state.focused_column, 2);
-        assert_eq!(state.selected_card, 0);
-        assert!(matches!(state.mode, Mode::Normal));
-    }
-
-    #[test]
-    fn test_jump_to_column_skips_hidden() {
-        let mut board = test_board(&[("A", &[]), ("B", &[]), ("C", &[])]);
-        board.columns[1].hidden = true;
-        let mut state = AppState::new();
-        // Jump to visible index 1 — should skip hidden B and land on C (index 2)
-        handle_goto(&board, &mut state, Action::JumpToColumn(1));
-        assert_eq!(state.focused_column, 2);
-    }
-
-    #[test]
     fn test_jump_to_first_last_card() {
         let board = test_board(&[("A", &["c1", "c2", "c3"])]);
         let mut state = AppState::new();
@@ -3753,21 +3834,220 @@ mod tests {
     }
 
     #[test]
-    fn test_jump_to_backlog() {
-        let mut board = test_board(&[("Todo", &[]), ("Backlog", &["c1"])]);
-        board.columns[1].slug = "backlog".to_string();
+    fn test_jump_to_first_card_global() {
+        let board = test_board(&[("A", &[]), ("B", &["c1", "c2"]), ("C", &["c3"])]);
         let mut state = AppState::new();
-        handle_goto(&board, &mut state, Action::JumpToBacklog);
+        state.focused_column = 2;
+        handle_goto(&board, &mut state, Action::JumpToFirstCardGlobal);
+        assert_eq!(state.focused_column, 1); // first col with cards
+        assert_eq!(state.selected_card, 0);
+    }
+
+    #[test]
+    fn test_jump_to_last_card_global() {
+        let board = test_board(&[("A", &["c1"]), ("B", &["c2", "c3"]), ("C", &[])]);
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToLastCardGlobal);
+        assert_eq!(state.focused_column, 1); // last col with cards (right-to-left)
+        assert_eq!(state.selected_card, 1); // last card in that column
+    }
+
+    #[test]
+    fn test_jump_to_first_column() {
+        let board = test_board(&[("A", &["c1"]), ("B", &["c2"]), ("C", &["c3"])]);
+        let mut state = AppState::new();
+        state.focused_column = 2;
+        handle_goto(&board, &mut state, Action::JumpToFirstColumn);
+        assert_eq!(state.focused_column, 0);
+    }
+
+    #[test]
+    fn test_jump_to_last_column() {
+        let board = test_board(&[("A", &["c1"]), ("B", &["c2"]), ("C", &["c3"])]);
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToLastColumn);
+        assert_eq!(state.focused_column, 2);
+    }
+
+    #[test]
+    fn test_jump_to_column_by_letter() {
+        let board = test_board(&[("Backlog", &["c1"]), ("In Progress", &[]), ("Done", &[])]);
+        let mut state = AppState::new();
+        let letters = assign_column_letters(&board, false);
+        let done_letter = letters.iter().find(|(idx, _)| *idx == 2).unwrap().1;
+        handle_goto(&board, &mut state, Action::JumpToColumnByLetter(done_letter));
+        assert_eq!(state.focused_column, 2);
+    }
+
+    #[test]
+    fn test_jump_to_column_by_letter_auto_shows_hidden_archive() {
+        let mut board = test_board(&[("Todo", &[]), ("Archive", &[])]);
+        board.columns[1].slug = "archive".to_string();
+        board.columns[1].hidden = true;
+        let mut state = AppState::new();
+        assert!(!state.show_hidden_columns);
+        // Archive always gets 'a' even when hidden
+        handle_goto(&board, &mut state, Action::JumpToColumnByLetter('a'));
+        assert_eq!(state.focused_column, 1);
+        assert!(state.show_hidden_columns); // auto-enabled
+    }
+
+    // ── assign_column_letters tests ──
+
+    #[test]
+    fn assign_letters_reserves_g_and_e() {
+        let board = test_board(&[("Green", &[]), ("Epics", &[])]);
+        let letters = assign_column_letters(&board, false);
+        for (_, ch) in &letters {
+            assert_ne!(*ch, 'g', "letter 'g' must be reserved");
+            assert_ne!(*ch, 'e', "letter 'e' must be reserved");
+        }
+    }
+
+    #[test]
+    fn assign_letters_archive_always_gets_a() {
+        let mut board = test_board(&[("Alpha", &[]), ("Archive", &[])]);
+        board.columns[1].slug = "archive".to_string();
+        let letters = assign_column_letters(&board, false);
+        let archive = letters.iter().find(|(idx, _)| *idx == 1).unwrap();
+        assert_eq!(archive.1, 'a');
+        // Alpha should get a different letter
+        let alpha = letters.iter().find(|(idx, _)| *idx == 0).unwrap();
+        assert_ne!(alpha.1, 'a');
+    }
+
+    #[test]
+    fn assign_letters_name_character_fallback() {
+        // "Backlog" gets 'b', "Bugs" can't get 'b', walks to 'u'
+        let board = test_board(&[("Backlog", &[]), ("Bugs", &[])]);
+        let letters = assign_column_letters(&board, false);
+        let backlog = letters.iter().find(|(idx, _)| *idx == 0).unwrap();
+        let bugs = letters.iter().find(|(idx, _)| *idx == 1).unwrap();
+        assert_eq!(backlog.1, 'b');
+        assert_eq!(bugs.1, 'u');
+    }
+
+    #[test]
+    fn assign_letters_no_duplicate_letters() {
+        let board = test_board(&[
+            ("Backlog", &[]), ("Behind", &[]), ("In Progress", &[]),
+            ("Done", &[]), ("Deploy", &[]), ("QA", &[]),
+        ]);
+        let letters = assign_column_letters(&board, false);
+        let chars: Vec<char> = letters.iter().map(|(_, ch)| *ch).collect();
+        let unique: std::collections::HashSet<char> = chars.iter().copied().collect();
+        assert_eq!(chars.len(), unique.len(), "duplicate letters found: {chars:?}");
+    }
+
+    #[test]
+    fn assign_letters_empty_board() {
+        let board = Board {
+            name: "Empty".into(),
+            next_card_id: 1,
+            policies: Policies::default(),
+            sync_branch: None,
+            nerd_font: false,
+            created_at: None,
+            columns: vec![],
+        };
+        let letters = assign_column_letters(&board, false);
+        assert!(letters.is_empty());
+    }
+
+    #[test]
+    fn assign_letters_single_column() {
+        let board = test_board(&[("Todo", &[])]);
+        let letters = assign_column_letters(&board, false);
+        assert_eq!(letters.len(), 1);
+        assert_eq!(letters[0].1, 't');
+    }
+
+    #[test]
+    fn assign_letters_hidden_columns_excluded() {
+        let mut board = test_board(&[("Visible", &[]), ("Hidden", &[])]);
+        board.columns[1].hidden = true;
+        let letters = assign_column_letters(&board, false);
+        assert_eq!(letters.len(), 1);
+        assert_eq!(letters[0].0, 0);
+    }
+
+    #[test]
+    fn assign_letters_hidden_columns_included_when_show_hidden() {
+        let mut board = test_board(&[("Visible", &[]), ("Hidden", &[])]);
+        board.columns[1].hidden = true;
+        let letters = assign_column_letters(&board, true);
+        assert_eq!(letters.len(), 2);
+    }
+
+    #[test]
+    fn assign_letters_hidden_archive_always_included() {
+        let mut board = test_board(&[("Todo", &[]), ("Archive", &[])]);
+        board.columns[1].slug = "archive".to_string();
+        board.columns[1].hidden = true;
+        let letters = assign_column_letters(&board, false);
+        assert_eq!(letters.len(), 2); // both included, archive despite being hidden
+        let archive = letters.iter().find(|(idx, _)| *idx == 1).unwrap();
+        assert_eq!(archive.1, 'a');
+    }
+
+    // ── Goto edge case tests ──
+
+    #[test]
+    fn goto_resets_mode_to_normal() {
+        let board = test_board(&[("A", &["c1"])]);
+        let mut state = AppState::new();
+        state.mode = Mode::GotoColumn;
+        handle_goto(&board, &mut state, Action::JumpToFirstCard);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn jump_to_first_column_skips_hidden() {
+        let mut board = test_board(&[("Hidden", &[]), ("Visible", &[])]);
+        board.columns[0].hidden = true;
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToFirstColumn);
         assert_eq!(state.focused_column, 1);
     }
 
     #[test]
-    fn test_jump_to_done() {
-        let mut board = test_board(&[("Todo", &[]), ("Done", &["c1"])]);
-        board.columns[1].slug = "done".to_string();
+    fn jump_to_last_column_skips_hidden() {
+        let mut board = test_board(&[("A", &[]), ("B", &[]), ("Hidden", &[])]);
+        board.columns[2].hidden = true;
         let mut state = AppState::new();
-        handle_goto(&board, &mut state, Action::JumpToDone);
+        handle_goto(&board, &mut state, Action::JumpToLastColumn);
+        assert_eq!(state.focused_column, 1); // skips hidden column 2, lands on B
+    }
+
+    #[test]
+    fn jump_to_first_card_global_skips_hidden_columns() {
+        let mut board = test_board(&[("Hidden", &["c1"]), ("Visible", &["c2"])]);
+        board.columns[0].hidden = true;
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToFirstCardGlobal);
+        assert_eq!(state.focused_column, 1); // skipped hidden column 0
+    }
+
+    #[test]
+    fn jump_to_last_card_global_skips_hidden_columns() {
+        let mut board = test_board(&[("Visible", &["c1"]), ("Hidden", &["c2"])]);
+        board.columns[1].hidden = true;
+        let mut state = AppState::new();
+        handle_goto(&board, &mut state, Action::JumpToLastCardGlobal);
+        assert_eq!(state.focused_column, 0); // skipped hidden column 1
+    }
+
+    #[test]
+    fn jump_to_column_by_letter_clamps_selection() {
+        // Column B has 1 card, but selected_card is 5 from previous column
+        let board = test_board(&[("Alpha", &["c1", "c2", "c3"]), ("Bravo", &["c4"])]);
+        let mut state = AppState::new();
+        state.selected_card = 2; // valid in Alpha but out of range for Bravo
+        let letters = assign_column_letters(&board, false);
+        let bravo_letter = letters.iter().find(|(idx, _)| *idx == 1).unwrap().1;
+        handle_goto(&board, &mut state, Action::JumpToColumnByLetter(bravo_letter));
         assert_eq!(state.focused_column, 1);
+        assert_eq!(state.selected_card, 0); // clamped
     }
 
     // -----------------------------------------------------------------------
@@ -5250,43 +5530,28 @@ mod tests {
     }
 
     #[test]
-    fn jump_to_backlog_missing_column_notifies() {
-        let board = test_board(&[("Todo", &[]), ("Done", &[])]);
+    fn jump_to_column_by_letter_unknown_letter_is_noop() {
+        let board = test_board(&[("Backlog", &["c1"]), ("Done", &[])]);
         let mut state = AppState::new();
-        handle_goto(&board, &mut state, Action::JumpToBacklog);
-        assert_eq!(state.notification.as_deref(), Some("No 'backlog' column"));
-        assert_eq!(state.focused_column, 0);
+        // 'z' shouldn't match any column
+        handle_goto(&board, &mut state, Action::JumpToColumnByLetter('z'));
+        assert_eq!(state.focused_column, 0); // unchanged
     }
 
     #[test]
-    fn jump_to_done_missing_column_notifies() {
-        let board = test_board(&[("Todo", &[]), ("Backlog", &[])]);
+    fn jump_to_first_card_global_no_cards_notifies() {
+        let board = test_board(&[("A", &[]), ("B", &[])]);
         let mut state = AppState::new();
-        handle_goto(&board, &mut state, Action::JumpToDone);
-        assert_eq!(state.notification.as_deref(), Some("No 'done' column"));
-        assert_eq!(state.focused_column, 0);
+        handle_goto(&board, &mut state, Action::JumpToFirstCardGlobal);
+        assert_eq!(state.notification.as_deref(), Some("No visible cards"));
     }
 
     #[test]
-    fn jump_to_backlog_hidden_notifies_when_show_hidden_off() {
-        let mut board = test_board(&[("Backlog", &[])]);
-        board.columns[0].slug = "backlog".into();
-        board.columns[0].hidden = true;
+    fn jump_to_last_card_global_no_cards_notifies() {
+        let board = test_board(&[("A", &[]), ("B", &[])]);
         let mut state = AppState::new();
-        state.show_hidden_columns = false;
-        handle_goto(&board, &mut state, Action::JumpToBacklog);
-        assert_eq!(state.notification.as_deref(), Some("No 'backlog' column"));
-    }
-
-    #[test]
-    fn jump_to_done_hidden_notifies_when_show_hidden_off() {
-        let mut board = test_board(&[("Done", &[])]);
-        board.columns[0].slug = "done".into();
-        board.columns[0].hidden = true;
-        let mut state = AppState::new();
-        state.show_hidden_columns = false;
-        handle_goto(&board, &mut state, Action::JumpToDone);
-        assert_eq!(state.notification.as_deref(), Some("No 'done' column"));
+        handle_goto(&board, &mut state, Action::JumpToLastCardGlobal);
+        assert_eq!(state.notification.as_deref(), Some("No visible cards"));
     }
 
     // -----------------------------------------------------------------------

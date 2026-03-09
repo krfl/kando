@@ -8,11 +8,13 @@ pub enum Action {
     SelectNextCard,
     CycleNextCard,
     CyclePrevCard,
-    JumpToColumn(usize),
     JumpToFirstCard,
     JumpToLastCard,
-    JumpToBacklog,
-    JumpToDone,
+    JumpToFirstCardGlobal,
+    JumpToLastCardGlobal,
+    JumpToFirstColumn,
+    JumpToLastColumn,
+    JumpToColumnByLetter(char),
 
     // Card movement
     MoveCardPrevColumn,
@@ -84,6 +86,7 @@ pub enum Action {
 
     // Minor mode entry
     EnterGotoMode,
+    EnterGotoColumnMode,
     EnterSpaceMode,
     EnterColumnMode,
     // Input modal

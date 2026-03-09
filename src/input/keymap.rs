@@ -8,6 +8,7 @@ pub fn map_key(key: KeyEvent, mode: &Mode) -> Action {
     match mode {
         Mode::Normal => map_normal(key),
         Mode::Goto => map_goto(key),
+        Mode::GotoColumn => map_goto_column(key),
         Mode::Space => map_space(key),
         Mode::Column => map_column(key),
         Mode::ColMove => map_col_move(key),
@@ -78,12 +79,22 @@ fn map_normal(key: KeyEvent) -> Action {
 
 fn map_goto(key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Char(c @ '1'..='9') => Action::JumpToColumn(c as usize - '1' as usize),
         KeyCode::Char('g') => Action::JumpToFirstCard,
         KeyCode::Char('e') => Action::JumpToLastCard,
-        KeyCode::Char('b') => Action::JumpToBacklog,
-        KeyCode::Char('d') => Action::JumpToDone,
-        KeyCode::Esc => Action::None, // cancel goto mode
+        KeyCode::Char('G') => Action::JumpToFirstCardGlobal,
+        KeyCode::Char('E') => Action::JumpToLastCardGlobal,
+        KeyCode::Char('c') => Action::EnterGotoColumnMode,
+        KeyCode::Esc => Action::None,
+        _ => Action::None,
+    }
+}
+
+fn map_goto_column(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('g') => Action::JumpToFirstColumn,
+        KeyCode::Char('e') => Action::JumpToLastColumn,
+        KeyCode::Char(c) if c.is_ascii_lowercase() => Action::JumpToColumnByLetter(c),
+        KeyCode::Esc => Action::None,
         _ => Action::None,
     }
 }
@@ -257,11 +268,16 @@ pub const FILTER_BINDINGS: &[Binding] = &[
 ];
 
 pub const GOTO_BINDINGS: &[Binding] = &[
-    Binding { key: "1-9", description: "Jump to column" },
-    Binding { key: "b", description: "Backlog" },
-    Binding { key: "d", description: "Done" },
     Binding { key: "g", description: "First card" },
     Binding { key: "e", description: "Last card" },
+    Binding { key: "G", description: "First card (global)" },
+    Binding { key: "E", description: "Last card (global)" },
+    Binding { key: "c", description: "Goto column" },
+];
+
+pub const GOTO_COLUMN_BINDINGS: &[Binding] = &[
+    Binding { key: "g", description: "First column" },
+    Binding { key: "e", description: "Last column" },
 ];
 
 pub const COLUMN_BINDINGS: &[Binding] = &[
@@ -302,6 +318,7 @@ pub const HELP_GROUPS: &[BindingGroup] = &[
     BindingGroup { name: "Normal Mode", bindings: NORMAL_BINDINGS },
     BindingGroup { name: "Commands (Space)", bindings: SPACE_BINDINGS },
     BindingGroup { name: "Goto (g)", bindings: GOTO_BINDINGS },
+    BindingGroup { name: "Goto Column (gc)", bindings: GOTO_COLUMN_BINDINGS },
     BindingGroup { name: "Filter (f)", bindings: FILTER_BINDINGS },
     BindingGroup { name: "Column (c)", bindings: COLUMN_BINDINGS },
     BindingGroup { name: "Column Move (cm)", bindings: COL_MOVE_BINDINGS },
@@ -313,6 +330,7 @@ pub const HELP_GROUPS: &[BindingGroup] = &[
 pub fn mode_bindings(mode: &Mode) -> &'static [Binding] {
     match mode {
         Mode::Goto => GOTO_BINDINGS,
+        Mode::GotoColumn => GOTO_COLUMN_BINDINGS,
         Mode::Space => SPACE_BINDINGS,
         Mode::Column => COLUMN_BINDINGS,
         Mode::ColMove => COL_MOVE_BINDINGS,
@@ -623,12 +641,6 @@ mod tests {
     // ── Goto mode bindings ──
 
     #[test]
-    fn goto_digit_jumps() {
-        assert_eq!(map_key(key(KeyCode::Char('1')), &Mode::Goto), Action::JumpToColumn(0));
-        assert_eq!(map_key(key(KeyCode::Char('3')), &Mode::Goto), Action::JumpToColumn(2));
-    }
-
-    #[test]
     fn goto_g_jumps_first() {
         assert_eq!(map_key(key(KeyCode::Char('g')), &Mode::Goto), Action::JumpToFirstCard);
     }
@@ -639,13 +651,60 @@ mod tests {
     }
 
     #[test]
-    fn goto_b_jumps_backlog() {
-        assert_eq!(map_key(key(KeyCode::Char('b')), &Mode::Goto), Action::JumpToBacklog);
+    fn goto_shift_g_jumps_first_global() {
+        assert_eq!(map_key(key(KeyCode::Char('G')), &Mode::Goto), Action::JumpToFirstCardGlobal);
     }
 
     #[test]
-    fn goto_d_jumps_done() {
-        assert_eq!(map_key(key(KeyCode::Char('d')), &Mode::Goto), Action::JumpToDone);
+    fn goto_shift_e_jumps_last_global() {
+        assert_eq!(map_key(key(KeyCode::Char('E')), &Mode::Goto), Action::JumpToLastCardGlobal);
+    }
+
+    #[test]
+    fn goto_c_enters_goto_column() {
+        assert_eq!(map_key(key(KeyCode::Char('c')), &Mode::Goto), Action::EnterGotoColumnMode);
+    }
+
+    // ── GotoColumn mode bindings ──
+
+    #[test]
+    fn goto_column_g_jumps_first_column() {
+        assert_eq!(map_key(key(KeyCode::Char('g')), &Mode::GotoColumn), Action::JumpToFirstColumn);
+    }
+
+    #[test]
+    fn goto_column_e_jumps_last_column() {
+        assert_eq!(map_key(key(KeyCode::Char('e')), &Mode::GotoColumn), Action::JumpToLastColumn);
+    }
+
+    #[test]
+    fn goto_column_letter_dispatches() {
+        assert_eq!(map_key(key(KeyCode::Char('b')), &Mode::GotoColumn), Action::JumpToColumnByLetter('b'));
+    }
+
+    #[test]
+    fn goto_column_esc_cancels() {
+        assert_eq!(map_key(key(KeyCode::Esc), &Mode::GotoColumn), Action::None);
+    }
+
+    #[test]
+    fn goto_column_uppercase_is_noop() {
+        assert_eq!(map_key(key(KeyCode::Char('B')), &Mode::GotoColumn), Action::None);
+    }
+
+    #[test]
+    fn goto_column_digit_is_noop() {
+        assert_eq!(map_key(key(KeyCode::Char('5')), &Mode::GotoColumn), Action::None);
+    }
+
+    #[test]
+    fn goto_esc_cancels() {
+        assert_eq!(map_key(key(KeyCode::Esc), &Mode::Goto), Action::None);
+    }
+
+    #[test]
+    fn goto_unmapped_key_is_noop() {
+        assert_eq!(map_key(key(KeyCode::Char('x')), &Mode::Goto), Action::None);
     }
 
     // ── Space mode bindings ──
@@ -865,6 +924,12 @@ mod tests {
     #[test]
     fn mode_bindings_goto_returns_bindings() {
         let bindings = mode_bindings(&Mode::Goto);
+        assert!(!bindings.is_empty());
+    }
+
+    #[test]
+    fn mode_bindings_goto_column_returns_bindings() {
+        let bindings = mode_bindings(&Mode::GotoColumn);
         assert!(!bindings.is_empty());
     }
 

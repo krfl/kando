@@ -5,21 +5,55 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use crate::app::{CompletionHint, Mode};
+use crate::app::{self, CompletionHint, Mode};
+use crate::board::Board;
 use crate::input::keymap;
 
-/// Render the minor-mode hint popup (shown for g, space, c, cm, f modes).
-pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
-    let bindings = keymap::mode_bindings(mode);
-    if bindings.is_empty() {
+/// A popup entry: key string and description.
+struct PopupEntry {
+    key: String,
+    desc: String,
+}
+
+/// Render the minor-mode hint popup (shown for g, gc, space, c, cm, f modes).
+pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode, board: &Board) {
+    // Build entries: for GotoColumn, combine static bindings with dynamic column letters.
+    let entries: Vec<PopupEntry> = if matches!(mode, Mode::GotoColumn) {
+        let static_bindings = keymap::mode_bindings(mode);
+        let mut entries: Vec<PopupEntry> = static_bindings
+            .iter()
+            .map(|b| PopupEntry { key: b.key.to_string(), desc: b.description.to_string() })
+            .collect();
+        let letters = app::assign_column_letters(board, true);
+        for (col_idx, ch) in letters {
+            if let Some(col) = board.columns.get(col_idx) {
+                entries.push(PopupEntry {
+                    key: ch.to_string(),
+                    desc: col.name.clone(),
+                });
+            }
+        }
+        entries
+    } else {
+        let bindings = keymap::mode_bindings(mode);
+        if bindings.is_empty() {
+            return;
+        }
+        bindings
+            .iter()
+            .map(|b| PopupEntry { key: b.key.to_string(), desc: b.description.to_string() })
+            .collect()
+    };
+
+    if entries.is_empty() {
         return;
     }
 
     // Calculate popup dimensions
-    let max_key_len = bindings.iter().map(|b| b.key.len()).max().unwrap_or(0);
-    let max_desc_len = bindings.iter().map(|b| b.description.len()).max().unwrap_or(0);
+    let max_key_len = entries.iter().map(|e| e.key.len()).max().unwrap_or(0);
+    let max_desc_len = entries.iter().map(|e| e.desc.len()).max().unwrap_or(0);
     let popup_width = (max_key_len + max_desc_len + 7).min(area.width as usize) as u16;
-    let popup_height = (bindings.len() as u16 + 2).min(area.height);
+    let popup_height = (entries.len() as u16 + 2).min(area.height);
 
     let x = area.x + area.width.saturating_sub(popup_width);
     let y = area.y + area.height.saturating_sub(popup_height);
@@ -29,6 +63,7 @@ pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
 
     let mode_name = match mode {
         Mode::Goto => "goto",
+        Mode::GotoColumn => "goto column",
         Mode::Space => "commands",
         Mode::Column => "column",
         Mode::ColMove => "move column",
@@ -51,20 +86,20 @@ pub fn render_hint_popup(f: &mut Frame, area: Rect, mode: &Mode) {
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
-    for (i, binding) in bindings.iter().enumerate() {
+    for (i, entry) in entries.iter().enumerate() {
         if i >= inner.height as usize {
             break;
         }
         let line = Line::from(vec![
             Span::raw(" "),
             Span::styled(
-                format!("{:>width$}", binding.key, width = max_key_len),
+                format!("{:>width$}", entry.key, width = max_key_len),
                 Style::default()
                     .fg(Theme::HINT_KEY)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(binding.description, Style::default().fg(Theme::HINT_DESC)),
+            Span::styled(entry.desc.as_str(), Style::default().fg(Theme::HINT_DESC)),
         ]);
         f.render_widget(
             Paragraph::new(line),
