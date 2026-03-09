@@ -330,7 +330,7 @@ pub fn scaffold_hook(kando_dir: &Path, hook_name: &str) -> std::io::Result<PathB
     let path = hooks_dir.join(hook_name);
 
     #[cfg(unix)]
-    std::fs::write(&path, "#!/bin/sh\n")?;
+    std::fs::write(&path, "#!/usr/bin/env sh\n")?;
 
     #[cfg(not(unix))]
     std::fs::write(&path, "@echo off\r\n")?;
@@ -439,7 +439,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\necho hello").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho hello").unwrap();
         // Remove execute permission
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -464,7 +464,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\necho 'card created'").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho 'card created'").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -490,7 +490,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-delete");
-        fs::write(&hook_path, "#!/bin/sh\necho 'oops' >&2\nexit 1").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho 'oops' >&2\nexit 1").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -514,7 +514,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\necho hi").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho hi").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let hooks = list_hooks(tmp.path());
@@ -533,7 +533,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-move");
-        fs::write(&hook_path, "#!/bin/sh\necho hi").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho hi").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o644)).unwrap();
 
         let hooks = list_hooks(tmp.path());
@@ -556,7 +556,7 @@ mod tests {
         let hook_path = hooks_dir.join("post-move");
         fs::write(
             &hook_path,
-            "#!/bin/sh\necho \"from=$KANDO_FROM to=$KANDO_TO event=$KANDO_EVENT\"",
+            "#!/usr/bin/env sh\necho \"from=$KANDO_FROM to=$KANDO_TO event=$KANDO_EVENT\"",
         )
         .unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -590,7 +590,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\necho logged").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho logged").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -621,7 +621,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\n# silent hook").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\n# silent hook").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -646,7 +646,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-delete");
-        fs::write(&hook_path, "#!/bin/sh\nexit 42").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\nexit 42").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -672,7 +672,7 @@ mod tests {
 
         // Hook writes only to stderr but exits 0
         let hook_path = hooks_dir.join("post-edit");
-        fs::write(&hook_path, "#!/bin/sh\necho 'stderr only' >&2").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho 'stderr only' >&2").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -697,7 +697,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-delete");
-        fs::write(&hook_path, "#!/bin/sh\nexit 7").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\nexit 7").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -725,7 +725,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\necho 'cli mode'").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho 'cli mode'").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         // Call run_hook directly (synchronous) instead of fire_hook to avoid race
@@ -757,7 +757,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\necho 'line one'\necho 'line two'").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho 'line one'\necho 'line two'").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -784,7 +784,7 @@ mod tests {
         let hook_path = hooks_dir.join("post-create");
         fs::write(
             &hook_path,
-            "#!/bin/sh\necho 'from stdout'\necho 'from stderr' >&2",
+            "#!/usr/bin/env sh\necho 'from stdout'\necho 'from stderr' >&2",
         )
         .unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -813,7 +813,7 @@ mod tests {
         fs::create_dir(&hooks_dir).unwrap();
 
         let hook_path = hooks_dir.join("post-create");
-        fs::write(&hook_path, "#!/bin/sh\necho \"board_dir=$KANDO_BOARD_DIR\"").unwrap();
+        fs::write(&hook_path, "#!/usr/bin/env sh\necho \"board_dir=$KANDO_BOARD_DIR\"").unwrap();
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -856,12 +856,12 @@ mod tests {
 
         // Executable hook
         let exec_path = hooks_dir.join("post-create");
-        fs::write(&exec_path, "#!/bin/sh").unwrap();
+        fs::write(&exec_path, "#!/usr/bin/env sh").unwrap();
         fs::set_permissions(&exec_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         // Non-executable hook
         let noexec_path = hooks_dir.join("post-move");
-        fs::write(&noexec_path, "#!/bin/sh").unwrap();
+        fs::write(&noexec_path, "#!/usr/bin/env sh").unwrap();
         fs::set_permissions(&noexec_path, fs::Permissions::from_mode(0o644)).unwrap();
 
         // "post-delete" is NOT created (missing)
@@ -967,7 +967,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = scaffold_hook(tmp.path(), "post-create").unwrap();
         let content = fs::read_to_string(path).unwrap();
-        assert_eq!(content, "#!/bin/sh\n");
+        assert_eq!(content, "#!/usr/bin/env sh\n");
     }
 
     #[cfg(unix)]
@@ -1027,7 +1027,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("script");
-        fs::write(&path, "#!/bin/sh\n").unwrap();
+        fs::write(&path, "#!/usr/bin/env sh\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
         make_executable(&path).unwrap();
@@ -1041,7 +1041,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("script");
-        fs::write(&path, "#!/bin/sh\n").unwrap();
+        fs::write(&path, "#!/usr/bin/env sh\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 
         make_executable(&path).unwrap();
