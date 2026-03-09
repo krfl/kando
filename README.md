@@ -28,7 +28,7 @@ kando init
 kando
 ```
 
-Press `?` to open the help panel — it has two pages: keybinding reference and concepts. You can also have Kando handle syncing your board to git. See the section on [Team Collaboration](#team-collaboration) for more details.
+The help panel opens automatically on first launch. Press `?` to reopen it at any time — it has two pages: keybinding reference and concepts. You can also have Kando handle syncing your board to git. See the section on [Team Collaboration](#team-collaboration) for more details.
 
 ## The Board
 

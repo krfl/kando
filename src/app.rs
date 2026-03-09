@@ -771,9 +771,9 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
     state.clamp_selection(&board);
 
-    // Show help hint on first launch
+    // Show help panel on first launch
     if !state.help_hint_shown {
-        state.notify("Press ? for help");
+        state.mode = Mode::Help { scroll: 0, page: HelpPage::Keybindings };
         state.help_hint_shown = true;
         local_cfg.help_hint_shown = true;
         let _ = save_local_config(kando_dir, &local_cfg);
