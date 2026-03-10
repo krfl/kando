@@ -1,5 +1,6 @@
 # Build
 /target
+result
 
 # IDE
 .idea/
