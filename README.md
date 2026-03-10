@@ -175,8 +175,10 @@ scripts can access structured card metadata without parsing frontmatter:
 | `KANDO_CARD_ASSIGNEES` | Comma-separated assignees | `alice` |
 | `KANDO_CARD_PRIORITY` | Priority level (`low`, `normal`, `high`, `urgent`) | `high` |
 | `KANDO_CARD_COLUMN` | Display name of the card's column | `In Progress` |
+| `KANDO_CARD_DUE` | Due date (`YYYY-MM-DD`) | `2026-04-01` |
+| `KANDO_CARD_BLOCKED` | Blocker reason | `waiting on API review` |
 
-Tags, assignees, and column values are empty strings when unset.
+Tags, assignees, column, due, and blocked values are empty strings when unset.
 
 ## Team Collaboration
 
@@ -246,6 +248,9 @@ Kando isn't just a TUI. You can also manage cards from the command line for scri
 ```sh
 # Add a card
 kando add "Fix login bug" -t bug,auth -p high -a alice
+
+# Add a card to a specific column
+kando add "Review PR" -c in-progress
 
 # Add a card from a template
 kando add "Login crash" --template bug
@@ -369,6 +374,8 @@ Now every time a card is created (TUI or CLI), your Mac reads the title aloud.
 | `KANDO_EVENT` | The event name (e.g. `create`, `move`) |
 | `KANDO_CARD_ID` | Card identifier |
 | `KANDO_CARD_TITLE` | Card title |
+| `KANDO_CARD_DUE` | Due date (`YYYY-MM-DD`, empty if unset) |
+| `KANDO_CARD_BLOCKED` | Blocker reason (empty if unset) |
 | `KANDO_BOARD_DIR` | Absolute path to the project root |
 | `KANDO_FROM`, `KANDO_TO`, etc. | Extra context depending on the event |
 

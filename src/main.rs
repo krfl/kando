@@ -40,7 +40,7 @@ enum Command {
         #[arg(long, num_args = 0..=1, default_missing_value = "kando")]
         git: Option<String>,
     },
-    /// Add a new card to the backlog
+    /// Add a new card to the board
     Add {
         /// Card title
         title: String,
@@ -59,6 +59,9 @@ enum Command {
         /// Apply a card template (name or slug)
         #[arg(long, short = 'T')]
         template: Option<String>,
+        /// Target column (name or slug; defaults to the first column)
+        #[arg(short, long)]
+        column: Option<String>,
     },
     /// List all cards
     List {
@@ -581,7 +584,8 @@ fn main() {
             priority,
             due,
             template,
-        }) => cmd_add(&cwd, &title, tags, assignee, priority, due.as_deref(), template.as_deref(), json),
+            column,
+        }) => cmd_add(&cwd, &title, tags, assignee, priority, due.as_deref(), template.as_deref(), column.as_deref(), json),
         Some(Command::List { tag, column, overdue, csv }) => cmd_list(&cwd, tag.as_deref(), column.as_deref(), overdue, json, csv),
         Some(Command::Delete { card_id }) => cmd_delete(&cwd, &card_id, json),
         Some(Command::Edit {
@@ -851,6 +855,7 @@ fn cmd_add(
     priority: Option<Priority>,
     due: Option<&str>,
     template: Option<&str>,
+    column: Option<&str>,
     json: bool,
 ) -> color_eyre::Result<()> {
     let (ctx, mut sync) = resolve_and_sync(cwd)?;
@@ -907,11 +912,24 @@ fn cmd_add(
         );
     }
 
-    // Add to first column (backlog)
-    let col_name = board.columns.first().map(|c| c.name.clone()).unwrap_or_default();
-    if let Some(col) = board.columns.first_mut() {
-        col.cards.push(card);
+    // Resolve target column (default: first column)
+    let target_idx = match column {
+        Some(query) => resolve_col_cli(&board, query)?,
+        None => 0,
+    };
+
+    // Set started if placing past backlog (column 0), matching move_card semantics
+    if target_idx > 0 {
+        card.started = Some(chrono::Utc::now());
     }
+    // Set completed if placing directly into done
+    if board.columns[target_idx].slug == "done" {
+        card.completed = Some(chrono::Utc::now());
+    }
+
+    let col_name = board.columns[target_idx].name.clone();
+    board.columns[target_idx].cards.push(card);
+    board.columns[target_idx].sort_cards();
 
     save_board(kando_dir, &board)?;
 
@@ -4320,7 +4338,7 @@ mod tests {
     fn cmd_add_with_due_date_sets_field() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        cmd_add(dir.path(), "Due task", vec![], vec![], Some(Priority::Normal), Some("2025-12-31"), None, false).unwrap();
+        cmd_add(dir.path(), "Due task", vec![], vec![], Some(Priority::Normal), Some("2025-12-31"), None, None, false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         let card = &board.columns[0].cards[0];
@@ -4331,7 +4349,7 @@ mod tests {
     fn cmd_add_with_invalid_due_date_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        let result = cmd_add(dir.path(), "Bad date", vec![], vec![], Some(Priority::Normal), Some("not-a-date"), None, false);
+        let result = cmd_add(dir.path(), "Bad date", vec![], vec![], Some(Priority::Normal), Some("not-a-date"), None, None, false);
         assert!(result.is_err());
     }
 
@@ -4339,7 +4357,7 @@ mod tests {
     fn cmd_add_without_due_date_field_is_none() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        cmd_add(dir.path(), "No due", vec![], vec![], Some(Priority::Normal), None, None, false).unwrap();
+        cmd_add(dir.path(), "No due", vec![], vec![], Some(Priority::Normal), None, None, None, false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         assert!(board.columns[0].cards[0].due.is_none());
@@ -5690,9 +5708,9 @@ mod tests {
         board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         // Add one overdue card and one non-overdue card
-        cmd_add(dir.path(), "Overdue task", vec![], vec![], Some(Priority::Normal), Some("2020-01-01"), None, false).unwrap();
-        cmd_add(dir.path(), "Future task", vec![], vec![], Some(Priority::Normal), Some("2099-12-31"), None, false).unwrap();
-        cmd_add(dir.path(), "No due task", vec![], vec![], Some(Priority::Normal), None, None, false).unwrap();
+        cmd_add(dir.path(), "Overdue task", vec![], vec![], Some(Priority::Normal), Some("2020-01-01"), None, None, false).unwrap();
+        cmd_add(dir.path(), "Future task", vec![], vec![], Some(Priority::Normal), Some("2099-12-31"), None, None, false).unwrap();
+        cmd_add(dir.path(), "No due task", vec![], vec![], Some(Priority::Normal), None, None, None, false).unwrap();
         // With --overdue, only the overdue card should appear
         assert!(cmd_list(dir.path(), None, None, true, false, false).is_ok());
         let board = load_board(&kando_dir).unwrap();
@@ -5705,14 +5723,14 @@ mod tests {
     fn cmd_add_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        assert!(cmd_add(dir.path(), "JSON card", vec!["test".into()], vec![], Some(Priority::Normal), None, None, true).is_ok());
+        assert!(cmd_add(dir.path(), "JSON card", vec!["test".into()], vec![], Some(Priority::Normal), None, None, None, true).is_ok());
     }
 
     #[test]
     fn cmd_add_json_card_actually_created() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        cmd_add(dir.path(), "JSON card", vec![], vec![], Some(Priority::Normal), None, None, true).unwrap();
+        cmd_add(dir.path(), "JSON card", vec![], vec![], Some(Priority::Normal), None, None, None, true).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         let total: usize = board.columns.iter().map(|c| c.cards.len()).sum();
@@ -6241,7 +6259,7 @@ mod tests {
         let slug = generate_template_slug("Bug", &[]);
         save_template(&kando_dir, &slug, &tmpl).unwrap();
 
-        cmd_add(dir.path(), "Login crash", vec![], vec![], None, None, Some("bug"), false).unwrap();
+        cmd_add(dir.path(), "Login crash", vec![], vec![], None, None, Some("bug"), None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let card = &board.columns[0].cards[0];
         assert_eq!(card.priority, Priority::High);
@@ -6274,7 +6292,7 @@ mod tests {
         };
         save_template(&kando_dir, &generate_template_slug("Bug", &[]), &tmpl).unwrap();
 
-        cmd_add(dir.path(), "Override", vec![], vec![], Some(Priority::Urgent), None, Some("bug"), false).unwrap();
+        cmd_add(dir.path(), "Override", vec![], vec![], Some(Priority::Urgent), None, Some("bug"), None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let card = &board.columns[0].cards[0];
         assert_eq!(card.priority, Priority::Urgent);
@@ -6306,6 +6324,7 @@ mod tests {
             None,
             None,
             Some("bug"),
+            None,
             false,
         ).unwrap();
         let board = load_board(&kando_dir).unwrap();
@@ -6320,7 +6339,7 @@ mod tests {
     fn cmd_add_with_nonexistent_template_returns_err() {
         let dir = tempfile::tempdir().unwrap();
         board::storage::init_board(dir.path(), "Test", None).unwrap();
-        let result = cmd_add(dir.path(), "Fail", vec![], vec![], None, None, Some("nope"), false);
+        let result = cmd_add(dir.path(), "Fail", vec![], vec![], None, None, Some("nope"), None, false);
         assert!(result.is_err());
     }
 
@@ -6343,10 +6362,92 @@ mod tests {
         save_template(&kando_dir, &generate_template_slug("Bug", &[]), &tmpl).unwrap();
 
         // Explicit --due overrides template's due_offset_days
-        cmd_add(dir.path(), "Explicit due", vec![], vec![], None, Some("2025-12-25"), Some("bug"), false).unwrap();
+        cmd_add(dir.path(), "Explicit due", vec![], vec![], None, Some("2025-12-25"), Some("bug"), None, false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let card = &board.columns[0].cards[0];
         assert_eq!(card.due, Some(chrono::NaiveDate::from_ymd_opt(2025, 12, 25).unwrap()));
+    }
+
+    // ── cmd_add --column tests ──
+
+    #[test]
+    fn cmd_add_with_column_by_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("in-progress"), false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "in-progress").unwrap();
+        assert_eq!(col.cards.len(), 1);
+        assert_eq!(col.cards[0].title, "Task");
+    }
+
+    #[test]
+    fn cmd_add_with_column_case_insensitive_name() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("in progress"), false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "in-progress").unwrap();
+        assert_eq!(col.cards.len(), 1);
+        assert_eq!(col.cards[0].title, "Task");
+    }
+
+    #[test]
+    fn cmd_add_with_column_sets_started() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("in-progress"), false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "in-progress").unwrap();
+        assert!(col.cards[0].started.is_some(), "started should be set for non-backlog column");
+    }
+
+    #[test]
+    fn cmd_add_with_column_backlog_no_started() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("backlog"), false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert!(board.columns[0].cards[0].started.is_none(), "started should be None for backlog");
+    }
+
+    #[test]
+    fn cmd_add_with_column_done_sets_started_and_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("done"), false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        let col = board.columns.iter().find(|c| c.slug == "done").unwrap();
+        let card = &col.cards[0];
+        assert!(card.started.is_some(), "started should be set for done column");
+        assert!(card.completed.is_some(), "completed should be set for done column");
+    }
+
+    #[test]
+    fn cmd_add_with_column_invalid_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        let result = cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("nonexistent"), false);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"), "error should mention column not found: {err}");
+    }
+
+    #[test]
+    fn cmd_add_with_column_none_defaults_to_first() {
+        let dir = tempfile::tempdir().unwrap();
+        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, None, false).unwrap();
+        let kando_dir = dir.path().join(".kando");
+        let board = load_board(&kando_dir).unwrap();
+        assert_eq!(board.columns[0].cards.len(), 1);
+        assert!(board.columns[0].cards[0].started.is_none());
+        assert!(board.columns[0].cards[0].completed.is_none());
     }
 
     #[test]

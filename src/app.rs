@@ -1471,6 +1471,8 @@ fn handle_repeat_last(
             let card_tags = card.tags.join(",");
             let card_assignees = card.assignees.join(",");
             let card_priority = card.priority.to_string();
+            let card_due = card.due.map(|d| d.to_string()).unwrap_or_default();
+            let card_blocked = card.blocked.clone().unwrap_or_default();
             let card_path = kando_dir.join("columns").join(&col_slug)
                 .join(format!("{card_id}.md"));
             let contents = std::fs::read_to_string(&card_path).unwrap_or_default();
@@ -1484,6 +1486,8 @@ fn handle_repeat_last(
                 .env("KANDO_CARD_ASSIGNEES", &card_assignees)
                 .env("KANDO_CARD_PRIORITY", &card_priority)
                 .env("KANDO_CARD_COLUMN", &col_name)
+                .env("KANDO_CARD_DUE", &card_due)
+                .env("KANDO_CARD_BLOCKED", &card_blocked)
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -3066,6 +3070,8 @@ fn handle_input_confirm(
                     let card_tags = card.tags.join(",");
                     let card_assignees = card.assignees.join(",");
                     let card_priority = card.priority.to_string();
+                    let card_due = card.due.map(|d| d.to_string()).unwrap_or_default();
+                    let card_blocked = card.blocked.clone().unwrap_or_default();
                     let card_path = kando_dir.join("columns").join(&col_slug)
                         .join(format!("{card_id}.md"));
                     let contents = std::fs::read_to_string(&card_path).unwrap_or_default();
@@ -3079,6 +3085,8 @@ fn handle_input_confirm(
                         .env("KANDO_CARD_ASSIGNEES", &card_assignees)
                         .env("KANDO_CARD_PRIORITY", &card_priority)
                         .env("KANDO_CARD_COLUMN", &col_name)
+                        .env("KANDO_CARD_DUE", &card_due)
+                        .env("KANDO_CARD_BLOCKED", &card_blocked)
                         .stdin(std::process::Stdio::piped())
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::piped())

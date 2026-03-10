@@ -83,6 +83,60 @@ pub fn hook_name_for_action(action: &str) -> String {
 // Hook execution
 // ---------------------------------------------------------------------------
 
+/// Best-effort read of a card's `due` and `blocked` fields from disk.
+/// Returns `(due, blocked)` as strings (empty if not found or not set).
+fn read_card_due_blocked(kando_dir: &Path, card_id: &str) -> (String, String) {
+    let columns_dir = kando_dir.join("columns");
+    let entries = match std::fs::read_dir(&columns_dir) {
+        Ok(e) => e,
+        Err(_) => return (String::new(), String::new()),
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let card_path = entry.path().join(format!("{card_id}.md"));
+        if let Ok(contents) = std::fs::read_to_string(&card_path) {
+            let due = extract_frontmatter_value(&contents, "due");
+            let blocked = extract_frontmatter_value(&contents, "blocked");
+            return (due, blocked);
+        }
+    }
+    (String::new(), String::new())
+}
+
+/// Extract a single value from TOML frontmatter delimited by `---`.
+fn extract_frontmatter_value(content: &str, key: &str) -> String {
+    let Some(start) = content.find("---") else {
+        return String::new();
+    };
+    let rest = &content[start + 3..];
+    let Some(end) = rest.find("---") else {
+        return String::new();
+    };
+    let frontmatter = &rest[..end];
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        // Match exact key followed by optional whitespace and `=`
+        if let Some(after_key) = trimmed.strip_prefix(key) {
+            // Ensure the key is an exact match (next char must be whitespace or '=')
+            if let Some(first) = after_key.chars().next() {
+                if first != '=' && !first.is_whitespace() {
+                    continue;
+                }
+            }
+            let after_key = after_key.trim_start();
+            if let Some(value) = after_key.strip_prefix('=') {
+                let value = value.trim().trim_matches('"');
+                if !value.is_empty() {
+                    return value.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 /// Fire a post-hook for the given action, if one exists.
 ///
 /// This is called from `append_activity` so every board mutation automatically
@@ -148,12 +202,17 @@ fn run_hook(
         .canonicalize()
         .unwrap_or_else(|_| kando_dir.parent().unwrap_or(kando_dir).to_path_buf());
 
+    // Read card due/blocked from disk (best-effort, empty string if not found)
+    let (card_due, card_blocked) = read_card_due_blocked(kando_dir, card_id);
+
     let start = Instant::now();
 
     let result = Command::new(hook_path)
         .env("KANDO_EVENT", action)
         .env("KANDO_CARD_ID", card_id)
         .env("KANDO_CARD_TITLE", card_title)
+        .env("KANDO_CARD_DUE", &card_due)
+        .env("KANDO_CARD_BLOCKED", &card_blocked)
         .env("KANDO_BOARD_DIR", &project_dir)
         .envs(
             extras
@@ -1054,5 +1113,166 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nonexistent");
         assert!(make_executable(&path).is_err());
+    }
+
+    // ── extract_frontmatter_value tests ──
+
+    #[test]
+    fn extract_frontmatter_value_basic_due() {
+        let content = "---\nid = \"1\"\ndue = \"2025-12-31\"\n---\nBody";
+        assert_eq!(extract_frontmatter_value(content, "due"), "2025-12-31");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_basic_blocked() {
+        let content = "---\nblocked = \"waiting on API\"\n---\n";
+        assert_eq!(extract_frontmatter_value(content, "blocked"), "waiting on API");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_missing_key() {
+        let content = "---\nid = \"1\"\ntitle = \"Task\"\n---\nBody";
+        assert_eq!(extract_frontmatter_value(content, "due"), "");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_no_frontmatter() {
+        assert_eq!(extract_frontmatter_value("Just some text", "due"), "");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_single_delimiter() {
+        assert_eq!(extract_frontmatter_value("---\ndue = \"2025-01-01\"\n", "due"), "");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_empty_value() {
+        let content = "---\ndue = \"\"\n---\n";
+        assert_eq!(extract_frontmatter_value(content, "due"), "");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_unquoted() {
+        let content = "---\ndue = 2025-12-31\n---\n";
+        assert_eq!(extract_frontmatter_value(content, "due"), "2025-12-31");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_key_prefix_no_false_positive() {
+        let content = "---\ndue_offset_days = 7\n---\n";
+        assert_eq!(extract_frontmatter_value(content, "due"), "");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_spaces_around_equals() {
+        let content = "---\ndue  =  \"2025-12-31\"\n---\n";
+        assert_eq!(extract_frontmatter_value(content, "due"), "2025-12-31");
+    }
+
+    #[test]
+    fn extract_frontmatter_value_body_not_matched() {
+        let content = "---\ntitle = \"Task\"\n---\ndue = \"fake\"";
+        assert_eq!(extract_frontmatter_value(content, "due"), "");
+    }
+
+    // ── read_card_due_blocked tests ──
+
+    #[test]
+    fn read_card_due_blocked_finds_card() {
+        let tmp = tempfile::tempdir().unwrap();
+        let col_dir = tmp.path().join("columns").join("backlog");
+        fs::create_dir_all(&col_dir).unwrap();
+        fs::write(
+            col_dir.join("001.md"),
+            "---\nid = \"001\"\ntitle = \"T\"\ndue = \"2025-06-01\"\nblocked = \"waiting\"\ncreated = \"2025-01-01T00:00:00Z\"\nupdated = \"2025-01-01T00:00:00Z\"\n---\n",
+        ).unwrap();
+        let (due, blocked) = read_card_due_blocked(tmp.path(), "001");
+        assert_eq!(due, "2025-06-01");
+        assert_eq!(blocked, "waiting");
+    }
+
+    #[test]
+    fn read_card_due_blocked_card_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let col_dir = tmp.path().join("columns").join("backlog");
+        fs::create_dir_all(&col_dir).unwrap();
+        let (due, blocked) = read_card_due_blocked(tmp.path(), "999");
+        assert_eq!(due, "");
+        assert_eq!(blocked, "");
+    }
+
+    #[test]
+    fn read_card_due_blocked_no_columns_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (due, blocked) = read_card_due_blocked(tmp.path(), "001");
+        assert_eq!(due, "");
+        assert_eq!(blocked, "");
+    }
+
+    #[test]
+    fn read_card_due_blocked_card_without_due_or_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let col_dir = tmp.path().join("columns").join("backlog");
+        fs::create_dir_all(&col_dir).unwrap();
+        fs::write(
+            col_dir.join("001.md"),
+            "---\nid = \"001\"\ntitle = \"T\"\ncreated = \"2025-01-01T00:00:00Z\"\nupdated = \"2025-01-01T00:00:00Z\"\n---\n",
+        ).unwrap();
+        let (due, blocked) = read_card_due_blocked(tmp.path(), "001");
+        assert_eq!(due, "");
+        assert_eq!(blocked, "");
+    }
+
+    #[test]
+    fn read_card_due_blocked_finds_card_in_non_first_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("columns").join("backlog")).unwrap();
+        let col_dir = tmp.path().join("columns").join("in-progress");
+        fs::create_dir_all(&col_dir).unwrap();
+        fs::write(
+            col_dir.join("001.md"),
+            "---\nid = \"001\"\ntitle = \"T\"\ndue = \"2025-06-01\"\ncreated = \"2025-01-01T00:00:00Z\"\nupdated = \"2025-01-01T00:00:00Z\"\n---\n",
+        ).unwrap();
+        let (due, blocked) = read_card_due_blocked(tmp.path(), "001");
+        assert_eq!(due, "2025-06-01");
+        assert_eq!(blocked, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fire_hook_env_includes_card_due_and_blocked() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let kando_dir = tmp.path().join(".kando");
+
+        // Create card on disk
+        let col_dir = kando_dir.join("columns").join("backlog");
+        fs::create_dir_all(&col_dir).unwrap();
+        fs::write(
+            col_dir.join("001.md"),
+            "---\nid = \"001\"\ntitle = \"T\"\ndue = \"2025-06-15\"\nblocked = \"needs review\"\ncreated = \"2025-01-01T00:00:00Z\"\nupdated = \"2025-01-01T00:00:00Z\"\n---\n",
+        ).unwrap();
+
+        // Create hook
+        let hooks_dir = kando_dir.join("hooks");
+        fs::create_dir(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("post-create");
+        fs::write(
+            &hook_path,
+            "#!/usr/bin/env sh\necho \"due=$KANDO_CARD_DUE blocked=$KANDO_CARD_BLOCKED\"",
+        ).unwrap();
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        register_hook_sender(tx);
+
+        fire_hook(&kando_dir, "create", "001", "T", &[]);
+
+        let notif = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(notif.message.contains("due=2025-06-15"), "msg: {}", notif.message);
+        assert!(notif.message.contains("blocked=needs review"), "msg: {}", notif.message);
+        deregister_hook_sender();
     }
 }
