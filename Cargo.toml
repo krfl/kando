@@ -9,7 +9,7 @@ repository = "https://github.com/krfl/kando"
 rust-version = "1.86"
 
 [workspace.dependencies]
-kando-core = { path = "kando-core", version = "1.2.0" }
+kando-core = { path = "kando-core", version = "1.2.1" }
 chrono = { version = "0.4", features = ["serde"] }
 fuzzy-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }

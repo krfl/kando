@@ -1,13 +1,14 @@
 [package]
 name = "kando-tui"
 description = "A keyboard-first Kanban TUI for your terminal"
-version = "1.2.0"
+version = "1.2.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 keywords = ["kanban", "tui", "terminal", "productivity", "cli"]
 categories = ["command-line-utilities"]
+readme = "../README.md"
 
 [[bin]]
 name = "kando"
