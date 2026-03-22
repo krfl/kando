@@ -3,14 +3,13 @@ members = ["kando-core", "kando-tui"]
 resolver = "2"
 
 [workspace.package]
-version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/krfl/kando"
 rust-version = "1.86"
 
 [workspace.dependencies]
-kando-core = { path = "kando-core", version = "1.1.0" }
+kando-core = { path = "kando-core", version = "1.2.0" }
 chrono = { version = "0.4", features = ["serde"] }
 fuzzy-matcher = "0.3"
 serde = { version = "1", features = ["derive"] }
