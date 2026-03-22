@@ -801,22 +801,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "kando"
+name = "kando-core"
 version = "1.1.0"
 dependencies = [
  "chrono",
- "clap",
- "color-eyre",
- "crossterm",
  "dirs",
  "fuzzy-matcher",
- "ratatui",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "toml",
  "unicode-normalization",
+]
+
+[[package]]
+name = "kando-tui"
+version = "1.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "color-eyre",
+ "crossterm",
+ "fuzzy-matcher",
+ "kando-core",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
  "unicode-segmentation",
  "unicode-width",
 ]

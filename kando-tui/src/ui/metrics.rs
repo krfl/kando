@@ -6,8 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use crate::board::metrics::compute_metrics;
-use crate::board::Board;
+use kando_core::board::metrics::compute_metrics;
+use kando_core::board::Board;
 
 pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16, _now: DateTime<Utc>, kando_dir: &std::path::Path) {
     let panel_area = super::overlay_rect(area);

@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::theme::{self, Theme};
 use crate::app::{AppState, Mode, NotificationLevel, RiskLevel, TextBuffer};
-use crate::board::Board;
+use kando_core::board::Board;
 
 pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board: &Board) {
     // Full-line modes: Filter, Input, Confirm — take over entire bar
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn right_zone_sync_online_shows_icon() {
         use std::path::PathBuf;
-        use crate::board::sync::SyncState;
+        use kando_core::board::sync::SyncState;
         let mut state = AppState::new();
         state.sync_state = Some(SyncState {
             shadow_path: PathBuf::new(),
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn right_zone_sync_offline_shows_icon() {
         use std::path::PathBuf;
-        use crate::board::sync::SyncState;
+        use kando_core::board::sync::SyncState;
         let mut state = AppState::new();
         state.sync_state = Some(SyncState {
             shadow_path: PathBuf::new(),
@@ -526,7 +526,7 @@ mod tests {
     fn right_zone_repeat_hint_with_sync_icon_span_order() {
         use crate::app::RepeatableAction;
         use std::path::PathBuf;
-        use crate::board::sync::SyncState;
+        use kando_core::board::sync::SyncState;
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::Archive);
         state.sync_state = Some(SyncState {

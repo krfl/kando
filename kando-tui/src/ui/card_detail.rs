@@ -9,8 +9,8 @@ use ratatui::Frame;
 
 use super::board_view::card_border_color;
 use super::theme::{Icons, Theme};
-use crate::board::age::{format_age, staleness};
-use crate::board::{Card, Policies};
+use kando_core::board::age::{format_age, staleness};
+use kando_core::board::{Card, Policies};
 use chrono::{DateTime, Utc};
 
 pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Policies, scroll: &mut u16, now: DateTime<Utc>, icons: &Icons) {

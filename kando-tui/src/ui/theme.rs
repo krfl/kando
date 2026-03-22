@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Style};
 
-use crate::board::Priority;
+use kando_core::board::Priority;
 
 /// Icon set for Kando glyphs.
 ///

@@ -13,8 +13,8 @@ use ratatui::Frame;
 
 use super::theme::{self, Icons, Theme};
 use crate::app::AppState;
-use crate::board::age::{format_age, staleness, Staleness};
-use crate::board::{Board, Card};
+use kando_core::board::age::{format_age, staleness, Staleness};
+use kando_core::board::{Board, Card};
 use chrono::{DateTime, Utc};
 
 /// Total display width of an icon list, including one-space separators between items.
@@ -74,7 +74,7 @@ pub(crate) fn is_new_card(created: DateTime<Utc>, now: DateTime<Utc>) -> bool {
 pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, now: DateTime<Utc>) {
 
     // Filter visible columns
-    let visible_columns: Vec<(usize, &crate::board::Column)> = board
+    let visible_columns: Vec<(usize, &kando_core::board::Column)> = board
         .columns
         .iter()
         .enumerate()
@@ -119,10 +119,10 @@ pub fn render_board(f: &mut Frame, area: Rect, board: &Board, state: &AppState, 
 fn render_column(
     f: &mut Frame,
     area: Rect,
-    col: &crate::board::Column,
+    col: &kando_core::board::Column,
     is_focused: bool,
     state: &AppState,
-    policies: &crate::board::Policies,
+    policies: &kando_core::board::Policies,
     now: chrono::DateTime<Utc>,
     matcher: &SkimMatcherV2,
     icons: &Icons,
@@ -133,7 +133,7 @@ fn render_column(
         .iter()
         .enumerate()
         .filter(|(_, card)| {
-            crate::board::card_is_visible(
+            kando_core::board::card_is_visible(
                 card,
                 state.active_filter.as_deref(),
                 &state.active_tag_filters,
@@ -275,7 +275,7 @@ fn render_card(
     card: &Card,
     is_selected: bool,
     is_col_focused: bool,
-    policies: &crate::board::Policies,
+    policies: &kando_core::board::Policies,
     now: chrono::DateTime<Utc>,
     icons: &Icons,
 ) {

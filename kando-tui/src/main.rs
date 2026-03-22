@@ -1,6 +1,4 @@
 mod app;
-mod board;
-mod config;
 mod input;
 mod ui;
 
@@ -11,8 +9,8 @@ use color_eyre::eyre::{bail, WrapErr};
 
 use clap::{Parser, Subcommand};
 
-use board::storage::{append_activity, init_board, init_board_at, load_board, resolve_board, save_board, trash_card, remove_column_dir, rename_column_dir, BoardContext, BoardMode};
-use board::{Card, Priority, generate_slug, normalize_column_orders, slug_for_rename, slug_to_name};
+use kando_core::board::storage::{append_activity, init_board, init_board_at, load_board, resolve_board, save_board, trash_card, remove_column_dir, rename_column_dir, BoardContext, BoardMode};
+use kando_core::board::{Card, Priority, generate_slug, normalize_column_orders, slug_for_rename, slug_to_name};
 
 #[derive(Parser)]
 #[command(name = "kando", about = "A keyboard-first Kanban TUI", version)]
@@ -513,7 +511,7 @@ struct ColumnEntry {
 struct ConfigJson {
     name: String,
     nerd_font: bool,
-    policies: board::Policies,
+    policies: kando_core::board::Policies,
     wip_limits: std::collections::HashMap<String, u32>,
 }
 
@@ -656,13 +654,13 @@ fn main() {
 /// Print a user-friendly error message, with actionable hints for known error types.
 fn print_user_error(error: &color_eyre::Report) {
     // Walk the error chain looking for known types.
-    if let Some(storage_err) = error.downcast_ref::<board::storage::StorageError>() {
+    if let Some(storage_err) = error.downcast_ref::<kando_core::board::storage::StorageError>() {
         match storage_err {
-            board::storage::StorageError::NotFound(_) => {
+            kando_core::board::storage::StorageError::NotFound(_) => {
                 eprintln!("error: no kando board found in this directory.");
                 eprintln!("  Run `kando init` to create one.");
             }
-            board::storage::StorageError::InvalidCard { path, reason } => {
+            kando_core::board::storage::StorageError::InvalidCard { path, reason } => {
                 eprintln!(
                     "error: invalid card file: {}",
                     path.file_name()
@@ -671,24 +669,24 @@ fn print_user_error(error: &color_eyre::Report) {
                 );
                 eprintln!("  {reason}");
             }
-            board::storage::StorageError::InvalidSlug(slug) => {
+            kando_core::board::storage::StorageError::InvalidSlug(slug) => {
                 eprintln!("error: invalid column slug: {slug:?}");
                 eprintln!("  Column slugs must be lowercase alphanumeric (including Unicode) and hyphens");
             }
-            board::storage::StorageError::TomlDe(e) => {
+            kando_core::board::storage::StorageError::TomlDe(e) => {
                 eprintln!("error: config file has invalid TOML syntax.");
                 eprintln!("  {e}");
                 eprintln!("  Run `kando doctor` to diagnose.");
             }
-            board::storage::StorageError::TomlSer(e) => {
+            kando_core::board::storage::StorageError::TomlSer(e) => {
                 eprintln!("error: failed to save board config.");
                 eprintln!("  {e}");
             }
-            board::storage::StorageError::Io(e) => {
+            kando_core::board::storage::StorageError::Io(e) => {
                 eprintln!("error: could not read or write board files.");
                 eprintln!("  {e}");
             }
-            board::storage::StorageError::BrokenGitSync { toml_path, reason } => {
+            kando_core::board::storage::StorageError::BrokenGitSync { toml_path, reason } => {
                 eprintln!("error: broken git-sync setup.");
                 eprintln!("  .kando.toml found at {}", toml_path.display());
                 eprintln!("  but {reason}.");
@@ -698,22 +696,22 @@ fn print_user_error(error: &color_eyre::Report) {
         return;
     }
 
-    if let Some(sync_err) = error.downcast_ref::<board::sync::SyncError>() {
+    if let Some(sync_err) = error.downcast_ref::<kando_core::board::sync::SyncError>() {
         match sync_err {
-            board::sync::SyncError::NotGitRepo => {
+            kando_core::board::sync::SyncError::NotGitRepo => {
                 eprintln!("error: not a git repository.");
                 eprintln!("  Run `git init` first, then `kando init --git`.");
             }
-            board::sync::SyncError::NoRemote => {
+            kando_core::board::sync::SyncError::NoRemote => {
                 eprintln!("error: no git remote 'origin' configured.");
                 eprintln!("  Run `git remote add origin <url>` to set one up.");
             }
-            board::sync::SyncError::GitFailed(msg) => {
+            kando_core::board::sync::SyncError::GitFailed(msg) => {
                 eprintln!("error: git command failed.");
                 eprintln!("  {msg}");
                 eprintln!("  Run `kando doctor` to diagnose.");
             }
-            board::sync::SyncError::Io(e) => {
+            kando_core::board::sync::SyncError::Io(e) => {
                 eprintln!("error: sync I/O failure.");
                 eprintln!("  {e}");
             }
@@ -728,12 +726,12 @@ fn print_user_error(error: &color_eyre::Report) {
 
 /// Resolve the board context and initialize sync for git-synced boards.
 /// Returns the context and an optional sync state (pulls latest on init).
-fn resolve_and_sync(cwd: &Path) -> color_eyre::Result<(BoardContext, Option<board::sync::SyncState>)> {
+fn resolve_and_sync(cwd: &Path) -> color_eyre::Result<(BoardContext, Option<kando_core::board::sync::SyncState>)> {
     let ctx = resolve_board(cwd)?;
     let sync_state = match &ctx.mode {
         BoardMode::GitSync { branch, .. } => {
-            let mut ss = board::sync::init_shadow_for_gitsync(&ctx.project_root, branch)?;
-            board::sync::pull_shadow(&mut ss);
+            let mut ss = kando_core::board::sync::init_shadow_for_gitsync(&ctx.project_root, branch)?;
+            kando_core::board::sync::pull_shadow(&mut ss);
             Some(ss)
         }
         BoardMode::Local => None,
@@ -742,7 +740,7 @@ fn resolve_and_sync(cwd: &Path) -> color_eyre::Result<(BoardContext, Option<boar
 }
 
 fn cmd_init(cwd: &Path, name: &str, git_branch: Option<String>) -> color_eyre::Result<()> {
-    use board::sync;
+    use kando_core::board::sync;
 
     // If board already exists (either mode), only allow --git to enable sync
     if cwd.join(".kando").exists() || cwd.join(".kando.toml").exists() {
@@ -784,7 +782,7 @@ fn cmd_init(cwd: &Path, name: &str, git_branch: Option<String>) -> color_eyre::R
         init_board_at(&shadow_kando_dir, name, Some(&sync_branch))?;
 
         // Write .kando.toml marker in the working tree
-        let kando_toml = config::KandoToml { branch: sync_branch.clone() };
+        let kando_toml = kando_core::config::KandoToml { branch: sync_branch.clone() };
         let toml_str = toml::to_string_pretty(&kando_toml)?;
         std::fs::write(cwd.join(".kando.toml"), &toml_str)?;
 
@@ -815,7 +813,7 @@ fn cmd_init(cwd: &Path, name: &str, git_branch: Option<String>) -> color_eyre::R
 /// Ensure cwd is inside a git repo; prompt to create one if not.
 /// Returns Some(branch) if sync should be enabled, None if user declined.
 fn ensure_git_repo<'a>(cwd: &Path, branch: &'a str) -> color_eyre::Result<Option<&'a str>> {
-    use board::sync::find_git_root;
+    use kando_core::board::sync::find_git_root;
     use std::io::{self, Write};
     use std::process::Command;
 
@@ -867,7 +865,7 @@ fn cmd_add(
 
     // Apply template if specified
     if let Some(tmpl_name) = template {
-        use board::storage::find_template;
+        use kando_core::board::storage::find_template;
         if let Some((_, tmpl)) = find_template(kando_dir, tmpl_name) {
             card.priority = tmpl.priority;
             card.tags = tmpl.tags.clone();
@@ -955,7 +953,7 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, overdue: bool, 
     let today = chrono::Utc::now().date_naive();
 
     // Collect filtered cards per column (shared by JSON, CSV, and human output).
-    let filtered: Vec<(&board::Column, Vec<&Card>)> = board.columns.iter()
+    let filtered: Vec<(&kando_core::board::Column, Vec<&Card>)> = board.columns.iter()
         .filter(|col| column.is_none_or(|f| col.slug == f))
         .map(|col| {
             let cards: Vec<&Card> = col.cards.iter()
@@ -982,7 +980,7 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, overdue: bool, 
                 cards.iter().map(|card| {
                     vec![
                         card.id.clone(), col.name.clone(),
-                        board::age::format_age(card.created, now),
+                        kando_core::board::age::format_age(card.created, now),
                         card.priority.as_str().to_string(),
                         card.title.clone(), card.tags.join(";"),
                         card.assignees.join(";"),
@@ -1020,7 +1018,7 @@ fn cmd_list(cwd: &Path, tag: Option<&str>, column: Option<&str>, overdue: bool, 
         println!("\n{} ({})", col.name, cards.len());
         println!("{}", "─".repeat(40));
         for card in cards {
-            let age = board::age::format_age(card.created, now);
+            let age = kando_core::board::age::format_age(card.created, now);
             let priority = if card.priority == Priority::Normal { "" } else { card.priority.as_str() };
             let tags = if card.tags.is_empty() {
                 String::new()
@@ -1130,7 +1128,7 @@ fn cmd_tags(cwd: &Path, json: bool, csv: bool) -> color_eyre::Result<()> {
 }
 
 fn cmd_sync(cwd: &Path) -> color_eyre::Result<()> {
-    use board::sync;
+    use kando_core::board::sync;
     use std::io::{self, Write};
 
     let ctx = resolve_board(cwd)?;
@@ -1583,7 +1581,7 @@ fn cmd_config_show(cwd: &Path, json: bool) -> color_eyre::Result<()> {
 }
 
 fn cmd_sync_status(cwd: &Path, json: bool) -> color_eyre::Result<()> {
-    use board::sync;
+    use kando_core::board::sync;
 
     let ctx = resolve_board(cwd)?;
     let kando_dir = &ctx.kando_dir;
@@ -1694,7 +1692,7 @@ fn cmd_sync_status(cwd: &Path, json: bool) -> color_eyre::Result<()> {
 }
 
 fn cmd_doctor(cwd: &Path, json: bool) -> color_eyre::Result<u32> {
-    use board::sync;
+    use kando_core::board::sync;
 
     let mut checks: Vec<DoctorCheck> = Vec::new();
     let mut errors = 0u32;
@@ -1970,7 +1968,7 @@ fn cmd_doctor(cwd: &Path, json: bool) -> color_eyre::Result<u32> {
 }
 
 fn cmd_trash(cwd: &Path, action: Option<TrashAction>, json: bool, csv: bool) -> color_eyre::Result<()> {
-    use board::storage::{load_trash, restore_card};
+    use kando_core::board::storage::{load_trash, restore_card};
 
     let (ctx, mut sync) = resolve_and_sync(cwd)?;
     let kando_dir = &ctx.kando_dir;
@@ -2074,16 +2072,16 @@ fn cmd_metrics(cwd: &Path, weeks: Option<u32>, csv: bool, json: bool) -> color_e
     let kando_dir = &ctx.kando_dir;
     let board = load_board(kando_dir)?;
     let since = weeks.map(|w| chrono::Utc::now() - chrono::TimeDelta::weeks(w as i64));
-    let metrics = board::metrics::compute_metrics(&board, since, Some(kando_dir));
+    let metrics = kando_core::board::metrics::compute_metrics(&board, since, Some(kando_dir));
 
     if json {
         return print_json(&metrics);
     }
 
     if csv {
-        print!("{}", board::metrics::format_csv(&metrics));
+        print!("{}", kando_core::board::metrics::format_csv(&metrics));
     } else {
-        print!("{}", board::metrics::format_text(&metrics));
+        print!("{}", kando_core::board::metrics::format_text(&metrics));
     }
     Ok(())
 }
@@ -2340,7 +2338,7 @@ fn cmd_archive_restore(cwd: &Path, card_id: &str, column: &str, json: bool) -> c
 // ---------------------------------------------------------------------------
 
 /// Resolve a column by exact slug or case-insensitive name.  Returns the index.
-fn resolve_col_cli(board: &board::Board, query: &str) -> color_eyre::Result<usize> {
+fn resolve_col_cli(board: &kando_core::board::Board, query: &str) -> color_eyre::Result<usize> {
     let lower = query.to_lowercase();
     board
         .columns
@@ -2472,7 +2470,7 @@ fn cmd_col_add(cwd: &Path, name: &str, after: Option<&str>, json: bool) -> color
     // Derive display name from slug so it matches what a load_board round-trip
     // would produce, rather than storing the raw user-supplied string.
     let derived_name = slug_to_name(&slug);
-    board.columns.push(board::Column {
+    board.columns.push(kando_core::board::Column {
         slug: slug.clone(),
         name: derived_name.clone(),
         order: insert_order,
@@ -3074,8 +3072,8 @@ fn format_follow_line(line: &str) -> String {
 }
 
 fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> color_eyre::Result<()> {
-    use board::storage::{load_templates, find_template, save_template, delete_template};
-    use board::{generate_template_slug, slug_to_name, Template};
+    use kando_core::board::storage::{load_templates, find_template, save_template, delete_template};
+    use kando_core::board::{generate_template_slug, slug_to_name, Template};
 
     let (ctx, mut sync) = resolve_and_sync(cwd)?;
     let kando_dir = &ctx.kando_dir;
@@ -3232,7 +3230,7 @@ fn cmd_template_cli(cwd: &Path, action: Option<TemplateAction>, json: bool) -> c
 }
 
 fn cmd_hooks_cli(cwd: &Path, action: Option<HooksAction>, json: bool) -> color_eyre::Result<()> {
-    use board::hooks::{list_hooks, open_in_editor, scaffold_hook, validate_hook_name};
+    use kando_core::board::hooks::{list_hooks, open_in_editor, scaffold_hook, validate_hook_name};
 
     let (ctx, mut sync) = resolve_and_sync(cwd)?;
     let kando_dir = &ctx.kando_dir;
@@ -3383,7 +3381,7 @@ fn cmd_tui(cwd: &Path, nerd_font_flag: bool) -> color_eyre::Result<()> {
 }
 
 fn cmd_migrate(cwd: &Path) -> color_eyre::Result<()> {
-    use board::sync;
+    use kando_core::board::sync;
 
     // Step 1: Ensure there's a local .kando/ board
     let local_kando_dir = cwd.join(".kando");
@@ -3430,7 +3428,7 @@ fn cmd_migrate(cwd: &Path) -> color_eyre::Result<()> {
     }
 
     // Step 6: Write .kando.toml marker
-    let kando_toml = config::KandoToml { branch: branch.clone() };
+    let kando_toml = kando_core::config::KandoToml { branch: branch.clone() };
     let toml_str = toml::to_string_pretty(&kando_toml)?;
     std::fs::write(cwd.join(".kando.toml"), &toml_str)?;
 
@@ -3962,7 +3960,7 @@ mod tests {
 
     #[test]
     fn cmd_show_prints_card_file_contents() {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -3988,7 +3986,7 @@ mod tests {
 
     #[test]
     fn cmd_show_card_not_found_returns_err() {
-        use board::storage::init_board;
+        use kando_core::board::storage::init_board;
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let result = cmd_show(dir.path(), "nonexistent", false);
@@ -4004,7 +4002,7 @@ mod tests {
 
     #[test]
     fn cmd_show_card_in_non_first_column() {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4022,7 +4020,7 @@ mod tests {
 
     #[test]
     fn cmd_show_file_missing_from_disk() {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4042,7 +4040,7 @@ mod tests {
 
     #[test]
     fn cmd_show_card_with_empty_body() {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4066,7 +4064,7 @@ mod tests {
 
     #[test]
     fn cmd_show_card_with_unicode_and_multiline_body() {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4095,7 +4093,7 @@ mod tests {
         // Verify exact-match semantics: a query that is a strict prefix of an
         // existing card ID (but not itself a card ID) must return an error.
         // This catches any hypothetical "prefix expansion" or starts_with matching.
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4122,7 +4120,7 @@ mod tests {
     fn cmd_show_card_id_with_leading_trailing_whitespace_returns_err() {
         // cmd_show does not trim the card_id — whitespace-padded IDs should not
         // match valid card IDs, preventing silent ID mismatches.
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4160,7 +4158,7 @@ mod tests {
     // ── Test helpers ──
 
     fn setup_board_with_card(parent: &Path) -> (std::path::PathBuf, String) {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         init_board(parent, "Test", None).unwrap();
         let kando_dir = parent.join(".kando");
         let mut board = load_board(&kando_dir).unwrap();
@@ -4193,7 +4191,7 @@ mod tests {
         let trash_file = kando_dir.join("trash").join(format!("{id}.md"));
         assert!(trash_file.exists(), "card file should be in trash, not permanently deleted");
         // Also verify the trash metadata entry was recorded
-        let entries = board::storage::load_trash(&kando_dir);
+        let entries = kando_core::board::storage::load_trash(&kando_dir);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, id);
     }
@@ -4297,7 +4295,7 @@ mod tests {
 
     #[test]
     fn cmd_edit_unblocked_clears_flag() {
-        use board::storage::save_board;
+        use kando_core::board::storage::save_board;
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
         // Pre-set blocked = true
@@ -4337,7 +4335,7 @@ mod tests {
     #[test]
     fn cmd_add_with_due_date_sets_field() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "Due task", vec![], vec![], Some(Priority::Normal), Some("2025-12-31"), None, None, false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -4348,7 +4346,7 @@ mod tests {
     #[test]
     fn cmd_add_with_invalid_due_date_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let result = cmd_add(dir.path(), "Bad date", vec![], vec![], Some(Priority::Normal), Some("not-a-date"), None, None, false);
         assert!(result.is_err());
     }
@@ -4356,7 +4354,7 @@ mod tests {
     #[test]
     fn cmd_add_without_due_date_field_is_none() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "No due", vec![], vec![], Some(Priority::Normal), None, None, None, false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -4414,7 +4412,7 @@ mod tests {
     #[test]
     fn cmd_config_stale_days_persists() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_config_stale_days(dir.path(), 21).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -4424,7 +4422,7 @@ mod tests {
     #[test]
     fn cmd_config_auto_close_days_persists() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_config_auto_close_days(dir.path(), 14).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -4434,7 +4432,7 @@ mod tests {
     #[test]
     fn cmd_config_auto_close_target_valid_column_persists() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         // Use a slug from the actual board rather than hardcoding "archive"
         let board = load_board(&kando_dir).unwrap();
@@ -4447,7 +4445,7 @@ mod tests {
     #[test]
     fn cmd_config_auto_close_target_invalid_column_returns_err() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let result = cmd_config_auto_close_target(dir.path(), "nonexistent-column");
         assert!(result.is_err(), "setting auto-close target to a non-existent column should error");
     }
@@ -4455,7 +4453,7 @@ mod tests {
     #[test]
     fn cmd_config_trash_purge_days_persists() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_config_trash_purge_days(dir.path(), 7).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -4465,7 +4463,7 @@ mod tests {
     #[test]
     fn cmd_config_nerd_font_on_persists() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_config_nerd_font(dir.path(), "on").unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -4475,7 +4473,7 @@ mod tests {
     #[test]
     fn cmd_config_nerd_font_off_persists() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         cmd_config_nerd_font(dir.path(), "on").unwrap();
         // Verify "on" actually worked before testing "off"
@@ -4487,7 +4485,7 @@ mod tests {
     #[test]
     fn cmd_config_show_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_config_show(dir.path(), false).is_ok(), "cmd_config_show should not error");
     }
 
@@ -4502,7 +4500,7 @@ mod tests {
     #[test]
     fn cmd_config_archive_after_days_persists_value() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_config_archive_after_days(dir.path(), 14).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -4512,7 +4510,7 @@ mod tests {
     #[test]
     fn cmd_config_archive_after_days_zero_disables() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         // First set a non-zero value, then set 0 to disable
         cmd_config_archive_after_days(dir.path(), 7).unwrap();
         cmd_config_archive_after_days(dir.path(), 0).unwrap();
@@ -4524,7 +4522,7 @@ mod tests {
     #[test]
     fn cmd_config_archive_after_days_overwrite_works() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_config_archive_after_days(dir.path(), 7).unwrap();
         cmd_config_archive_after_days(dir.path(), 30).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4535,7 +4533,7 @@ mod tests {
     #[test]
     fn cmd_config_archive_after_days_default_is_zero() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
         assert_eq!(board.policies.archive_after_days, 0, "archive_after_days must default to 0 (disabled)");
@@ -4548,7 +4546,7 @@ mod tests {
         // When no action is given, cmd_archive defaults to list.
         // An empty archive board should return Ok.
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_archive(dir.path(), None, false).is_ok());
     }
 
@@ -4556,7 +4554,7 @@ mod tests {
 
     /// Helper: create a board and add a card to the archive column.
     fn setup_board_with_archived_card(parent: &Path) -> (PathBuf, String) {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         init_board(parent, "Test", None).unwrap();
         let kando_dir = parent.join(".kando");
         let mut board = load_board(&kando_dir).unwrap();
@@ -4577,7 +4575,7 @@ mod tests {
     #[test]
     fn cmd_archive_list_empty_archive_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_archive_list(dir.path(), false, false).is_ok());
     }
 
@@ -4590,7 +4588,7 @@ mod tests {
 
     #[test]
     fn cmd_archive_list_uses_completed_date_returns_ok() {
-        use board::storage::save_board;
+        use kando_core::board::storage::save_board;
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_archived_card(dir.path());
         let mut board = load_board(&kando_dir).unwrap();
@@ -4612,7 +4610,7 @@ mod tests {
 
     #[test]
     fn cmd_archive_list_long_title_does_not_panic() {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4643,7 +4641,7 @@ mod tests {
 
     #[test]
     fn cmd_archive_search_body_match_returns_ok() {
-        use board::storage::{init_board, save_board};
+        use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
@@ -4676,7 +4674,7 @@ mod tests {
     #[test]
     fn cmd_archive_search_empty_query_empty_archive_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         // Empty archive + empty query → "Archive is empty."
         assert!(cmd_archive_search(dir.path(), "", false, false).is_ok());
     }
@@ -4700,7 +4698,7 @@ mod tests {
     #[test]
     fn cmd_archive_restore_card_not_in_archive_returns_err() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let err = cmd_archive_restore(dir.path(), "nonexistent", "done", false).unwrap_err();
         assert!(
             format!("{err:#}").contains("not found in archive"),
@@ -4767,9 +4765,9 @@ mod tests {
 
     #[test]
     fn cmd_archive_restore_preserves_completed_timestamp() {
-        use board::storage::save_board;
+        use kando_core::board::storage::save_board;
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         let mut board = load_board(&kando_dir).unwrap();
         let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
@@ -4794,9 +4792,9 @@ mod tests {
 
     #[test]
     fn cmd_archive_restore_preserves_started_timestamp() {
-        use board::storage::save_board;
+        use kando_core::board::storage::save_board;
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         let mut board = load_board(&kando_dir).unwrap();
         let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
@@ -4856,7 +4854,7 @@ mod tests {
 
     fn board_for_col_tests() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         (dir, kando_dir)
     }
@@ -5055,7 +5053,7 @@ mod tests {
         let (dir, kando_dir) = board_for_col_tests();
         let mut board = load_board(&kando_dir).unwrap();
         board.columns.retain(|c| c.slug == "backlog");
-        board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let err = cmd_col_remove(dir.path(), "backlog", None, false).unwrap_err();
         assert!(format!("{err:#}").contains("last column"));
     }
@@ -5066,7 +5064,7 @@ mod tests {
         let mut board = load_board(&kando_dir).unwrap();
         let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
         board.columns[backlog_idx].cards.push(Card::new("001".into(), "Test Card".into()));
-        board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let err = cmd_col_remove(dir.path(), "backlog", None, false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("1 card"), "should mention card count: {msg}");
@@ -5095,7 +5093,7 @@ mod tests {
         let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
         board.columns[backlog_idx].cards.push(Card::new("001".into(), "Card 1".into()));
         board.columns[backlog_idx].cards.push(Card::new("002".into(), "Card 2".into()));
-        board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         cmd_col_remove(dir.path(), "backlog", Some("done"), false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         assert!(!board.columns.iter().any(|c| c.slug == "backlog"), "removed column should be gone");
@@ -5109,7 +5107,7 @@ mod tests {
         let mut board = load_board(&kando_dir).unwrap();
         let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
         board.columns[backlog_idx].cards.push(Card::new("001".into(), "Card".into()));
-        board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let err = cmd_col_remove(dir.path(), "backlog", Some("backlog"), false).unwrap_err();
         assert!(format!("{err:#}").contains("same column"));
     }
@@ -5120,7 +5118,7 @@ mod tests {
         let mut board = load_board(&kando_dir).unwrap();
         let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
         board.columns[backlog_idx].cards.push(Card::new("001".into(), "Card".into()));
-        board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         assert!(cmd_col_remove(dir.path(), "backlog", Some("nonexistent"), false).is_err());
     }
 
@@ -5369,7 +5367,7 @@ mod tests {
         let mut board = load_board(&kando_dir).unwrap();
         let backlog_idx = board.columns.iter().position(|c| c.slug == "backlog").unwrap();
         board.columns[backlog_idx].cards.push(Card::new("001".into(), "Important Card".into()));
-        board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         cmd_col_move(dir.path(), "backlog", "last", false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let backlog = board.columns.iter().find(|c| c.slug == "backlog").unwrap();
@@ -5390,7 +5388,7 @@ mod tests {
         // Simulate a legacy config.toml that uses the old field name "bubble_up_days".
         // Use a non-default value (42) so that a broken alias would produce the default (7), not 42.
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         let config_path = kando_dir.join("config.toml");
 
@@ -5612,7 +5610,7 @@ mod tests {
         let config = ConfigJson {
             name: "My Project".into(),
             nerd_font: false,
-            policies: board::Policies::default(),
+            policies: kando_core::board::Policies::default(),
             wip_limits: std::collections::HashMap::new(),
         };
         let value = serde_json::to_value(&config).unwrap();
@@ -5677,7 +5675,7 @@ mod tests {
     #[test]
     fn cmd_list_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_list(dir.path(), None, None, false, true, false).is_ok());
     }
 
@@ -5705,7 +5703,7 @@ mod tests {
     #[test]
     fn cmd_list_overdue_filter_excludes_non_overdue() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         // Add one overdue card and one non-overdue card
         cmd_add(dir.path(), "Overdue task", vec![], vec![], Some(Priority::Normal), Some("2020-01-01"), None, None, false).unwrap();
@@ -5722,14 +5720,14 @@ mod tests {
     #[test]
     fn cmd_add_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_add(dir.path(), "JSON card", vec!["test".into()], vec![], Some(Priority::Normal), None, None, None, true).is_ok());
     }
 
     #[test]
     fn cmd_add_json_card_actually_created() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "JSON card", vec![], vec![], Some(Priority::Normal), None, None, None, true).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -5842,7 +5840,7 @@ mod tests {
     #[test]
     fn cmd_tags_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_tags(dir.path(), true, false).is_ok());
     }
 
@@ -5863,28 +5861,28 @@ mod tests {
     #[test]
     fn cmd_show_json_card_not_found_returns_err() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_show(dir.path(), "nonexistent", true).is_err());
     }
 
     #[test]
     fn cmd_config_show_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_config_show(dir.path(), true).is_ok());
     }
 
     #[test]
     fn cmd_sync_status_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_sync_status(dir.path(), true).is_ok());
     }
 
     #[test]
     fn cmd_doctor_json_healthy_board_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let issues = cmd_doctor(dir.path(), true).unwrap();
         assert_eq!(issues, 0, "healthy board should have zero issues");
     }
@@ -5899,7 +5897,7 @@ mod tests {
     #[test]
     fn cmd_doctor_human_healthy_board_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let issues = cmd_doctor(dir.path(), false).unwrap();
         assert_eq!(issues, 0);
     }
@@ -5907,21 +5905,21 @@ mod tests {
     #[test]
     fn cmd_metrics_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_metrics(dir.path(), None, false, true).is_ok());
     }
 
     #[test]
     fn cmd_metrics_json_with_weeks_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_metrics(dir.path(), Some(4), false, true).is_ok());
     }
 
     #[test]
     fn cmd_trash_list_json_empty_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_trash(dir.path(), None, true, false).is_ok());
     }
 
@@ -5936,7 +5934,7 @@ mod tests {
     #[test]
     fn cmd_trash_purge_json_empty_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_trash(dir.path(), Some(TrashAction::Purge), true, false).is_ok());
     }
 
@@ -5951,7 +5949,7 @@ mod tests {
     #[test]
     fn cmd_archive_list_json_empty_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_archive_list(dir.path(), true, false).is_ok());
     }
 
@@ -5986,42 +5984,42 @@ mod tests {
     #[test]
     fn cmd_col_list_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_col_list(dir.path(), true, false).is_ok());
     }
 
     #[test]
     fn cmd_col_add_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_col_add(dir.path(), "Review", None, true).is_ok());
     }
 
     #[test]
     fn cmd_col_rename_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_col_rename(dir.path(), "backlog", "Todo", true).is_ok());
     }
 
     #[test]
     fn cmd_col_move_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_col_move(dir.path(), "backlog", "2", true).is_ok());
     }
 
     #[test]
     fn cmd_col_hide_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_col_hide_cli(dir.path(), "backlog", true).is_ok());
     }
 
     #[test]
     fn cmd_col_show_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         // First hide, then show
         cmd_col_hide_cli(dir.path(), "backlog", false).unwrap();
         assert!(cmd_col_show_cli(dir.path(), "backlog", true).is_ok());
@@ -6068,7 +6066,7 @@ mod tests {
     #[test]
     fn cmd_col_list_csv_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_col_list(dir.path(), false, true).is_ok());
     }
 
@@ -6110,28 +6108,28 @@ mod tests {
     #[test]
     fn cmd_list_csv_empty_board_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_list(dir.path(), None, None, false, false, true).is_ok());
     }
 
     #[test]
     fn cmd_tags_csv_empty_board_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_tags(dir.path(), false, true).is_ok());
     }
 
     #[test]
     fn cmd_trash_csv_empty_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_trash(dir.path(), None, false, true).is_ok());
     }
 
     #[test]
     fn cmd_metrics_csv_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_metrics(dir.path(), None, true, false).is_ok());
     }
 
@@ -6140,21 +6138,21 @@ mod tests {
     #[test]
     fn cmd_template_list_empty_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_template_cli(dir.path(), None, false).is_ok());
     }
 
     #[test]
     fn cmd_template_list_json_empty_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_template_cli(dir.path(), None, true).is_ok());
     }
 
     #[test]
     fn cmd_template_list_csv_empty_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         assert!(cmd_template_cli(
             dir.path(),
             Some(TemplateAction::List { csv: true }),
@@ -6163,9 +6161,9 @@ mod tests {
     }
 
     fn create_test_template(kando_dir: &Path, name: &str) -> String {
-        use board::storage::save_template;
-        use board::{generate_template_slug, Template};
-        let templates = board::storage::load_templates(kando_dir);
+        use kando_core::board::storage::save_template;
+        use kando_core::board::{generate_template_slug, Template};
+        let templates = kando_core::board::storage::load_templates(kando_dir);
         let existing: Vec<String> = templates.iter().map(|(s, _)| s.clone()).collect();
         let slug = generate_template_slug(name, &existing);
         let tmpl = Template {
@@ -6183,7 +6181,7 @@ mod tests {
     #[test]
     fn cmd_template_list_with_templates_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         create_test_template(&kando_dir, "Bug Report");
         assert!(cmd_template_cli(dir.path(), None, false).is_ok());
@@ -6192,7 +6190,7 @@ mod tests {
     #[test]
     fn cmd_template_list_json_with_templates_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         create_test_template(&kando_dir, "Bug Report");
         assert!(cmd_template_cli(dir.path(), None, true).is_ok());
@@ -6201,7 +6199,7 @@ mod tests {
     #[test]
     fn cmd_template_remove_existing_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         create_test_template(&kando_dir, "Feature");
         assert!(cmd_template_cli(
@@ -6210,14 +6208,14 @@ mod tests {
             false,
         ).is_ok());
         // Verify it's gone
-        let templates = board::storage::load_templates(&kando_dir);
+        let templates = kando_core::board::storage::load_templates(&kando_dir);
         assert!(templates.is_empty());
     }
 
     #[test]
     fn cmd_template_remove_nonexistent_returns_err() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let result = cmd_template_cli(
             dir.path(),
             Some(TemplateAction::Remove { name: "nope".to_string() }),
@@ -6229,7 +6227,7 @@ mod tests {
     #[test]
     fn cmd_template_remove_json_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         create_test_template(&kando_dir, "Bug");
         assert!(cmd_template_cli(
@@ -6242,12 +6240,12 @@ mod tests {
     #[test]
     fn cmd_add_with_template_applies_fields() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
         // Create a template with specific fields
-        use board::{Template, generate_template_slug};
-        use board::storage::save_template;
+        use kando_core::board::{Template, generate_template_slug};
+        use kando_core::board::storage::save_template;
         let tmpl = Template {
             priority: Priority::High,
             tags: vec!["bug".to_string()],
@@ -6277,11 +6275,11 @@ mod tests {
     #[test]
     fn cmd_add_with_template_cli_priority_overrides() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
-        use board::{Template, generate_template_slug};
-        use board::storage::save_template;
+        use kando_core::board::{Template, generate_template_slug};
+        use kando_core::board::storage::save_template;
         let tmpl = Template {
             priority: Priority::High,
             tags: vec!["bug".to_string()],
@@ -6301,11 +6299,11 @@ mod tests {
     #[test]
     fn cmd_add_with_template_cli_tags_merge() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
-        use board::{Template, generate_template_slug};
-        use board::storage::save_template;
+        use kando_core::board::{Template, generate_template_slug};
+        use kando_core::board::storage::save_template;
         let tmpl = Template {
             priority: Priority::Normal,
             tags: vec!["bug".to_string()],
@@ -6338,7 +6336,7 @@ mod tests {
     #[test]
     fn cmd_add_with_nonexistent_template_returns_err() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let result = cmd_add(dir.path(), "Fail", vec![], vec![], None, None, Some("nope"), None, false);
         assert!(result.is_err());
     }
@@ -6346,11 +6344,11 @@ mod tests {
     #[test]
     fn cmd_add_with_template_due_override() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
-        use board::{Template, generate_template_slug};
-        use board::storage::save_template;
+        use kando_core::board::{Template, generate_template_slug};
+        use kando_core::board::storage::save_template;
         let tmpl = Template {
             priority: Priority::Normal,
             tags: Vec::new(),
@@ -6373,7 +6371,7 @@ mod tests {
     #[test]
     fn cmd_add_with_column_by_slug() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("in-progress"), false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -6385,7 +6383,7 @@ mod tests {
     #[test]
     fn cmd_add_with_column_case_insensitive_name() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("in progress"), false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -6397,7 +6395,7 @@ mod tests {
     #[test]
     fn cmd_add_with_column_sets_started() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("in-progress"), false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -6408,7 +6406,7 @@ mod tests {
     #[test]
     fn cmd_add_with_column_backlog_no_started() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("backlog"), false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -6418,7 +6416,7 @@ mod tests {
     #[test]
     fn cmd_add_with_column_done_sets_started_and_completed() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("done"), false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -6431,7 +6429,7 @@ mod tests {
     #[test]
     fn cmd_add_with_column_invalid_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let result = cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, Some("nonexistent"), false);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -6441,7 +6439,7 @@ mod tests {
     #[test]
     fn cmd_add_with_column_none_defaults_to_first() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         cmd_add(dir.path(), "Task", vec![], vec![], None, None, None, None, false).unwrap();
         let kando_dir = dir.path().join(".kando");
         let board = load_board(&kando_dir).unwrap();
@@ -6453,7 +6451,7 @@ mod tests {
     #[test]
     fn cmd_template_edit_nonexistent_returns_err() {
         let dir = tempfile::tempdir().unwrap();
-        board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let result = cmd_template_cli(
             dir.path(),
             Some(TemplateAction::Edit { name: "nope".to_string() }),

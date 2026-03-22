@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use super::theme::Theme;
 use crate::app::{self, CompletionHint, Mode};
-use crate::board::Board;
+use kando_core::board::Board;
 use crate::input::keymap;
 
 /// A popup entry: key string and description.

@@ -18,8 +18,11 @@ Your board is plain text. Cards are Markdown files with TOML frontmatter, column
 ## Getting Started
 
 ```sh
-# Install
-cargo install --path .
+# Install from crates.io
+cargo install kando-tui
+
+# Or install from source
+cargo install --path kando-tui
 
 # Create a new board in your project folder
 kando init

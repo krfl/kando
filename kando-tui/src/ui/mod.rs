@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::AppState;
-use crate::board::Board;
+use kando_core::board::Board;
 
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 10;

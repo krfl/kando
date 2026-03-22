@@ -47,6 +47,7 @@
           src = craneLib.cleanCargoSource ./.;
           commonArgs = {
             inherit src;
+            pname = "kando";
             strictDeps = true;
             nativeCheckInputs = [ pkgs.git ];
           };
@@ -74,6 +75,7 @@
           src = craneLib.cleanCargoSource ./.;
           commonArgs = {
             inherit src;
+            pname = "kando";
             strictDeps = true;
             nativeCheckInputs = [ pkgs.git ];
           };
@@ -84,7 +86,7 @@
 
           kando-clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
-            cargoClippyExtraArgs = "-- -D warnings";
+            cargoClippyExtraArgs = "--workspace -- -D warnings";
           });
 
           kando-tests = craneLib.cargoTest (commonArgs // {

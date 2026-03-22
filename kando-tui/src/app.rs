@@ -6,11 +6,11 @@ use ratatui::DefaultTerminal;
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use crate::board::age::{run_auto_archive, run_auto_close};
-use crate::board::storage::{append_activity, load_board, load_local_config, load_trash, resolve_board, save_board, save_local_config, trash_card, restore_card, BoardContext, TrashEntry};
-use crate::config::LocalConfig;
-use crate::board::sync::{self, SyncState};
-use crate::board::{Board, Card, Column};
+use kando_core::board::age::{run_auto_archive, run_auto_close};
+use kando_core::board::storage::{append_activity, load_board, load_local_config, load_trash, resolve_board, save_board, save_local_config, trash_card, restore_card, BoardContext, TrashEntry};
+use kando_core::config::LocalConfig;
+use kando_core::board::sync::{self, SyncState};
+use kando_core::board::{Board, Card, Column};
 use crate::input::action::Action;
 use crate::input::keymap::map_key;
 
@@ -206,7 +206,7 @@ pub enum RepeatableAction {
     // Card-level
     MoveCard { forward: bool },
     MoveToColumn { column_slug: String, column_name: String },
-    SetPriority(crate::board::Priority),
+    SetPriority(kando_core::board::Priority),
     SetTags(Vec<String>),
     SetAssignees(Vec<String>),
     SetDueDate(Option<chrono::NaiveDate>),
@@ -328,7 +328,7 @@ pub struct AppState {
     /// Deferred template editing — slug to open in $EDITOR after handler returns.
     pub pending_editor_template: Option<String>,
     /// Receiver for background hook notifications.
-    pub hook_rx: Option<std::sync::mpsc::Receiver<crate::board::hooks::HookNotification>>,
+    pub hook_rx: Option<std::sync::mpsc::Receiver<kando_core::board::hooks::HookNotification>>,
     /// True when the current notification originated from a hook.
     pub notification_is_hook: bool,
     /// Board reload deferred because a hook completed while not in Normal mode.
@@ -462,7 +462,7 @@ fn visible_card_indices(col: &Column, state: &AppState, board: &Board) -> Vec<us
         .iter()
         .enumerate()
         .filter(|(_, card)| {
-            crate::board::card_is_visible(
+            kando_core::board::card_is_visible(
                 card,
                 state.active_filter.as_deref(),
                 &state.active_tag_filters,
@@ -588,7 +588,7 @@ fn jump_to_visible_card(board: &Board, state: &mut AppState, forward: bool) {
             continue;
         }
         for (cardi, card) in col.cards.iter().enumerate() {
-            if crate::board::card_is_visible(
+            if kando_core::board::card_is_visible(
                 card,
                 state.active_filter.as_deref(),
                 &state.active_tag_filters,
@@ -690,7 +690,7 @@ fn handle_auto_close(
     }
 
     // Purge old trash entries
-    use crate::board::storage::purge_trash;
+    use kando_core::board::storage::purge_trash;
     if let Ok(purged) = purge_trash(kando_dir, board.policies.trash_purge_days) {
         if !purged.is_empty() {
             // Invalidate undo if the purged card was the last-deleted one
@@ -774,7 +774,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
     // Initialize sync based on board mode
     let initial_sync_state = match &ctx.mode {
-        crate::board::storage::BoardMode::GitSync { branch, .. } => {
+        kando_core::board::storage::BoardMode::GitSync { branch, .. } => {
             match sync::init_shadow_for_gitsync(&ctx.project_root, branch) {
                 Ok(mut ss) => {
                     let status = sync::pull_shadow(&mut ss);
@@ -787,7 +787,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
                 }
             }
         }
-        crate::board::storage::BoardMode::Local => None,
+        kando_core::board::storage::BoardMode::Local => None,
     };
 
     let mut board = load_board(kando_dir)?;
@@ -802,7 +802,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
     // Set up hook notification channel
     let (hook_tx, hook_rx) = std::sync::mpsc::channel();
-    crate::board::hooks::register_hook_sender(hook_tx);
+    kando_core::board::hooks::register_hook_sender(hook_tx);
     state.hook_rx = Some(hook_rx);
 
     // CLI --nerd-font flag overrides config; otherwise use board config value
@@ -940,7 +940,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
         }
     }
 
-    crate::board::hooks::deregister_hook_sender();
+    kando_core::board::hooks::deregister_hook_sender();
 
     Ok(())
 }
@@ -1900,7 +1900,7 @@ where
             }
         }
         Action::NewCard => {
-            use crate::board::{slug_to_name, storage::load_templates};
+            use kando_core::board::{slug_to_name, storage::load_templates};
             let templates = load_templates(kando_dir);
             if templates.is_empty() {
                 state.mode = Mode::Input {
@@ -2042,7 +2042,7 @@ where
             }
         }
         Action::PickPriority => {
-            use crate::board::Priority;
+            use kando_core::board::Priority;
             state.mode = Mode::Normal;
             if let Some(card) = state.selected_card_ref(board) {
                 let current = card.priority;
@@ -2747,7 +2747,7 @@ fn handle_input_confirm(
             on_confirm: InputTarget::NewCardFromTemplate(slug),
             ..
         } => {
-            use crate::board::storage::find_template;
+            use kando_core::board::storage::find_template;
             let title = buf.input.trim().to_string();
             if !title.is_empty() {
                 let id = board.next_card_id();
@@ -2782,15 +2782,15 @@ fn handle_input_confirm(
             on_confirm: InputTarget::TemplateName,
             ..
         } => {
-            use crate::board::storage::{load_templates, save_template};
-            use crate::board::{generate_template_slug, Template};
+            use kando_core::board::storage::{load_templates, save_template};
+            use kando_core::board::{generate_template_slug, Template};
             let name = buf.input.trim().to_string();
             if !name.is_empty() {
                 let templates = load_templates(kando_dir);
                 let existing_slugs: Vec<String> = templates.iter().map(|(s, _)| s.clone()).collect();
                 let slug = generate_template_slug(&name, &existing_slugs);
                 let tmpl = Template {
-                    priority: crate::board::Priority::default(),
+                    priority: kando_core::board::Priority::default(),
                     tags: Vec::new(),
                     assignees: Vec::new(),
                     blocked: None,
@@ -2807,8 +2807,8 @@ fn handle_input_confirm(
             on_confirm: InputTarget::TemplateRename(old_slug),
             ..
         } => {
-            use crate::board::storage::rename_template;
-            use crate::board::slug_from_name;
+            use kando_core::board::storage::rename_template;
+            use kando_core::board::slug_from_name;
             let new_name = buf.input.trim().to_string();
             if new_name.is_empty() {
                 state.notify_error("Template name cannot be empty");
@@ -2819,7 +2819,7 @@ fn handle_input_confirm(
                 } else {
                     match rename_template(kando_dir, &old_slug, &new_slug) {
                         Ok(()) => {
-                            let display = crate::board::slug_to_name(&new_slug);
+                            let display = kando_core::board::slug_to_name(&new_slug);
                             state.notify(format!("Renamed template → {display}"));
                             sync_message = Some(format!("Rename template \"{old_slug}\" to \"{new_slug}\""));
                         }
@@ -2894,8 +2894,8 @@ fn handle_input_confirm(
             on_confirm: InputTarget::ColRename(old_slug),
             ..
         } => {
-            use crate::board::{slug_for_rename, slug_to_name};
-            use crate::board::storage::rename_column_dir;
+            use kando_core::board::{slug_for_rename, slug_to_name};
+            use kando_core::board::storage::rename_column_dir;
             let new_name = buf.input.trim().to_string();
             if new_name.is_empty() {
                 state.notify_error("Column name cannot be empty");
@@ -2949,7 +2949,7 @@ fn handle_input_confirm(
             on_confirm: InputTarget::ColAdd,
             ..
         } => {
-            use crate::board::{generate_slug, slug_to_name, normalize_column_orders};
+            use kando_core::board::{generate_slug, slug_to_name, normalize_column_orders};
             let name = buf.input.trim().to_string();
             if name.is_empty() {
                 state.notify_error("Column name cannot be empty");
@@ -3196,7 +3196,7 @@ fn handle_input_confirm(
                     state.mode = Mode::Picker { title, items, selected, target: PickerTarget::StalenessFilter };
                 }
                 PickerTarget::Priority => {
-                    use crate::board::Priority;
+                    use kando_core::board::Priority;
                     if let Some(priority) = Priority::ALL.get(selected) {
                         let col_idx = state.focused_column;
                         let card_idx = state.selected_card;
@@ -3284,7 +3284,7 @@ fn handle_input_confirm(
                     }
                 }
                 PickerTarget::TemplateSelect => {
-                    use crate::board::storage::find_template;
+                    use kando_core::board::storage::find_template;
                     if selected == 0 {
                         // "(blank)" selected — plain new card
                         state.mode = Mode::Input {
@@ -3308,7 +3308,7 @@ fn handle_input_confirm(
                     }
                 }
                 PickerTarget::TemplateEdit => {
-                    use crate::board::storage::find_template;
+                    use kando_core::board::storage::find_template;
                     if let Some((name, _)) = items.get(selected) {
                         if let Some((slug, _)) = find_template(kando_dir, name) {
                             state.pending_editor_template = Some(slug);
@@ -3318,7 +3318,7 @@ fn handle_input_confirm(
                     }
                 }
                 PickerTarget::TemplateDelete => {
-                    use crate::board::storage::find_template;
+                    use kando_core::board::storage::find_template;
                     if let Some((name, _)) = items.get(selected) {
                         if let Some((slug, _)) = find_template(kando_dir, name) {
                             state.mode = Mode::Confirm {
@@ -3331,8 +3331,8 @@ fn handle_input_confirm(
                     }
                 }
                 PickerTarget::TemplateRename => {
-                    use crate::board::storage::find_template;
-                    use crate::board::slug_to_name;
+                    use kando_core::board::storage::find_template;
+                    use kando_core::board::slug_to_name;
                     if let Some((name, _)) = items.get(selected) {
                         if let Some((slug, _)) = find_template(kando_dir, name) {
                             let current_name = slug_to_name(&slug);
@@ -3476,7 +3476,7 @@ fn handle_template_action<B: ratatui::backend::Backend>(
     _terminal: &mut ratatui::Terminal<B>,
     kando_dir: &std::path::Path,
 ) -> color_eyre::Result<Option<String>> {
-    use crate::board::storage::load_templates;
+    use kando_core::board::storage::load_templates;
 
     state.mode = Mode::Normal;
 
@@ -3490,7 +3490,7 @@ fn handle_template_action<B: ratatui::backend::Backend>(
             };
         }
         Action::TemplateEdit => {
-            use crate::board::slug_to_name;
+            use kando_core::board::slug_to_name;
             let templates = load_templates(kando_dir);
             if templates.is_empty() {
                 state.notify("No templates");
@@ -3505,7 +3505,7 @@ fn handle_template_action<B: ratatui::backend::Backend>(
             }
         }
         Action::TemplateDelete => {
-            use crate::board::slug_to_name;
+            use kando_core::board::slug_to_name;
             let templates = load_templates(kando_dir);
             if templates.is_empty() {
                 state.notify("No templates");
@@ -3520,7 +3520,7 @@ fn handle_template_action<B: ratatui::backend::Backend>(
             }
         }
         Action::TemplateRename => {
-            use crate::board::slug_to_name;
+            use kando_core::board::slug_to_name;
             let templates = load_templates(kando_dir);
             if templates.is_empty() {
                 state.notify("No templates");
@@ -3658,8 +3658,8 @@ fn handle_confirm(
                     on_confirm: ConfirmTarget::ColRemove(slug),
                     ..
                 } => {
-                    use crate::board::normalize_column_orders;
-                    use crate::board::storage::remove_column_dir;
+                    use kando_core::board::normalize_column_orders;
+                    use kando_core::board::storage::remove_column_dir;
                     let slug = slug.clone();
                     let col_idx = match board.columns.iter().position(|c| c.slug == slug) {
                         Some(i) => i,
@@ -3688,7 +3688,7 @@ fn handle_confirm(
                     on_confirm: ConfirmTarget::DeleteTemplate(slug),
                     ..
                 } => {
-                    use crate::board::storage::delete_template;
+                    use kando_core::board::storage::delete_template;
                     delete_template(kando_dir, slug)?;
                     state.notify("Template deleted");
                     sync_message = Some("Delete template".into());
@@ -3709,7 +3709,7 @@ fn handle_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{Board, Card, Column, Policies};
+    use kando_core::board::{Board, Card, Column, Policies};
 
     /// Create a test board with the given column names, each with the given card titles.
     fn test_board(columns: &[(&str, &[&str])]) -> Board {
@@ -4294,7 +4294,7 @@ mod tests {
 
     fn setup_kando_dir() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        crate::board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
         (dir, kando_dir)
     }
@@ -4302,7 +4302,7 @@ mod tests {
     #[test]
     fn test_new_card_confirm() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "New card",
@@ -4320,7 +4320,7 @@ mod tests {
     #[test]
     fn test_new_card_confirm_empty_title() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "New card",
@@ -4336,9 +4336,9 @@ mod tests {
     #[test]
     fn test_edit_tags_confirm() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "Tags",
@@ -4354,9 +4354,9 @@ mod tests {
     #[test]
     fn test_delete_card_confirm() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Doomed".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Confirm {
             prompt: "Delete card?",
@@ -4387,9 +4387,9 @@ mod tests {
     #[test]
     fn test_wip_limit_confirm() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Card".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Confirm {
             prompt: "Over WIP limit",
@@ -4470,9 +4470,9 @@ mod tests {
     #[test]
     fn test_toggle_blocker_unblocked_opens_input() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -4489,11 +4489,11 @@ mod tests {
     #[test]
     fn test_toggle_blocker_blocked_unblocks() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut card = Card::new("001".into(), "Test".into());
         card.blocked = Some("waiting on API".into());
         board.columns[0].cards.push(card);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -4509,9 +4509,9 @@ mod tests {
     #[test]
     fn blocker_reason_input_confirm_sets_reason() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "Blocker reason (optional)",
@@ -4532,9 +4532,9 @@ mod tests {
     #[test]
     fn blocker_reason_input_empty_sets_blocked_no_reason() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "Blocker reason (optional)",
@@ -4551,11 +4551,11 @@ mod tests {
     #[test]
     fn blocker_reason_input_applies_to_selected_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "First".into()));
         board.columns[0].cards.push(Card::new("002".into(), "Second".into()));
         board.columns[0].cards.push(Card::new("003".into(), "Third".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.selected_card = 1; // Select the second card
         state.mode = Mode::Input {
@@ -4581,9 +4581,9 @@ mod tests {
     #[test]
     fn test_delete_populates_last_delete() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Doomed".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Confirm {
             prompt: "Delete card?",
@@ -4601,9 +4601,9 @@ mod tests {
     #[test]
     fn test_undo_restores_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Undone".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
 
         // Delete the card
@@ -4628,9 +4628,9 @@ mod tests {
     #[test]
     fn test_delete_card_file_goes_to_trash() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Filed".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Confirm {
             prompt: "Delete?",
@@ -4648,10 +4648,10 @@ mod tests {
     #[test]
     fn test_undo_restores_to_original_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Put card in column 1 (in-progress)
         board.columns[1].cards.push(Card::new("001".into(), "WIP".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = 1;
 
@@ -4675,7 +4675,7 @@ mod tests {
     #[test]
     fn test_undo_nothing_to_undo() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
 
         let sync = handle_undo(&mut board, &mut state, &kando_dir).unwrap();
@@ -4686,10 +4686,10 @@ mod tests {
     #[test]
     fn test_undo_focuses_restored_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Keep".into()));
         board.columns[0].cards.push(Card::new("002".into(), "Delete".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.selected_card = 1;
 
@@ -4819,24 +4819,24 @@ mod tests {
     #[test]
     fn test_move_card_sets_completed_integration() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test card".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
 
         // The board has columns: backlog(0), in-progress(1), done(2), archive(3)
         // Move card from backlog to done
         let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
         board.move_card(0, 0, done_idx);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
 
         // Reload and verify completed is set
-        let reloaded = crate::board::storage::load_board(&kando_dir).unwrap();
+        let reloaded = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let done_cards = &reloaded.columns[done_idx].cards;
         assert_eq!(done_cards.len(), 1);
         assert!(done_cards[0].completed.is_some(), "card moved to done should have completed timestamp");
 
         // Compute metrics — should find 1 completed card
-        let metrics = crate::board::metrics::compute_metrics(&reloaded, None, None);
+        let metrics = kando_core::board::metrics::compute_metrics(&reloaded, None, None);
         assert_eq!(metrics.total_completed, 1);
         assert!(metrics.time_stats.is_some());
     }
@@ -5589,9 +5589,9 @@ mod tests {
 
     fn setup_col_hide() -> (tempfile::TempDir, std::path::PathBuf, Board, AppState) {
         let dir = tempfile::tempdir().unwrap();
-        crate::board::storage::init_board(dir.path(), "Test", None).unwrap();
+        kando_core::board::storage::init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        let board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let state = AppState::new();
         (dir, kando_dir, board, state)
     }
@@ -5666,7 +5666,7 @@ mod tests {
         let slug = board.columns[0].slug.clone();
         state.focused_column = 0;
         handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
-        let reloaded = crate::board::storage::load_board(&kando_dir).unwrap();
+        let reloaded = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let col = reloaded.columns.iter().find(|c| c.slug == slug).unwrap();
         assert!(col.hidden, "hidden flag should be persisted to disk");
     }
@@ -5678,12 +5678,12 @@ mod tests {
     #[test]
     fn archive_card_moves_to_archive_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Board already has an archive column from init_board
         let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
         assert!(board.columns[archive_idx].cards.is_empty(), "precondition: archive should start empty");
         board.columns[0].cards.push(Card::new("001".into(), "My task".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -5759,13 +5759,13 @@ mod tests {
     #[test]
     fn sort_by_title() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards = vec![
             Card::new("001".into(), "Zebra".into()),
             Card::new("002".into(), "Apple".into()),
             Card::new("003".into(), "Mango".into()),
         ];
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Picker {
             title: "sort by",
@@ -5783,7 +5783,7 @@ mod tests {
     #[test]
     fn sort_empty_column_no_panic() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         assert!(board.columns[0].cards.is_empty(), "precondition: column should start empty");
         let mut state = AppState::new();
         state.mode = Mode::Picker {
@@ -5824,7 +5824,7 @@ mod tests {
     #[test]
     fn wip_limit_set_valid() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "WIP limit (0=off)",
@@ -5841,9 +5841,9 @@ mod tests {
     #[test]
     fn wip_limit_clear_with_zero() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].wip_limit = Some(5);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "WIP limit (0=off)",
@@ -5859,7 +5859,7 @@ mod tests {
     #[test]
     fn wip_limit_invalid_input() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "WIP limit (0=off)",
@@ -5961,7 +5961,7 @@ mod tests {
     #[test]
     fn col_rename_confirm_changes_name() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let old_slug = board.columns[0].slug.clone();
         let mut state = AppState::new();
         state.mode = Mode::Input {
@@ -5979,7 +5979,7 @@ mod tests {
     #[test]
     fn col_rename_empty_name_errors() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let old_slug = board.columns[0].slug.clone();
         let mut state = AppState::new();
         state.mode = Mode::Input {
@@ -6007,7 +6007,7 @@ mod tests {
     #[test]
     fn col_add_confirm_creates_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let original_len = board.columns.len();
         let mut state = AppState::new();
         state.mode = Mode::Input {
@@ -6061,7 +6061,7 @@ mod tests {
     #[test]
     fn col_remove_confirm_removes_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let original_len = board.columns.len();
         // Find the "in-progress" column (empty by default) to remove
         let ip_idx = board.columns.iter().position(|c| c.slug == "in-progress").unwrap();
@@ -7005,7 +7005,7 @@ mod tests {
     #[test]
     fn pipe_command_success_shows_stdout_first_line() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Create a card so we have a file on disk
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
@@ -7028,7 +7028,7 @@ mod tests {
     #[test]
     fn pipe_command_empty_stdout_shows_pipe_complete() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
         save_board(&kando_dir, &board).unwrap();
@@ -7047,7 +7047,7 @@ mod tests {
     #[test]
     fn pipe_command_skips_empty_lines() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
         save_board(&kando_dir, &board).unwrap();
@@ -7066,7 +7066,7 @@ mod tests {
     #[test]
     fn pipe_command_empty_input_does_nothing() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
         save_board(&kando_dir, &board).unwrap();
@@ -7085,7 +7085,7 @@ mod tests {
     #[test]
     fn pipe_command_card_not_found() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // No cards in the column
         let mut state = AppState::new();
         state.mode = Mode::Input {
@@ -7102,7 +7102,7 @@ mod tests {
     #[test]
     fn pipe_command_nonzero_exit_shows_stderr() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
         save_board(&kando_dir, &board).unwrap();
@@ -7122,7 +7122,7 @@ mod tests {
     #[test]
     fn pipe_command_nonzero_exit_empty_stderr() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
         save_board(&kando_dir, &board).unwrap();
@@ -7142,7 +7142,7 @@ mod tests {
     #[test]
     fn pipe_command_receives_card_contents_on_stdin() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
         save_board(&kando_dir, &board).unwrap();
@@ -7163,7 +7163,7 @@ mod tests {
     #[test]
     fn pipe_command_sets_env_vars() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut card = Card::new("1".into(), "Test Card".into());
         card.tags = vec!["bug".into(), "ui".into()];
         card.assignees = vec!["alice".into()];
@@ -7184,7 +7184,7 @@ mod tests {
     #[test]
     fn pipe_command_returns_no_sync_message() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let card = Card::new("1".into(), "Test Card".into());
         board.columns[0].cards.push(card);
         save_board(&kando_dir, &board).unwrap();
@@ -7225,7 +7225,7 @@ mod tests {
 
     #[test]
     fn hint_set_priority_all_variants() {
-        use crate::board::Priority;
+        use kando_core::board::Priority;
         assert_eq!(RepeatableAction::SetPriority(Priority::Low).hint(), "priority: low");
         assert_eq!(RepeatableAction::SetPriority(Priority::Normal).hint(), "priority: normal");
         assert_eq!(RepeatableAction::SetPriority(Priority::High).hint(), "priority: high");
@@ -7282,7 +7282,7 @@ mod tests {
     #[test]
     fn repeat_nothing_to_repeat() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
         assert!(sync.is_none());
@@ -7292,10 +7292,10 @@ mod tests {
     #[test]
     fn repeat_no_card_selected() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Ensure column 0 is empty
         board.columns[0].cards.clear();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::Archive);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7305,11 +7305,11 @@ mod tests {
 
     #[test]
     fn repeat_set_priority() {
-        use crate::board::Priority;
+        use kando_core::board::Priority;
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetPriority(Priority::High));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7321,9 +7321,9 @@ mod tests {
     #[test]
     fn repeat_set_tags() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetTags(vec!["bug".into(), "ui".into()]));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7335,9 +7335,9 @@ mod tests {
     #[test]
     fn repeat_set_assignees() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetAssignees(vec!["alice".into()]));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7349,9 +7349,9 @@ mod tests {
     #[test]
     fn repeat_set_due_date() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
         state.last_repeatable = Some(RepeatableAction::SetDueDate(Some(date)));
@@ -7364,11 +7364,11 @@ mod tests {
     #[test]
     fn repeat_clear_due_date() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut card = Card::new("001".into(), "Test".into());
         card.due = Some(chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap());
         board.columns[0].cards.push(card);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetDueDate(None));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7380,9 +7380,9 @@ mod tests {
     #[test]
     fn repeat_block_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetBlocked(Some(String::new())));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7394,9 +7394,9 @@ mod tests {
     #[test]
     fn repeat_block_card_with_reason() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetBlocked(Some("waiting on API".into())));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7408,11 +7408,11 @@ mod tests {
     #[test]
     fn repeat_unblock_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut card = Card::new("001".into(), "Test".into());
         card.blocked = Some(String::new());
         board.columns[0].cards.push(card);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetBlocked(None));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7424,11 +7424,11 @@ mod tests {
     #[test]
     fn repeat_block_already_blocked() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut card = Card::new("001".into(), "Test".into());
         card.blocked = Some(String::new());
         board.columns[0].cards.push(card);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetBlocked(Some(String::new())));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7439,9 +7439,9 @@ mod tests {
     #[test]
     fn repeat_unblock_already_unblocked() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetBlocked(None));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7452,11 +7452,11 @@ mod tests {
     #[test]
     fn repeat_archive() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
         // Ensure archive column exists
         assert!(board.columns.iter().any(|c| c.slug == "archive"));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::Archive);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7470,10 +7470,10 @@ mod tests {
     #[test]
     fn repeat_archive_already_in_archive() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
         board.columns[archive_idx].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = archive_idx;
         state.last_repeatable = Some(RepeatableAction::Archive);
@@ -7485,10 +7485,10 @@ mod tests {
     #[test]
     fn repeat_archive_no_archive_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns.retain(|c| c.slug != "archive");
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::Archive);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7499,13 +7499,13 @@ mod tests {
     #[test]
     fn repeat_move_to_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
         // Board should have multiple columns from init_board
         let done_slug = board.columns.iter().find(|c| c.slug == "done").map(|c| c.slug.clone());
         let done_name = board.columns.iter().find(|c| c.slug == "done").map(|c| c.name.clone());
         assert!(done_slug.is_some(), "Board must have a 'done' column");
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::MoveToColumn {
             column_slug: done_slug.unwrap(),
@@ -7521,9 +7521,9 @@ mod tests {
     #[test]
     fn repeat_move_to_column_missing() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::MoveToColumn {
             column_slug: "nonexistent".into(),
@@ -7537,10 +7537,10 @@ mod tests {
     #[test]
     fn repeat_move_to_column_already_there() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let done_idx = board.columns.iter().position(|c| c.slug == "done").unwrap();
         board.columns[done_idx].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = done_idx;
         state.last_repeatable = Some(RepeatableAction::MoveToColumn {
@@ -7555,9 +7555,9 @@ mod tests {
     #[test]
     fn repeat_move_card_forward() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::MoveCard { forward: true });
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -7569,10 +7569,10 @@ mod tests {
     #[test]
     fn repeat_move_card_backward() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Put card in second column (index 1)
         board.columns[1].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = 1;
         state.last_repeatable = Some(RepeatableAction::MoveCard { forward: false });
@@ -7584,11 +7584,11 @@ mod tests {
 
     #[test]
     fn repeat_does_not_update_last_repeatable() {
-        use crate::board::Priority;
+        use kando_core::board::Priority;
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let original = RepeatableAction::SetPriority(Priority::High);
         state.last_repeatable = Some(original.clone());
@@ -7599,9 +7599,9 @@ mod tests {
     #[test]
     fn repeat_preserves_undo_on_noop() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
-        state.last_delete = Some(crate::board::storage::TrashEntry {
+        state.last_delete = Some(kando_core::board::storage::TrashEntry {
             id: "001".into(),
             title: "Doomed".into(),
             from_column: "backlog".into(),
@@ -7619,9 +7619,9 @@ mod tests {
     #[test]
     fn repeat_with_active_filter_no_visible_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         // Set a filter that hides the card
         state.active_filter = Some("zzz_no_match_zzz".to_string());
@@ -7638,9 +7638,9 @@ mod tests {
     #[test]
     fn record_move_card_next_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -7654,9 +7654,9 @@ mod tests {
     #[test]
     fn record_move_card_prev_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[1].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = 1;
         let backend = ratatui::backend::TestBackend::new(80, 24);
@@ -7672,11 +7672,11 @@ mod tests {
     fn record_toggle_blocker_unblock() {
         // ToggleBlocker on a blocked card immediately unblocks and records the action
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut card = Card::new("001".into(), "Test".into());
         card.blocked = Some(String::new());
         board.columns[0].cards.push(card);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -7691,9 +7691,9 @@ mod tests {
     fn record_toggle_blocker_block_opens_input() {
         // ToggleBlocker on an unblocked card opens input, does NOT record yet
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -7708,9 +7708,9 @@ mod tests {
     #[test]
     fn record_archive_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -7723,11 +7723,11 @@ mod tests {
 
     #[test]
     fn record_set_priority() {
-        use crate::board::Priority;
+        use kando_core::board::Priority;
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let high_idx = Priority::ALL.iter().position(|p| *p == Priority::High).unwrap();
         state.mode = Mode::Picker {
@@ -7743,9 +7743,9 @@ mod tests {
     #[test]
     fn record_edit_tags() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "Tags (comma-separated)",
@@ -7760,9 +7760,9 @@ mod tests {
     #[test]
     fn record_edit_assignees() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "Assignees (comma-separated)",
@@ -7777,9 +7777,9 @@ mod tests {
     #[test]
     fn record_set_due_date() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
         apply_due_date(&mut board, &mut state, Some(date), &kando_dir).unwrap();
@@ -7789,11 +7789,11 @@ mod tests {
     #[test]
     fn record_move_to_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
         let done_slug = board.columns.iter().find(|c| c.slug == "done").unwrap().slug.clone();
         let done_name = board.columns.iter().find(|c| c.slug == "done").unwrap().name.clone();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         // Build move-to-column picker items (excluding focused column 0)
         let items: Vec<(String, bool)> = board.columns.iter()
@@ -7885,7 +7885,7 @@ mod tests {
 
     #[test]
     fn risk_level_low_variants() {
-        use crate::board::Priority;
+        use kando_core::board::Priority;
         assert_eq!(RepeatableAction::SetBlocked(Some(String::new())).risk_level(), RiskLevel::Low);
         assert_eq!(RepeatableAction::SetTags(vec![]).risk_level(), RiskLevel::Low);
         assert_eq!(RepeatableAction::SetAssignees(vec![]).risk_level(), RiskLevel::Low);
@@ -7943,9 +7943,9 @@ mod tests {
     #[test]
     fn record_delete_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Doomed".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Confirm {
             prompt: "Delete card?",
@@ -7958,7 +7958,7 @@ mod tests {
     #[test]
     fn record_pipe_command() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("1".into(), "Test Card".into()));
         save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
@@ -7975,7 +7975,7 @@ mod tests {
     #[test]
     fn record_pipe_command_not_on_failure() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("1".into(), "Test Card".into()));
         save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
@@ -7994,9 +7994,9 @@ mod tests {
     #[test]
     fn record_sort_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Picker {
             title: "sort by",
@@ -8016,11 +8016,11 @@ mod tests {
     #[test]
     fn record_col_remove() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // in-progress column should be empty by default
         let ip_slug = board.columns.iter().find(|c| c.slug == "in-progress")
             .expect("in-progress column").slug.clone();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Confirm {
             prompt: "Remove column?",
@@ -8033,7 +8033,7 @@ mod tests {
     #[test]
     fn record_col_set_hidden() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
         assert_eq!(state.last_repeatable, Some(RepeatableAction::ColSetHidden(true)));
@@ -8042,9 +8042,9 @@ mod tests {
     #[test]
     fn record_col_set_hidden_to_false() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].hidden = true;
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         handle_col_toggle_hidden(&mut board, &mut state, &kando_dir).unwrap();
         assert_eq!(state.last_repeatable, Some(RepeatableAction::ColSetHidden(false)));
@@ -8053,7 +8053,7 @@ mod tests {
     #[test]
     fn record_set_wip_limit() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         state.mode = Mode::Input {
             prompt: "WIP limit (0=off)",
@@ -8068,7 +8068,7 @@ mod tests {
     #[test]
     fn record_set_wip_limit_zero_clears() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].wip_limit = Some(5);
         let mut state = AppState::new();
         state.mode = Mode::Input {
@@ -8088,9 +8088,9 @@ mod tests {
     #[test]
     fn repeat_delete_card_enters_confirm() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::DeleteCard);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8101,9 +8101,9 @@ mod tests {
     #[test]
     fn repeat_delete_card_no_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.clear();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::DeleteCard);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8113,16 +8113,16 @@ mod tests {
 
     #[test]
     fn repeat_sort_column_by_priority() {
-        use crate::board::Priority;
+        use kando_core::board::Priority;
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut card_a = Card::new("001".into(), "Low Card".into());
         card_a.priority = Priority::Low;
         let mut card_b = Card::new("002".into(), "Urgent Card".into());
         card_b.priority = Priority::Urgent;
         board.columns[0].cards.push(card_a);
         board.columns[0].cards.push(card_b);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SortColumn("priority".into()));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8135,10 +8135,10 @@ mod tests {
     #[test]
     fn repeat_sort_column_by_title() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Zebra".into()));
         board.columns[0].cards.push(Card::new("002".into(), "Apple".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SortColumn("title".into()));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8150,9 +8150,9 @@ mod tests {
     #[test]
     fn repeat_sort_column_empty() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.clear();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SortColumn("priority".into()));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8163,9 +8163,9 @@ mod tests {
     #[test]
     fn repeat_sort_column_unknown_key() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SortColumn("bogus".into()));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8176,10 +8176,10 @@ mod tests {
     #[test]
     fn repeat_col_remove_enters_confirm() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Focus on an empty, non-archive column
         let ip_idx = board.columns.iter().position(|c| c.slug == "in-progress").unwrap();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = ip_idx;
         state.last_repeatable = Some(RepeatableAction::ColRemove);
@@ -8191,10 +8191,10 @@ mod tests {
     #[test]
     fn repeat_col_remove_only_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Reduce to a single column
         board.columns.truncate(1);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColRemove);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8205,9 +8205,9 @@ mod tests {
     #[test]
     fn repeat_col_remove_archive_blocked() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let archive_idx = board.columns.iter().position(|c| c.slug == "archive").unwrap();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = archive_idx;
         state.last_repeatable = Some(RepeatableAction::ColRemove);
@@ -8219,9 +8219,9 @@ mod tests {
     #[test]
     fn repeat_col_remove_has_cards() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("001".into(), "Test".into()));
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColRemove);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8232,9 +8232,9 @@ mod tests {
     #[test]
     fn repeat_col_move_forward() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let original_name = board.columns[0].name.clone();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColMove { forward: true });
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8247,9 +8247,9 @@ mod tests {
     #[test]
     fn repeat_col_move_backward() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let original_name = board.columns[1].name.clone();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = 1;
         state.last_repeatable = Some(RepeatableAction::ColMove { forward: false });
@@ -8262,9 +8262,9 @@ mod tests {
     #[test]
     fn repeat_col_move_forward_already_rightmost() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let last = board.columns.len() - 1;
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = last;
         state.last_repeatable = Some(RepeatableAction::ColMove { forward: true });
@@ -8276,8 +8276,8 @@ mod tests {
     #[test]
     fn repeat_col_move_backward_already_leftmost() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.focused_column = 0;
         state.last_repeatable = Some(RepeatableAction::ColMove { forward: false });
@@ -8289,9 +8289,9 @@ mod tests {
     #[test]
     fn repeat_col_set_hidden_true() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         assert!(!board.columns[0].hidden);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColSetHidden(true));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8302,9 +8302,9 @@ mod tests {
     #[test]
     fn repeat_col_set_hidden_false() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].hidden = true;
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColSetHidden(false));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8315,9 +8315,9 @@ mod tests {
     #[test]
     fn repeat_col_set_hidden_already_hidden() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].hidden = true;
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColSetHidden(true));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8328,9 +8328,9 @@ mod tests {
     #[test]
     fn repeat_col_set_hidden_already_visible() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         assert!(!board.columns[0].hidden);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::ColSetHidden(false));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8341,8 +8341,8 @@ mod tests {
     #[test]
     fn repeat_set_wip_limit_some() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetWipLimit(Some(3)));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8353,9 +8353,9 @@ mod tests {
     #[test]
     fn repeat_set_wip_limit_none() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].wip_limit = Some(5);
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetWipLimit(None));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8367,7 +8367,7 @@ mod tests {
     #[test]
     fn repeat_column_level_no_column() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         let mut state = AppState::new();
         state.focused_column = 999; // out of bounds
         state.last_repeatable = Some(RepeatableAction::ColMove { forward: true });
@@ -8379,10 +8379,10 @@ mod tests {
     #[test]
     fn repeat_column_level_skips_card_guard() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         // Column 0 is empty — card guard would block card-level actions
         board.columns[0].cards.clear();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::SetWipLimit(Some(3)));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
@@ -8394,7 +8394,7 @@ mod tests {
     #[test]
     fn repeat_pipe_command_on_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.push(Card::new("1".into(), "Test Card".into()));
         save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
@@ -8407,9 +8407,9 @@ mod tests {
     #[test]
     fn repeat_pipe_command_no_card() {
         let (_dir, kando_dir) = setup_kando_dir();
-        let mut board = crate::board::storage::load_board(&kando_dir).unwrap();
+        let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
         board.columns[0].cards.clear();
-        crate::board::storage::save_board(&kando_dir, &board).unwrap();
+        kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();
         state.last_repeatable = Some(RepeatableAction::PipeCommand("echo test".into()));
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();

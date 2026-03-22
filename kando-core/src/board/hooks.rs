@@ -411,9 +411,7 @@ pub fn make_executable(_path: &Path) -> std::io::Result<()> {
 }
 
 /// Open `path` in the user's `$EDITOR`.
-pub fn open_in_editor(path: &Path) -> color_eyre::Result<()> {
-    use color_eyre::eyre::bail;
-
+pub fn open_in_editor(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     let default_editor = "vi";
     #[cfg(not(unix))]
@@ -422,7 +420,10 @@ pub fn open_in_editor(path: &Path) -> color_eyre::Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| default_editor.to_string());
     let editor_trimmed = editor.trim();
     if editor_trimmed.is_empty() {
-        bail!("$EDITOR is empty or not set");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "$EDITOR is empty or not set",
+        ));
     }
 
     #[cfg(unix)]
@@ -1274,5 +1275,55 @@ mod tests {
         assert!(notif.message.contains("due=2025-06-15"), "msg: {}", notif.message);
         assert!(notif.message.contains("blocked=needs review"), "msg: {}", notif.message);
         deregister_hook_sender();
+    }
+
+    /// Save an env var, set a new value, and restore on drop.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: serialized by TEST_LOCK — no other test touches env concurrently.
+            unsafe { std::env::set_var(key, val) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    #[test]
+    fn open_in_editor_empty_editor_env_returns_io_not_found() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.md");
+        fs::write(&path, "hello").unwrap();
+
+        let _env = EnvGuard::set("EDITOR", "");
+        let result = open_in_editor(&path);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn open_in_editor_with_failing_editor_does_not_panic() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.md");
+
+        let _env = EnvGuard::set("EDITOR", "false");
+        // `false` exits 1 → open_in_editor prints a warning but returns Ok(()).
+        let result = open_in_editor(&path);
+        assert!(result.is_ok(), "expected Ok since sh runs successfully, got: {result:?}");
     }
 }
