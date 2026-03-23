@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 keywords = ["kanban", "tui", "terminal", "productivity", "cli"]
 categories = ["command-line-utilities"]
-readme = "../README.md"
+readme = "README.md"
 
 [[bin]]
 name = "kando"

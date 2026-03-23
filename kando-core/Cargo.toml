@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 keywords = ["kanban", "board", "productivity"]
 categories = ["data-structures"]
-readme = "../README.md"
+readme = "README.md"
 
 [dependencies]
 chrono.workspace = true
