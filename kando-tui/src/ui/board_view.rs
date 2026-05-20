@@ -45,11 +45,11 @@ pub(crate) fn fit_icons<'a>(candidates: &[(&'a str, Style)], avail_width: usize)
 /// Border color for a card based on blocked state, column focus, and staleness.
 ///
 /// Semantic border colors (blocker, stale, very-stale) are always visible
-/// regardless of column focus — these are information-carrying signals.
+/// regardless of column focus, since these are information-carrying signals.
 /// Only fresh cards in unfocused columns are dimmed.
 ///
 /// Selection is expressed via `BorderType::Thick + Modifier::BOLD`, not via
-/// color — so `is_selected` is intentionally absent from this function.
+/// color, so `is_selected` is intentionally absent from this function.
 pub(crate) fn card_border_color(blocked: bool, is_overdue: bool, is_col_focused: bool, stale: Staleness, is_new: bool) -> Color {
     if blocked {
         Theme::BLOCKER

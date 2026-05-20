@@ -325,7 +325,7 @@ pub struct AppState {
     pub help_hint_shown: bool,
     /// Last repeatable card mutation for `.` (repeat last action).
     pub last_repeatable: Option<RepeatableAction>,
-    /// Deferred template editing — slug to open in $EDITOR after handler returns.
+    /// Deferred template editing: slug to open in $EDITOR after handler returns.
     pub pending_editor_template: Option<String>,
     /// Receiver for background hook notifications.
     pub hook_rx: Option<std::sync::mpsc::Receiver<kando_core::board::hooks::HookNotification>>,
@@ -494,7 +494,7 @@ fn visible_columns(
 ///
 /// Algorithm:
 /// 1. Reserve `g` and `e` (used for first/last column).
-/// 2. If an archive column exists, assign it `a` (even if hidden — archive is always accessible).
+/// 2. If an archive column exists, assign it `a` (even if hidden, archive is always accessible).
 /// 3. For each remaining visible column (in board order), try its first character (lowercased).
 ///    If taken, walk through the name's characters. If all exhausted, try remaining a-z.
 pub fn assign_column_letters(board: &Board, show_hidden: bool) -> Vec<(usize, char)> {
@@ -844,7 +844,7 @@ pub fn run(terminal: &mut DefaultTerminal, start_dir: &std::path::Path, nerd_fon
 
     // Warn at startup if the 'archive' column is missing (reserved for archiving).
     if !board.columns.iter().any(|c| c.slug == "archive") {
-        state.notify_error("Warning: no 'archive' column found — archiving features disabled");
+        state.notify_error("Warning: no 'archive' column found. Archiving features disabled");
     }
 
     state.clamp_selection(&board);
@@ -1417,7 +1417,7 @@ fn handle_repeat_last(
             let archive_idx = match board.columns.iter().position(|c| c.slug == "archive") {
                 Some(i) => i,
                 None => {
-                    state.notify_error("No 'archive' column found — create one first");
+                    state.notify_error("No 'archive' column found. Create one first");
                     return Ok(None);
                 }
             };
@@ -1936,7 +1936,7 @@ where
             let archive_idx = match board.columns.iter().position(|c| c.slug == "archive") {
                 Some(i) => i,
                 None => {
-                    state.notify_error("No 'archive' column found — create one first");
+                    state.notify_error("No 'archive' column found. Create one first");
                     return Ok(sync_message);
                 }
             };
@@ -2014,7 +2014,7 @@ where
 
                 terminal.clear()?;
 
-                // Always reload — the user may have saved before the editor exited
+                // Always reload, since the user may have saved before the editor exited
                 *board = load_board(kando_dir)?;
                 if let Some((col_idx, card_idx)) = board.find_card(&card_id) {
                     let card_title = board.columns[col_idx].cards[card_idx].title.clone();
@@ -2104,7 +2104,7 @@ where
             let card_idx = state.selected_card;
             if let Some(card) = board.columns.get(col_idx).and_then(|c| c.cards.get(card_idx)) {
                 if card.is_blocked() {
-                    // Unblock directly — no prompt needed
+                    // Unblock directly: no prompt needed
                     let card = board.columns[col_idx].cards.get_mut(card_idx).unwrap();
                     let card_id = card.id.clone();
                     let card_title = card.title.clone();
@@ -2697,7 +2697,7 @@ fn handle_input(
                     state.active_filter = None;
                 }
                 Mode::Picker { .. } => {
-                    // Just close — no side effects
+                    // Just close: no side effects
                 }
                 _ => {}
             }
@@ -3286,7 +3286,7 @@ fn handle_input_confirm(
                 PickerTarget::TemplateSelect => {
                     use kando_core::board::storage::find_template;
                     if selected == 0 {
-                        // "(blank)" selected — plain new card
+                        // "(blank)" selected: plain new card
                         state.mode = Mode::Input {
                             prompt: "New card",
                             buf: TextBuffer::empty(),
@@ -3421,7 +3421,7 @@ fn handle_undo(
         return Ok(None);
     };
 
-    // Resolve target column — notify if we had to fall back to the first column.
+    // Resolve target column. Notify if we had to fall back to the first column.
     let (target_col, used_fallback) = board.columns.iter()
         .position(|c| c.slug == entry.from_column)
         .map(|i| (i, false))
@@ -3456,7 +3456,7 @@ fn handle_undo(
             Ok(Some(format!("Restore card #{} \"{}\" to {}", entry.id, entry.title, target_col_name)))
         }
         Err(e) => {
-            // Do NOT clear last_delete — let the user retry
+            // Do NOT clear last_delete; let the user retry
             state.notify_error(format!("Restore failed: {e}"));
             Ok(None)
         }
@@ -3755,7 +3755,7 @@ mod tests {
         assert_eq!(state.focused_column, 1);
         handle_navigation(&board, &mut state, Action::FocusNextColumn, false);
         assert_eq!(state.focused_column, 2);
-        // At last column — stays
+        // At last column, stays
         handle_navigation(&board, &mut state, Action::FocusNextColumn, false);
         assert_eq!(state.focused_column, 2);
     }
@@ -3769,7 +3769,7 @@ mod tests {
         assert_eq!(state.focused_column, 1);
         handle_navigation(&board, &mut state, Action::FocusPrevColumn, false);
         assert_eq!(state.focused_column, 0);
-        // At first column — stays
+        // At first column, stays
         handle_navigation(&board, &mut state, Action::FocusPrevColumn, false);
         assert_eq!(state.focused_column, 0);
     }
@@ -3791,7 +3791,7 @@ mod tests {
         assert_eq!(state.selected_card, 1);
         handle_navigation(&board, &mut state, Action::SelectNextCard, false);
         assert_eq!(state.selected_card, 2);
-        // At last card — stays
+        // At last card, stays
         handle_navigation(&board, &mut state, Action::SelectNextCard, false);
         assert_eq!(state.selected_card, 2);
         // Go back
@@ -3821,7 +3821,7 @@ mod tests {
     fn test_cycle_next_wraps_to_next_column() {
         let board = test_board(&[("A", &["c1"]), ("B", &["c2", "c3"])]);
         let mut state = AppState::new();
-        // Card 0 of column 0 — cycling forward should jump to column 1, card 0
+        // Card 0 of column 0: cycling forward should jump to column 1, card 0
         handle_navigation(&board, &mut state, Action::CycleNextCard, false);
         assert_eq!(state.focused_column, 1);
         assert_eq!(state.selected_card, 0);
@@ -4242,7 +4242,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // InputConfirm tests (filter confirm — no I/O needed)
+    // InputConfirm tests (filter confirm: no I/O needed)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -4482,7 +4482,7 @@ mod tests {
         ).unwrap();
         // ToggleBlocker on an unblocked card now opens input for reason
         assert!(sync.is_none(), "no sync message until input is confirmed");
-        assert!(!board.columns[0].cards[0].is_blocked(), "card not yet blocked — waiting for input");
+        assert!(!board.columns[0].cards[0].is_blocked(), "card not yet blocked, waiting for input");
         assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::BlockerReason, .. }));
     }
 
@@ -4805,7 +4805,7 @@ mod tests {
     #[test]
     fn test_toggle_help_page_noop_outside_help() {
         let mut state = AppState::new();
-        // mode is Normal — toggle should have no effect
+        // mode is Normal, toggle should have no effect
         if let Mode::Help { scroll, page } = &mut state.mode {
             *scroll = 0;
             *page = match page {
@@ -4835,7 +4835,7 @@ mod tests {
         assert_eq!(done_cards.len(), 1);
         assert!(done_cards[0].completed.is_some(), "card moved to done should have completed timestamp");
 
-        // Compute metrics — should find 1 completed card
+        // Compute metrics, expecting 1 completed card
         let metrics = kando_core::board::metrics::compute_metrics(&reloaded, None, None);
         assert_eq!(metrics.total_completed, 1);
         assert!(metrics.time_stats.is_some());
@@ -5370,7 +5370,7 @@ mod tests {
         state.selected_card = 0;
         let mut terminal = test_terminal();
         handle_card_action(&mut board, &mut state, Action::NewCard, &mut terminal, fake_dir(), false).unwrap();
-        // Guard exempts NewCard — mode should advance to input prompt
+        // Guard exempts NewCard, so mode should advance to input prompt
         assert!(matches!(state.mode, Mode::Input { on_confirm: InputTarget::NewCardTitle, .. }));
     }
 
@@ -5378,7 +5378,7 @@ mod tests {
     fn filter_guard_does_not_block_detail_nav_selected_not_in_visible_set() {
         // DetailNextCard/DetailPrevCard are exempt from the filter guard.
         // When selected_card is not in the visible set, they perform a silent no-op
-        // (no notification, no state change) — distinct from the "last/first card" case.
+        // (no notification, no state change), distinct from the "last/first card" case.
         let mut board = test_board(&[("A", &["c1", "c2"])]);
         let mut state = AppState::new();
         state.active_tag_filters = vec!["missing-tag".into()]; // nothing visible
@@ -5387,7 +5387,7 @@ mod tests {
         let mut terminal = test_terminal();
         handle_card_action(&mut board, &mut state, Action::DetailNextCard, &mut terminal, fake_dir(), false).unwrap();
         assert!(state.notification.is_none());
-        assert_eq!(state.selected_card, 0); // unchanged — no-op
+        assert_eq!(state.selected_card, 0); // unchanged, no-op
         handle_card_action(&mut board, &mut state, Action::DetailPrevCard, &mut terminal, fake_dir(), false).unwrap();
         assert!(state.notification.is_none());
         assert_eq!(state.selected_card, 0);
@@ -5432,7 +5432,7 @@ mod tests {
 
     #[test]
     fn move_card_from_empty_column_notifies_no_cards_to_move() {
-        // Column A is empty but has a neighbour — boundary check passes, empty check fires.
+        // Column A is empty but has a neighbour, so the boundary check passes and the empty check fires.
         let mut board = test_board(&[("A", &[]), ("B", &["c1"])]);
         let mut state = AppState::new();
         state.focused_column = 0;
@@ -5443,7 +5443,7 @@ mod tests {
 
     #[test]
     fn move_card_from_empty_last_column_notifies_last_column() {
-        // Column B is empty AND the last column — boundary check fires first, not empty check.
+        // Column B is empty AND the last column, so the boundary check fires first, not the empty check.
         let mut board = test_board(&[("A", &["c1"]), ("B", &[])]);
         let mut state = AppState::new();
         state.focused_column = 1;
@@ -5622,7 +5622,7 @@ mod tests {
     #[test]
     fn handle_col_hide_two_visible_allows_hide() {
         let (_dir, kando_dir, mut board, mut state) = setup_col_hide();
-        // Leave exactly 2 visible — hiding one should succeed.
+        // Leave exactly 2 visible, so hiding one should succeed.
         board.columns[2].hidden = true;
         board.columns[3].hidden = true;
         state.focused_column = 0;
@@ -6778,7 +6778,7 @@ mod tests {
             panic!("expected Input mode");
         }
 
-        // Type a character — completion should be reset
+        // Type a character, completion should be reset
         let kando_dir = std::path::Path::new("/tmp/fake");
         handle_input(&mut board, &mut state, Action::InputChar('x'), kando_dir).unwrap();
         if let Mode::Input { buf, completion, .. } = &state.mode {
@@ -6799,7 +6799,7 @@ mod tests {
     #[test]
     fn completion_hint_candidates_sorted_alphabetically() {
         let mut board = test_board(&[("Backlog", &["A", "B", "C"])]);
-        // "zebra" appears 3 times, "alpha" once — by-count would put zebra first
+        // "zebra" appears 3 times, "alpha" once. By count, zebra would come first.
         board.columns[0].cards[0].tags = vec!["zebra".into()];
         board.columns[0].cards[1].tags = vec!["zebra".into()];
         board.columns[0].cards[2].tags = vec!["zebra".into(), "alpha".into()];
@@ -6853,7 +6853,7 @@ mod tests {
     #[test]
     fn edit_tags_action_populates_completion_hint_immediately() {
         let mut board = test_board(&[("Backlog", &["A", "B"])]);
-        // Tags on card B — selected card A has none, so buffer is empty
+        // Tags on card B. Selected card A has none, so buffer is empty.
         board.columns[0].cards[1].tags = vec!["bug".into(), "feature".into()];
         let mut state = AppState::new();
         let mut terminal = test_terminal();
@@ -6869,7 +6869,7 @@ mod tests {
     #[test]
     fn edit_assignees_action_populates_completion_hint_immediately() {
         let mut board = test_board(&[("Backlog", &["A", "B"])]);
-        // Assignees on card B — selected card A has none, so buffer is empty
+        // Assignees on card B. Selected card A has none, so buffer is empty.
         board.columns[0].cards[1].assignees = vec!["alice".into(), "bob".into()];
         let mut state = AppState::new();
         let mut terminal = test_terminal();
@@ -7493,7 +7493,7 @@ mod tests {
         state.last_repeatable = Some(RepeatableAction::Archive);
         let sync = handle_repeat_last(&mut board, &mut state, &kando_dir).unwrap();
         assert!(sync.is_none());
-        assert_eq!(state.notification.as_deref(), Some("No 'archive' column found — create one first"));
+        assert_eq!(state.notification.as_deref(), Some("No 'archive' column found. Create one first"));
     }
 
     #[test]
@@ -7632,7 +7632,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Recording tests — verify mutations set last_repeatable
+    // Recording tests: verify mutations set last_repeatable
     // -----------------------------------------------------------------------
 
     #[test]
@@ -8380,7 +8380,7 @@ mod tests {
     fn repeat_column_level_skips_card_guard() {
         let (_dir, kando_dir) = setup_kando_dir();
         let mut board = kando_core::board::storage::load_board(&kando_dir).unwrap();
-        // Column 0 is empty — card guard would block card-level actions
+        // Column 0 is empty, so the card guard would block card-level actions
         board.columns[0].cards.clear();
         kando_core::board::storage::save_board(&kando_dir, &board).unwrap();
         let mut state = AppState::new();

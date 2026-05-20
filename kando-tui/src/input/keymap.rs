@@ -210,7 +210,7 @@ fn map_picker(key: KeyEvent) -> Action {
 }
 
 // ---------------------------------------------------------------------------
-// Binding registry — single source of truth for keybinding documentation.
+// Binding registry: single source of truth for keybinding documentation.
 // Used by help overlay, status bar hints, and minor-mode popup.
 // ---------------------------------------------------------------------------
 

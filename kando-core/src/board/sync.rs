@@ -103,7 +103,7 @@ pub fn get_remote_url(repo_root: &Path) -> Result<String, SyncError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// DJB2 hash — stable across Rust versions, unlike `DefaultHasher`.
+/// DJB2 hash. Stable across Rust versions, unlike `DefaultHasher`.
 fn djb2(s: &str) -> u64 {
     let mut hash: u64 = 5381;
     for b in s.bytes() {
@@ -241,7 +241,7 @@ pub fn pull(state: &mut SyncState, kando_dir: &Path) -> SyncStatus {
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            // No tracking info means branch is new and hasn't been pushed yet — not an error
+            // No tracking info means branch is new and hasn't been pushed yet, not an error
             if stderr.contains("no tracking information") {
                 state.online = true;
                 state.last_error = None;
@@ -370,7 +370,7 @@ pub fn init_shadow_for_gitsync(project_root: &Path, branch: &str) -> Result<Sync
     })
 }
 
-/// Pull latest changes in shadow (no copy to working tree — shadow IS the data).
+/// Pull latest changes in shadow (no copy to working tree, since shadow IS the data).
 pub fn pull_shadow(state: &mut SyncState) -> SyncStatus {
     let output = git_cmd(&state.shadow_path)
         .args(["pull", "--rebase", "--autostash"])

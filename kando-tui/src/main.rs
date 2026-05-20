@@ -1158,7 +1158,7 @@ fn cmd_sync(cwd: &Path) -> color_eyre::Result<()> {
         return Ok(());
     }
 
-    // Local board — legacy sync path
+    // Local board: legacy sync path
     let mut board = load_board(kando_dir)?;
 
     let branch = match board.sync_branch.as_deref() {
@@ -1363,7 +1363,7 @@ fn cmd_edit(
         }
         println!("Updated {card_id}: {card_title}");
     } else {
-        // No flags — open in $EDITOR (incompatible with --json)
+        // No flags: open in $EDITOR (incompatible with --json)
         if json {
             bail!("--json requires at least one edit flag (e.g. --title, --priority)");
         }
@@ -1548,7 +1548,7 @@ fn cmd_config_show(cwd: &Path, json: bool) -> color_eyre::Result<()> {
     }
     if p.auto_close_days == 0 {
         println!("  auto-close-days:     disabled");
-        println!("  auto-close-target:   (n/a — auto-close disabled)");
+        println!("  auto-close-target:   (n/a, auto-close disabled)");
     } else {
         println!("  auto-close-days:     {} days", p.auto_close_days);
         println!("  auto-close-target:   {}", p.auto_close_target);
@@ -2544,7 +2544,7 @@ fn cmd_col_remove(cwd: &Path, column: &str, move_to: Option<&str>, json: bool) -
     // save_board must run before remove_column_dir: save writes config.toml with
     // the column removed, then remove_column_dir deletes the slug directory.
     // If remove_column_dir is never reached (e.g. disk full after save), the
-    // orphaned directory is benign — load_board ignores dirs not in config.toml.
+    // orphaned directory is benign, since load_board ignores dirs not in config.toml.
     save_board(kando_dir, &board)?;
     remove_column_dir(kando_dir, &slug)?;
     append_activity(kando_dir, "col-remove", &slug, &name, &[]);
@@ -2871,7 +2871,7 @@ fn cmd_log(cwd: &Path, stream: bool, json: bool, follow: bool) -> color_eyre::Re
                 return print_json(&serde_json::Value::Array(vec![]));
             }
             if follow {
-                // File doesn't exist yet — wait for it to appear, then start tailing
+                // File doesn't exist yet; wait for it to appear, then start tailing
                 return follow_log(&log_path, stream);
             }
             return Ok(());
@@ -3015,7 +3015,7 @@ fn follow_log_from_file(file: &mut std::fs::File, stream: bool) -> color_eyre::R
                 break; // No more data right now; buf may hold a partial line
             }
             if !buf.ends_with('\n') {
-                break; // Incomplete line — wait for more data
+                break; // Incomplete line; wait for more data
             }
 
             let line = buf.trim_end();
@@ -3422,7 +3422,7 @@ fn cmd_migrate(cwd: &Path) -> color_eyre::Result<()> {
         let err_msg = sync_state.last_error.as_deref().unwrap_or("unknown error");
         bail!(
             "Push to remote failed: {err_msg}\n\
-             Migration aborted — your local .kando/ directory is unchanged.\n\
+             Migration aborted. Your local .kando/ directory is unchanged.\n\
              Fix the network/remote issue and try again."
         );
     }
@@ -4099,7 +4099,7 @@ mod tests {
         let kando_dir = dir.path().join(".kando");
         let mut board = load_board(&kando_dir).unwrap();
 
-        // Create only card "10" — there is no card with ID "1".
+        // Create only card "10"; there is no card with ID "1".
         board.next_card_id = 10;
         let id_ten = board.next_card_id(); // "10"
         board.columns[0].cards.push(Card::new(id_ten.clone(), "Card ten".into()));
@@ -4108,7 +4108,7 @@ mod tests {
         // Exact match must succeed.
         assert!(cmd_show(dir.path(), &id_ten, false).is_ok(), "card '10' should be found by exact ID");
 
-        // "1" is a strict prefix of "10" but is not a card ID — must return an error,
+        // "1" is a strict prefix of "10" but is not a card ID, so it must return an error,
         // not silently return card "10"'s content.
         assert!(
             cmd_show(dir.path(), "1", false).is_err(),
@@ -4118,7 +4118,7 @@ mod tests {
 
     #[test]
     fn cmd_show_card_id_with_leading_trailing_whitespace_returns_err() {
-        // cmd_show does not trim the card_id — whitespace-padded IDs should not
+        // cmd_show does not trim the card_id; whitespace-padded IDs should not
         // match valid card IDs, preventing silent ID mismatches.
         use kando_core::board::storage::{init_board, save_board};
         let dir = tempfile::tempdir().unwrap();
@@ -4400,7 +4400,7 @@ mod tests {
     fn cmd_edit_due_counts_as_has_flags() {
         let dir = tempfile::tempdir().unwrap();
         let (kando_dir, id) = setup_board_with_card(dir.path());
-        // Only --due, no other flags — should still trigger mutation without opening editor
+        // Only --due, no other flags; should still trigger mutation without opening editor
         cmd_edit(dir.path(), &id, None, None, vec![], vec![], vec![], vec![], None, false, Some("2025-01-01"), false).unwrap();
         let board = load_board(&kando_dir).unwrap();
         let (ci, ki) = board.find_card(&id).unwrap();
@@ -4602,7 +4602,7 @@ mod tests {
 
     #[test]
     fn cmd_archive_list_falls_back_to_updated_returns_ok() {
-        // Card with completed = None — should fall back to updated for display date.
+        // Card with completed = None should fall back to updated for display date.
         let dir = tempfile::tempdir().unwrap();
         setup_board_with_archived_card(dir.path()); // card has no completed set
         assert!(cmd_archive_list(dir.path(), false, false).is_ok());
@@ -4659,7 +4659,7 @@ mod tests {
     fn cmd_archive_search_no_match_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         setup_board_with_archived_card(dir.path());
-        // Non-matching query — should print "No archived cards match" and return Ok
+        // Non-matching query: should print "No archived cards match" and return Ok
         assert!(cmd_archive_search(dir.path(), "zzznomatch", false, false).is_ok());
     }
 

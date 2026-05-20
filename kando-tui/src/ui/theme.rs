@@ -72,7 +72,7 @@ impl Icons {
 pub struct Theme;
 
 impl Theme {
-    // Base — everything defaults to the terminal's own foreground
+    // Base: everything defaults to the terminal's own foreground
     pub const FG: Color = Color::Reset;
     pub const DIM: Color = Color::DarkGray;
 
@@ -106,7 +106,7 @@ impl Theme {
     pub const WIP_NEAR: Color = Color::Yellow;
     pub const WIP_OVER: Color = Color::Red;
 
-    // Card title — cards created today
+    // Card title for cards created today
     pub const NEW_CARD_TITLE: Color = Color::Green;
 
     // Assignee
@@ -237,11 +237,11 @@ mod tests {
 
     #[test]
     fn very_stale_nerd_icon_is_warning_triangle() {
-        // VeryStale uses the warning triangle (U+F071) — a distinct shape from
-        // the Stale clock (U+F017), making the two levels unambiguous at a glance.
+        // VeryStale uses the warning triangle (U+F071), a distinct shape from
+        // the Stale clock (U+F017), so the two levels are unambiguous at a glance.
         assert_eq!(NERD_ICONS.very_stale, "\u{f071}");
         assert_ne!(NERD_ICONS.very_stale, NERD_ICONS.stale);
-        // Guard against accidental glyph reuse — sync_offline uses chain_broken (U+F127).
+        // Guard against accidental glyph reuse: sync_offline uses chain_broken (U+F127).
         assert_ne!(NERD_ICONS.very_stale, NERD_ICONS.sync_offline);
     }
 

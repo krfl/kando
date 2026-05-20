@@ -72,7 +72,7 @@ pub enum StorageError {
 
 /// Validate that a slug is safe for use as a directory name.
 /// Must start with an alphanumeric character, then only lowercase alphanumeric and hyphens.
-/// Supports Unicode letters (e.g. å, ö, ñ) — not just ASCII.
+/// Supports Unicode letters (e.g. å, ö, ñ), not just ASCII.
 fn validate_slug(slug: &str) -> Result<(), StorageError> {
     let first = match slug.chars().next() {
         None => return Err(StorageError::InvalidSlug(slug.to_string())),
@@ -450,7 +450,7 @@ pub fn rename_column_dir(kando_dir: &Path, old_slug: &str, new_slug: &str) -> Re
     validate_slug(old_slug)?;
     validate_slug(new_slug)?;
     if old_slug == new_slug {
-        return Ok(()); // same path — no-op
+        return Ok(()); // same path, no-op
     }
     let old_dir = kando_dir.join("columns").join(old_slug);
     let new_dir = kando_dir.join("columns").join(new_slug);
@@ -755,7 +755,7 @@ fn save_trash_meta(kando_dir: &Path, meta: &TrashMeta) -> Result<(), StorageErro
 }
 
 // ---------------------------------------------------------------------------
-// Activity log (.kando/activity.log — committed, append-only JSONL)
+// Activity log (.kando/activity.log: committed, append-only JSONL)
 // ---------------------------------------------------------------------------
 
 /// Escape a string as a JSON-encoded string value (including surrounding quotes).
@@ -836,7 +836,7 @@ fn try_append_activity(
 }
 
 // ---------------------------------------------------------------------------
-// Local config (.kando/local.toml — gitignored, per-user preferences)
+// Local config (.kando/local.toml: gitignored, per-user preferences)
 // ---------------------------------------------------------------------------
 
 /// Load per-user local preferences from `.kando/local.toml`.
@@ -1286,7 +1286,7 @@ mod tests {
         let col_slug = board.columns[0].slug.clone();
         trash_card(&kando_dir, &col_slug, &id, "Recent").unwrap();
 
-        // Purge with 30 days — card was just trashed, should survive
+        // Purge with 30 days; card was just trashed, so it should survive
         let purged = purge_trash(&kando_dir, 30).unwrap();
         assert!(purged.is_empty());
 
@@ -1389,7 +1389,7 @@ mod tests {
         let board = load_board(&kando_dir).unwrap();
         let original_created_at = board.created_at.unwrap();
 
-        // Save and reload — created_at should be preserved
+        // Save and reload, expecting created_at to be preserved
         save_board(&kando_dir, &board).unwrap();
         let reloaded = load_board(&kando_dir).unwrap();
         assert!(reloaded.created_at.is_some());
@@ -2075,7 +2075,7 @@ mod tests {
 
     #[test]
     fn append_activity_io_error_is_silently_swallowed() {
-        // Non-existent parent directory — should not panic
+        // Non-existent parent directory, should not panic
         let dir = tempfile::tempdir().unwrap();
         let nonexistent = dir.path().join("no-such-dir").join(".kando");
         append_activity(&nonexistent, "create", "1", "Task", &[]);
@@ -2205,7 +2205,7 @@ mod tests {
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
 
-        // "INVALID!" contains upper-case and a special char — validate_slug should reject it.
+        // "INVALID!" contains upper-case and a special char, so validate_slug should reject it.
         let result = rename_column_dir(&kando_dir, "INVALID!", "valid");
         assert!(result.is_err(), "invalid old slug should be rejected");
 
@@ -2632,7 +2632,7 @@ mod tests {
     fn load_template_with_legacy_name_field_in_frontmatter() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.md");
-        // Old-format template file that still has a `name` field — should load fine
+        // Old-format template file that still has a `name` field, should load fine
         fs::write(&path, "---\nname = \"Bug Report\"\npriority = \"high\"\ntags = [\"bug\"]\n---\nBody text\n").unwrap();
         let loaded = load_template(&path).unwrap();
         assert_eq!(loaded.priority, Priority::High);
@@ -2785,7 +2785,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_board(dir.path(), "Test", None).unwrap();
         let kando_dir = dir.path().join(".kando");
-        // templates directory does not exist — rename should fail gracefully.
+        // templates directory does not exist, so rename should fail gracefully.
         let result = rename_template(&kando_dir, "bug", "defect");
         assert!(result.is_err());
     }

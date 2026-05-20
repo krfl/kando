@@ -390,7 +390,7 @@ fn build_name_rename_map(kando_dir: &Path) -> HashMap<String, String> {
             continue;
         }
         let Some(from_name) = v.get("from_name").and_then(|f| f.as_str()) else {
-            continue; // pre-upgrade entry without from_name — skip
+            continue; // pre-upgrade entry without from_name, skip
         };
         let Some(to_name) = v.get("title").and_then(|t| t.as_str()) else {
             continue;
@@ -1687,7 +1687,7 @@ mod tests {
             (&ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "Backlog", "In Progress"),
         ]);
 
-        // Card is NOT completed — still in-progress
+        // Card is NOT completed, still in-progress
         let mut card = Card::new("1".into(), "Card 1".into());
         card.created = now - chrono::TimeDelta::days(3);
 
@@ -2121,7 +2121,7 @@ mod tests {
         write_activity_log(&kando_dir, &[
             (&move_ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(), "1", "OldName", "Done"),
         ]);
-        // Legacy entry without from_name — should be skipped
+        // Legacy entry without from_name, should be skipped
         append_activity_lines(&kando_dir, &[
             r#"{"ts":"2025-07-01T10:00:00Z","action":"col-rename","id":"new-slug","title":"NewName","from":"old-slug"}"#,
         ]);

@@ -10,7 +10,7 @@ use crate::app::{AppState, Mode, NotificationLevel, RiskLevel, TextBuffer};
 use kando_core::board::Board;
 
 pub fn render_status_bar(f: &mut Frame, area: Rect, state: &AppState, board: &Board) {
-    // Full-line modes: Filter, Input, Confirm — take over entire bar
+    // Full-line modes (Filter, Input, Confirm) take over the entire bar
     if let Some(line) = render_full_line_mode(state) {
         let paragraph = Paragraph::new(line).style(Theme::status_style());
         f.render_widget(paragraph, area);
@@ -151,7 +151,7 @@ fn build_center_zone<'a>(state: &'a AppState, avail_width: usize) -> Vec<Span<'a
         };
 
         if notif_width >= avail_width {
-            // Notification wider than available — just show it truncated
+            // Notification wider than available, so just show it truncated
             let truncated: String = notif.chars().take(avail_width).collect();
             return vec![Span::styled(truncated, Style::default().fg(color))];
         }
@@ -185,7 +185,7 @@ fn build_center_zone<'a>(state: &'a AppState, avail_width: usize) -> Vec<Span<'a
             Span::raw(" ".repeat(pad_right)),
         ]
     } else {
-        // No notification — just fill with spaces
+        // No notification, so just fill with spaces
         vec![Span::raw(" ".repeat(avail_width))]
     }
 }
@@ -200,13 +200,13 @@ fn cursor_spans(buf: &TextBuffer) -> Vec<Span<'_>> {
     let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
 
     if buf.cursor >= char_count {
-        // Cursor at end — show reversed space as block cursor
+        // Cursor at end: show reversed space as block cursor
         vec![
             Span::raw(format!(" {}", before)),
             Span::styled(" ", cursor_style),
         ]
     } else {
-        // Cursor in middle — reverse the char under cursor
+        // Cursor in middle: reverse the char under cursor
         let cursor_char: String = buf.input.chars().nth(buf.cursor).unwrap().to_string();
         let after: String = buf.input.chars().skip(buf.cursor + 1).collect();
         vec![

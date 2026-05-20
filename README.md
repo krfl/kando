@@ -6,7 +6,7 @@ A keyboard-first Kanban board that runs right in your terminal.
 
 ## Why Kando?
 
-Your board is plain text. Cards are Markdown files with TOML frontmatter, columns are directories, and the whole thing lives in a `.kando/` folder you can commit alongside your code. No server, no browser, no account — just files you can grep, diff, and pipe to whatever you want. Kando adds vim-style navigation, real kanban mechanics (WIP limits, cycle-time metrics, staleness policies), and a scriptable CLI on top.
+Your board is plain text. Cards are Markdown files with TOML frontmatter, columns are directories, and the whole thing lives in a `.kando/` folder you can commit alongside your code. No server, no browser, no account. Just files you can grep, diff, and pipe to whatever you want. On top of that, Kando gives you vim-style navigation, real kanban mechanics (WIP limits, cycle-time metrics, staleness policies), and a scriptable CLI.
 
 ## Requirements
 
@@ -31,7 +31,7 @@ kando init
 kando
 ```
 
-The help panel opens automatically on first launch. Press `?` to reopen it at any time — it has two pages: keybinding reference and concepts. You can also have Kando handle syncing your board to git. See the section on [Team Collaboration](#team-collaboration) for more details.
+The help panel opens automatically on first launch. Press `?` to reopen it at any time. It has two pages: a keybinding reference and a concepts overview. You can also have Kando handle syncing your board to git. See the section on [Team Collaboration](#team-collaboration) for more details.
 
 ## The Board
 
@@ -137,7 +137,7 @@ Press `.` to repeat the last mutation. The status bar shows what `.` will do (e.
 | Hide/show column | `hide col` / `show col` | Toggles column visibility |
 | Set WIP limit | `wip: 3` / `wip: none` | Sets or clears WIP limit on focused column |
 
-The hint is color-coded by risk: destructive actions (delete, remove column) appear in bold yellow, all others use the default foreground color. Destructive actions always require confirmation — `.` opens the prompt, you must press `y` to proceed.
+The hint is color-coded by risk: destructive actions (delete, remove column) appear in bold yellow, all others use the default foreground color. Destructive actions always require confirmation. Pressing `.` opens the prompt, and you have to hit `y` to go through with it.
 
 ### Searching and Filtering
 
@@ -164,7 +164,7 @@ Press `Enter` on a card to see its full content in a detail pane. From there:
 - `Esc` or `q` - Close detail view
 
 ## Piping
-Kando lets you pipe any card's raw file contents to a shell command, making it composable with the Unix ecosystem: Clipboard utilities, APIs, AI agents, issue trackers or your own scripts. The card is never modified — piping is a read-only operation.
+Kando lets you pipe any card's raw file contents to a shell command, making it composable with the Unix ecosystem: Clipboard utilities, APIs, AI agents, issue trackers or your own scripts. The card itself is never modified, since piping is a read-only operation.
 
 ### Environment variables
 Every pipe command also receives the following environment variables so
@@ -200,7 +200,7 @@ kando sync-status
 
 How it works:
 - Kando creates a "shadow clone" of your git repo in a hidden directory
-- **TUI:** Changes are committed and pushed automatically as you work — no manual sync needed
+- **TUI:** Changes are committed and pushed automatically as you work. No manual sync needed.
 - **CLI:** Changes are written to disk only. Run `kando sync` after CLI mutations to push them to the remote
 - When offline, changes are saved locally and synced when you're back online
 - Each team member can work on the same board, and changes merge automatically
@@ -355,7 +355,7 @@ kando hooks remove post-create   # delete a hook
 kando hooks list                 # list all hooks and their status
 ```
 
-**Example — announce new cards with `say` on macOS:**
+**Example: announce new cards with `say` on macOS**
 
 ```sh
 kando hooks add post-create
@@ -386,7 +386,7 @@ Hooks run in background threads so they never block the TUI. The first line of s
 
 ### JSON Output
 
-All commands produce human-readable output by default. Pass the global `--json` flag to get structured JSON instead — useful for scripting and automation:
+All commands produce human-readable output by default. For scripting and automation, pass the global `--json` flag to get structured JSON instead:
 
 ```sh
 kando --json list
@@ -406,7 +406,7 @@ Mutation commands return result objects (e.g. `{"id", "title", "column"}`). Read
 
 ### CSV Output
 
-All tabular commands support `--csv` for spreadsheet-friendly output. Fields containing commas or quotes are automatically escaped per RFC 4180. `--csv` conflicts with `--json` — use one or the other.
+All tabular commands support `--csv` for spreadsheet-friendly output. Fields containing commas or quotes are automatically escaped per RFC 4180. `--csv` conflicts with `--json`, so pick one or the other.
 
 ```sh
 kando list --csv

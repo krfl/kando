@@ -44,10 +44,10 @@ pub fn staleness(card: &Card, policies: &Policies, now: DateTime<Utc>) -> Stalen
 
 /// Classify a card's staleness as a human-readable label for the filter picker.
 ///
-/// - `"new"` — created today (same UTC day)
-/// - `"normal"` — fresh but not new
-/// - `"stale"` — past the bubble-up threshold
-/// - `"very stale"` — past 2× the bubble-up threshold
+/// - `"new"`: created today (same UTC day)
+/// - `"normal"`: fresh but not new
+/// - `"stale"`: past the bubble-up threshold
+/// - `"very stale"`: past 2× the bubble-up threshold
 pub fn card_staleness_label(card: &Card, policies: &Policies, now: DateTime<Utc>) -> &'static str {
     match staleness(card, policies, now) {
         Staleness::VeryStale => "very stale",
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn run_auto_close_at_exact_boundary_is_moved() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        // Exactly 30 days ago — should meet the >= threshold
+        // Exactly 30 days ago, should meet the >= threshold
         let mut card = Card::new("1".into(), "Boundary".into());
         card.updated = Utc.with_ymd_and_hms(2025, 5, 16, 12, 0, 0).unwrap();
 
@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn run_auto_close_one_day_short_not_moved() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        // 29 days ago — one day short of the 30-day threshold
+        // 29 days ago, one day short of the 30-day threshold
         let mut card = Card::new("1".into(), "Almost Stale".into());
         card.updated = Utc.with_ymd_and_hms(2025, 5, 17, 12, 0, 0).unwrap();
 
@@ -679,7 +679,7 @@ mod tests {
     #[test]
     fn run_auto_archive_at_exact_threshold_is_moved() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        // Exactly 7 days ago — should meet the >= threshold
+        // Exactly 7 days ago, should meet the >= threshold
         let completed = Utc.with_ymd_and_hms(2025, 6, 8, 12, 0, 0).unwrap();
         let mut card = Card::new("1".into(), "Boundary".into());
         card.completed = Some(completed);
@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn run_auto_archive_one_day_short_not_moved() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        // 6 days ago — one short of 7-day threshold
+        // 6 days ago, one short of 7-day threshold
         let completed = Utc.with_ymd_and_hms(2025, 6, 9, 12, 0, 0).unwrap();
         let mut card = Card::new("1".into(), "Almost ready".into());
         card.completed = Some(completed);
@@ -739,9 +739,9 @@ mod tests {
     #[test]
     fn run_auto_archive_uses_completed_over_updated() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        // completed is recent (3 days ago — below 7-day threshold)
+        // completed is recent (3 days ago, below 7-day threshold)
         let completed = Utc.with_ymd_and_hms(2025, 6, 12, 12, 0, 0).unwrap();
-        // updated is very old (30 days ago — above threshold)
+        // updated is very old (30 days ago, above threshold)
         let updated = Utc.with_ymd_and_hms(2025, 5, 16, 12, 0, 0).unwrap();
         let mut card = Card::new("1".into(), "Recently completed".into());
         card.completed = Some(completed);
@@ -784,10 +784,10 @@ mod tests {
     fn run_auto_archive_only_moves_from_done_not_other_columns() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
         let old = Utc.with_ymd_and_hms(2025, 5, 1, 12, 0, 0).unwrap(); // 45 days ago
-        // Old card in backlog — must NOT be archived (only "done" is in scope)
+        // Old card in backlog, must NOT be archived (only "done" is in scope)
         let mut backlog_card = Card::new("1".into(), "Backlog old".into());
         backlog_card.updated = old;
-        // Old card in done — must be archived
+        // Old card in done, must be archived
         let mut done_card = Card::new("2".into(), "Done old".into());
         done_card.completed = Some(old);
 
@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn run_auto_archive_future_completed_not_moved() {
         let now = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
-        // completed is in the future — signed_duration_since < threshold
+        // completed is in the future, so signed_duration_since < threshold
         let completed = Utc.with_ymd_and_hms(2025, 7, 1, 12, 0, 0).unwrap();
         let mut card = Card::new("1".into(), "Future done".into());
         card.completed = Some(completed);

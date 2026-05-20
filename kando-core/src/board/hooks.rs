@@ -472,7 +472,7 @@ mod tests {
     fn fire_hook_no_hooks_dir_is_noop() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        // No hooks/ dir — should not panic
+        // No hooks/ dir, should not panic
         fire_hook(tmp.path(), "create", "001", "Test Card", &[]);
     }
 
@@ -1064,7 +1064,7 @@ mod tests {
         let path = hooks_dir.join("post-create");
         fs::write(&path, "custom content").unwrap();
 
-        // scaffold_hook unconditionally writes — caller is responsible for existence check
+        // scaffold_hook unconditionally writes. The caller is responsible for existence checks.
         scaffold_hook(tmp.path(), "post-create").unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert_ne!(content, "custom content");
@@ -1286,7 +1286,7 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, val: &str) -> Self {
             let original = std::env::var(key).ok();
-            // SAFETY: serialized by TEST_LOCK — no other test touches env concurrently.
+            // SAFETY: serialized by TEST_LOCK, so no other test touches env concurrently.
             unsafe { std::env::set_var(key, val) };
             Self { key, original }
         }

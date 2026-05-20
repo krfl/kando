@@ -267,7 +267,7 @@ pub fn render_metrics(f: &mut Frame, area: Rect, board: &Board, scroll: &mut u16
             .fold(0.0f64, f64::max);
         let bar_max = (inner.width as usize).saturating_sub(max_name_len + 46).clamp(4, 30);
 
-        // Column header — each data field is " %6.1fd" (8 chars), separated by "  "
+        // Column header: each data field is " %6.1fd" (8 chars), separated by "  "
         lines.push(Line::from(Span::styled(
             format!(
                 "  {:<nw$} {:<bw$} {:>8}  {:>8}  {:>8}",

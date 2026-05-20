@@ -83,7 +83,7 @@ pub fn render_card_detail(f: &mut Frame, area: Rect, card: &Card, policies: &Pol
         ];
         if !reason.is_empty() {
             spans.push(Span::styled(
-                format!(" — {reason}"),
+                format!(": {reason}"),
                 Style::default().fg(Theme::BLOCKER),
             ));
         }

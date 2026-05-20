@@ -180,7 +180,7 @@ pub struct Card {
 }
 
 /// A card template for creating new cards with preset fields.
-/// Display name is derived from the slug via `slug_to_name()` — no stored name field.
+/// Display name is derived from the slug via `slug_to_name()`. There is no stored name field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Template {
     #[serde(default)]
@@ -242,7 +242,7 @@ impl Card {
 
     /// Whether this card is past its due date.
     ///
-    /// A card due *today* is NOT overdue — only `due < today`.
+    /// A card due *today* is NOT overdue. Only `due < today` counts.
     pub fn is_overdue(&self, today: NaiveDate) -> bool {
         self.due.is_some_and(|d| d < today)
     }
@@ -377,7 +377,7 @@ pub fn card_is_visible(
 ///
 /// The filter string is split on whitespace into individual terms.
 /// Each term must fuzzy-match at least one card field (title, any tag,
-/// or any assignee) — OR across fields, AND across terms.
+/// or any assignee). OR across fields, AND across terms.
 ///
 /// Special prefixes:
 /// - `@` is stripped so `@alice` matches the assignee `alice`
@@ -427,7 +427,7 @@ pub fn card_matches_filter(card: &Card, filter: &str, matcher: &SkimMatcherV2) -
 /// Maps non-alphanumeric chars to `-`, collapses runs, trims leading/trailing
 /// hyphens, and falls back to `"col"` if the result would be empty.
 ///
-/// **Does not** guard the `"archive"` reserved slug — callers that need that
+/// **Does not** guard the `"archive"` reserved slug. Callers that need that
 /// guarantee should use [`slug_for_rename`] or [`generate_slug`].
 pub fn slug_from_name(name: &str) -> String {
     let base: String = name
@@ -472,7 +472,7 @@ pub fn slug_for_rename(name: &str) -> Result<String, &'static str> {
 /// → fall back to `"col"` if empty → append `-2`, `-3`, … for uniqueness.
 pub fn generate_slug(name: &str, existing: &[Column]) -> String {
     let base = slug_from_name(name);
-    // "archive" is a reserved slug — never generate it directly.
+    // "archive" is a reserved slug, never generate it directly.
     let base = if base == "archive" { "archive-col".to_string() } else { base };
     // Ensure uniqueness.
     if !existing.iter().any(|c| c.slug == base) {
@@ -969,7 +969,7 @@ mod tests {
         let mut card = card_with_meta("Login feature", &[], &[]);
         card.created = Utc.with_ymd_and_hms(2025, 6, 14, 12, 0, 0).unwrap();
         card.updated = now;
-        // Text filter matches, staleness filter would NOT match — text takes precedence
+        // Text filter matches, staleness filter would NOT match; text takes precedence
         assert!(card_is_visible(&card, Some("login"), &[], &[], &["stale".to_string()], false, &policies, now, &matcher));
     }
 
@@ -1197,7 +1197,7 @@ mod tests {
         blocked.blocked = Some(String::new());
         col.cards = vec![normal, blocked];
         col.sort_cards();
-        // Both Normal priority, but sort is by priority then updated — blocked doesn't affect sort
+        // Both Normal priority, but sort is by priority then updated; blocked doesn't affect sort
         // The sort is: priority.sort_key then updated desc
         // Since both are Normal, the one with a later updated time sorts first
         assert_eq!(col.cards.len(), 2);
@@ -1364,8 +1364,8 @@ mod tests {
 
     #[test]
     fn slug_from_name_does_not_guard_archive_reservation() {
-        // slug_from_name does NOT remap the reserved "archive" slug —
-        // that guard lives in cmd_col_rename. This is the documented distinction
+        // slug_from_name does NOT remap the reserved "archive" slug.
+        // That guard lives in cmd_col_rename, which is the documented distinction
         // between slug_from_name and generate_slug.
         assert_eq!(slug_from_name("Archive"), "archive");
     }
@@ -1636,7 +1636,7 @@ mod tests {
     #[test]
     fn generate_template_slug_short_alpha_name() {
         // "Col" contains alphanumeric chars so slug_from_name produces "col",
-        // which is a regular slug — not the empty/unicode fallback path.
+        // which is a regular slug, not the empty/unicode fallback path.
         assert_eq!(generate_template_slug("Col", &[]), "col");
     }
 

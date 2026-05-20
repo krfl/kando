@@ -94,7 +94,7 @@ fn build_concepts(lines: &mut Vec<Line<'static>>, key: Style, dim: Style) {
 
     lines.push(Line::from(Span::styled("Plain-text by design", heading)));
     lines.push(Line::from(Span::styled(
-        "Board lives in .kando/ — cards are markdown files with TOML",
+        "Board lives in .kando/. Cards are markdown files with TOML",
         dim,
     )));
     lines.push(Line::from(Span::styled(
