@@ -1540,9 +1540,9 @@ fn handle_repeat_last(
                 }
                 match sort_key.as_str() {
                     "priority" => col.sort_cards(),
-                    "created" => col.cards.sort_by(|a, b| b.created.cmp(&a.created)),
-                    "updated" => col.cards.sort_by(|a, b| b.updated.cmp(&a.updated)),
-                    "title" => col.cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+                    "created" => col.cards.sort_by_key(|c| std::cmp::Reverse(c.created)),
+                    "updated" => col.cards.sort_by_key(|c| std::cmp::Reverse(c.updated)),
+                    "title" => col.cards.sort_by_key(|c| c.title.to_lowercase()),
                     _ => {
                         state.notify_error(format!("Unknown sort key: {sort_key}"));
                         return Ok(None);
@@ -3229,15 +3229,15 @@ fn handle_input_confirm(
                                     state.notify("Sorted by priority");
                                 }
                                 "created" => {
-                                    col.cards.sort_by(|a, b| b.created.cmp(&a.created));
+                                    col.cards.sort_by_key(|c| std::cmp::Reverse(c.created));
                                     state.notify("Sorted by created");
                                 }
                                 "updated" => {
-                                    col.cards.sort_by(|a, b| b.updated.cmp(&a.updated));
+                                    col.cards.sort_by_key(|c| std::cmp::Reverse(c.updated));
                                     state.notify("Sorted by updated");
                                 }
                                 "title" => {
-                                    col.cards.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                                    col.cards.sort_by_key(|c| c.title.to_lowercase());
                                     state.notify("Sorted by title");
                                 }
                                 _ => {}
