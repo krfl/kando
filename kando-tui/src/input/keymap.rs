@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn input_enter_confirms() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn input_esc_cancels() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn input_ctrl_a_homes() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn input_ctrl_e_ends() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn input_ctrl_w_deletes_word() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn input_char_inserts() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn input_backspace_deletes() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn input_left_right_moves() {
         let mode = Mode::Input {
-            prompt: "Title".into(),
+            prompt: "Title",
             buf: crate::app::TextBuffer::empty(),
             on_confirm: crate::app::InputTarget::NewCardTitle,
             completion: None,
@@ -776,7 +776,7 @@ mod tests {
     #[test]
     fn confirm_y_confirms() {
         let mode = Mode::Confirm {
-            prompt: "Delete?".into(),
+            prompt: "Delete?",
             on_confirm: crate::app::ConfirmTarget::DeleteCard("1".into()),
         };
         assert_eq!(map_key(key(KeyCode::Char('y')), &mode), Action::Confirm);
@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn confirm_n_denies() {
         let mode = Mode::Confirm {
-            prompt: "Delete?".into(),
+            prompt: "Delete?",
             on_confirm: crate::app::ConfirmTarget::DeleteCard("1".into()),
         };
         assert_eq!(map_key(key(KeyCode::Char('n')), &mode), Action::Deny);
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn picker_j_k_navigates() {
         let mode = Mode::Picker {
-            title: "Tags".into(),
+            title: "Tags",
             items: vec![],
             selected: 0,
             target: crate::app::PickerTarget::TagFilter,
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn picker_enter_confirms() {
         let mode = Mode::Picker {
-            title: "Tags".into(),
+            title: "Tags",
             items: vec![],
             selected: 0,
             target: crate::app::PickerTarget::TagFilter,

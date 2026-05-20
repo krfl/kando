@@ -1111,7 +1111,7 @@ mod tests {
         assert_eq!(board.columns[0].slug, "backlog");
         assert_eq!(board.columns[1].slug, "in-progress");
         assert_eq!(board.columns[1].wip_limit, Some(3));
-        assert_eq!(board.columns[3].hidden, true);
+        assert!(board.columns[3].hidden);
     }
 
     #[test]
@@ -2300,8 +2300,8 @@ mod tests {
         let reloaded = load_board(&kando_dir).unwrap();
         assert_eq!(reloaded.columns[0].wip_limit, Some(5));
         assert_eq!(reloaded.columns[1].wip_limit, None);
-        assert_eq!(reloaded.columns[2].hidden, true);
-        assert_eq!(reloaded.columns[3].hidden, false);
+        assert!(reloaded.columns[2].hidden);
+        assert!(!reloaded.columns[3].hidden);
         assert_eq!(reloaded.columns[0].name, "Backlog");
         assert_eq!(reloaded.columns[1].name, "In Progress");
     }
