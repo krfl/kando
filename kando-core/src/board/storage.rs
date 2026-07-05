@@ -358,6 +358,11 @@ pub fn load_board(kando_dir: &Path) -> Result<Board, StorageError> {
 }
 
 /// Save the full board back to the .kando directory.
+///
+/// WARNING: this is destructive. Any card file on disk that isn't present in
+/// `board` gets deleted (see the per-column cleanup below), so `board` has to be
+/// a freshly loaded and fully mutated board. Saving a stale or partial board
+/// will silently drop cards. Every mutation path must be load -> mutate -> save.
 pub fn save_board(kando_dir: &Path, board: &Board) -> Result<(), StorageError> {
     let columns_dir = kando_dir.join("columns");
 
@@ -494,8 +499,14 @@ fn load_card(path: &Path) -> Result<Card, StorageError> {
 }
 
 /// Serialize a card to the frontmatter + markdown body format.
+///
+/// The frontmatter is written by hand rather than through `toml::to_string` on
+/// purpose. It keeps the field order fixed so real boards on disk get small,
+/// readable diffs. When you add a field, append it here and leave the existing
+/// ones where they are; a renamed field needs a serde alias on the read path so
+/// older files still load.
 fn serialize_card(card: &Card) -> String {
-    // Build frontmatter manually for clean formatting
+    // Build frontmatter by hand to keep the field order stable (see fn doc).
     let mut fm = String::new();
     fm.push_str(&format!("id = {:?}\n", card.id));
     fm.push_str(&format!("title = {:?}\n", card.title));

@@ -288,7 +288,10 @@ impl Board {
         if card.started.is_none() && to_col > 0 {
             card.started = Some(Utc::now());
         }
-        // Set or clear completed based on target column
+        // Set or clear completed based on the target column's slug. Mind the
+        // asymmetry with started above: started is positional (any move out of
+        // column 0), completed keys on the "done" slug specifically. That is
+        // intentional, so don't try to make the two consistent.
         if self.columns[to_col].slug == "done" {
             if card.completed.is_none() {
                 card.completed = Some(Utc::now());

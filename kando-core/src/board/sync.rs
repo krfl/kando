@@ -71,11 +71,25 @@ pub fn check_ssh_agent(remote_url: &str) -> bool {
     }
 }
 
+/// Base `git` command with output pinned to the C locale.
+///
+/// pull() and pull_shadow() decide online/offline by matching git's own
+/// messages ("Already up to date", "no tracking information"), which git
+/// localizes. Every git invocation goes through here so that text stays in
+/// English no matter what LANG the user happens to have set. Commands that only
+/// check exit codes don't strictly need it, but routing them through the same
+/// helper keeps things uniform and safe if someone later matches their output.
+fn git_base() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.env("LC_ALL", "C");
+    cmd
+}
+
 /// Build a git Command with SSH connection multiplexing enabled.
 /// This reuses a single SSH connection for multiple git operations,
 /// avoiding repeated passphrase prompts within the same session.
 fn git_cmd(shadow_path: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = git_base();
     cmd.current_dir(shadow_path);
 
     // Set up SSH ControlMaster for connection reuse.
@@ -91,7 +105,7 @@ fn git_cmd(shadow_path: &Path) -> Command {
 
 /// Get the remote URL of the git repo.
 pub fn get_remote_url(repo_root: &Path) -> Result<String, SyncError> {
-    let output = Command::new("git")
+    let output = git_base()
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_root)
         .output()?;
@@ -168,7 +182,7 @@ fn clone_shadow(remote_url: &str, shadow_path: &Path, branch: &str) -> Result<()
     std::fs::create_dir_all(shadow_path)?;
 
     // Try to clone with the specific branch
-    let output = Command::new("git")
+    let output = git_base()
         .args([
             "clone",
             "--branch",
@@ -184,7 +198,7 @@ fn clone_shadow(remote_url: &str, shadow_path: &Path, branch: &str) -> Result<()
         let _ = std::fs::remove_dir_all(shadow_path);
         std::fs::create_dir_all(shadow_path)?;
 
-        let output = Command::new("git")
+        let output = git_base()
             .args(["clone", remote_url, &shadow_path.to_string_lossy()])
             .output()?;
 
@@ -195,13 +209,13 @@ fn clone_shadow(remote_url: &str, shadow_path: &Path, branch: &str) -> Result<()
         }
 
         // Create and checkout the branch
-        let _ = Command::new("git")
+        let _ = git_base()
             .args(["checkout", "-b", branch])
             .current_dir(shadow_path)
             .output();
 
         // Set push upstream so first push creates the remote branch
-        let _ = Command::new("git")
+        let _ = git_base()
             .args(["config", "push.default", "current"])
             .current_dir(shadow_path)
             .output();
@@ -630,6 +644,30 @@ mod tests {
 
     // Note: SSH URL tests depend on the environment (SSH_AUTH_SOCK),
     // so we only test the URL classification above.
+
+    fn lc_all_of(cmd: &Command) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("LC_ALL"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn git_base_pins_c_locale() {
+        // pull()/pull_shadow() match git's English output to detect offline and
+        // new-branch states, so every git command must force LC_ALL=C regardless
+        // of the caller's locale. If this env drops off, offline detection
+        // breaks silently on localized machines.
+        assert_eq!(lc_all_of(&git_base()).as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn git_cmd_inherits_c_locale() {
+        // git_cmd builds on git_base, so the shadow-repo commands that do the
+        // string matching get the pinned locale too.
+        let cmd = git_cmd(Path::new("/tmp/kando-test-shadow"));
+        assert_eq!(lc_all_of(&cmd).as_deref(), Some("C"));
+    }
 
     // -----------------------------------------------------------------------
     // copy_dir_contents tests
